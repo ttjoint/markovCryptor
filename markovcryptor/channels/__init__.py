@@ -1,6 +1,6 @@
 """Channels: every steganography algorithm behind one uniform interface.
 
-The contract is three operations -- :meth:`Channel.probe` /> :meth:`Channel.embed`
+The contract is three operations -- :meth:`Channel.probe` / :meth:`Channel.embed`
 / :meth:`Channel.extract` -- plus metadata rich enough to build a UI from. Options
 stay channel-specific (:mod:`options`) so an adapter never grows an ``if`` ladder.
 

@@ -1,4 +1,9 @@
-"""Markov based Chinese cover text steganography."""
+"""Multi-channel steganography: Chinese prose, still photos, animated GIFs.
+
+The convenience entry points below are the older single-channel API. For new
+code use :class:`markovcryptor.engine.Engine`, which dispatches to every channel
+and is what the CLI, the web API and the batch runner are built on.
+"""
 
 from .codec import CodecStats, MarkovStegoCodec, decode_with_models, identify_model
 from .compression import TextModel

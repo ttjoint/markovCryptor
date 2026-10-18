@@ -19,10 +19,9 @@ and channels may override it via ``Channel.concurrency_hint``.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 import json
-import os
 from pathlib import Path
 import time
 import uuid
@@ -202,6 +201,10 @@ class BatchRunner:
             total=len(spec.items),
             started_at=time.time(),
         )
+        # A runner that was cancelled once must be reusable: a caller who stops
+        # one job and starts another would otherwise get an instantly
+        # "cancelled" status with nothing attempted.
+        self._cancelled = False
         channel = self.engine.channel(spec.channel_id)
         workers = max(1, int(spec.max_workers))
         hint = getattr(channel, "concurrency_hint", None)
@@ -224,10 +227,23 @@ class BatchRunner:
             on_progress(status)
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(self._run_one, spec, item): item for item in pending
-            }
-            for future in as_completed(futures):
+            # Submit lazily, one slot per worker, and top up only after a result
+            # arrives. Submitting everything up front looks equivalent but is
+            # not: ``cancel()`` could then only stop futures that had not
+            # started yet, so with a handful of small items already queued the
+            # job ran to completion and reported items written *after* the user
+            # asked it to stop. Keeping the queue in ``todo`` means a cancel is
+            # honoured before the next item is even read from disk.
+            todo = list(pending)
+            futures: dict[Future, Item] = {}
+
+            def top_up() -> None:
+                while todo and len(futures) < workers and not self._cancelled:
+                    item = todo.pop(0)
+                    futures[pool.submit(self._run_one, spec, item)] = item
+
+            top_up()
+            while futures:
                 if self._cancelled:
                     # ``abort`` already set "failed"; only an explicit cancel
                     # while still running means "cancelled".
@@ -236,22 +252,32 @@ class BatchRunner:
                     for remaining in futures:
                         remaining.cancel()
                     break
-                result = future.result()
-                self.checkpoint.record(result)
-                status.results.append(result)
-                status.current = result.source
-                if result.ok:
-                    status.succeeded += 1
-                else:
-                    status.failed += 1
-                if on_progress:
-                    on_progress(status)
-                if not result.ok and spec.on_error == "abort":
-                    status.state = "failed"
-                    self._cancelled = True
+                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                for future in done:
+                    futures.pop(future, None)
+                    if future.cancelled():
+                        continue
+                    result = future.result()
+                    self.checkpoint.record(result)
+                    status.results.append(result)
+                    status.current = result.source
+                    if result.ok:
+                        status.succeeded += 1
+                    else:
+                        status.failed += 1
+                    if on_progress:
+                        on_progress(status)
+                    if not result.ok and spec.on_error == "abort":
+                        status.state = "failed"
+                        self._cancelled = True
+                top_up()
 
         if status.state == "running":
-            status.state = "done"
+            # The cancellation may have arrived while the last in-flight item was
+            # finishing, in which case the loop above exited normally instead of
+            # through the ``break``. Reporting "done" here would tell the caller
+            # a job finished when they had asked it to stop.
+            status.state = "cancelled" if self._cancelled else "done"
         status.elapsed = time.time() - status.started_at
         if on_progress:
             on_progress(status)

@@ -1070,25 +1070,38 @@ CLI 全局 `--log-level` / `--log-file`；新增 `docs/CHANNELS.md`、`docs/API.
 
 ---
 
-## 附录 A：现有代码到目标结构的映射
+## 附录 A：最终模块结构
 
-| 现文件 | 行数 | 去向 |
+迁移阶段 0~7 已全部落地，实际结构与最初的规划稿有若干出入（见下表「偏差」列），
+这里记录的是**已完成的事实**，不是计划。
+
+| 模块 | 行数 | 说明 |
 |---|---|---|
-| `arith.py` | 183 | `core/arith.py` 原样 |
-| `progress.py` | 34 | `core/progress.py` 原样 |
-| `codec.py` | 329 | `core/crypto.py` + `channels/chinese/codec.py` |
-| `compression.py` | 328 | `channels/chinese/compression.py` |
-| `model.py` | 472 | `channels/chinese/model.py` + `engine/models.py`（加载/缓存） |
-| `punctuation.py` | 501 | `channels/chinese/punctuation.py` |
-| `image_stego.py` | 869 | `core/{framing,ecc,keys}.py` + `channels/image/dct_qim.py` |
-| `gif_stego.py` | 362 | `channels/gif/encoder.py` |
-| `handshake.py` | 129 | `core/crypto.py` + `engine/session.py` |
-| `cli.py` | 187 | `interfaces/cli/` |
-| `gui.py` | 840 | `interfaces/desktop/app.py` + `viewmodels.py` |
-| `chat_gui.py` | 494 | `interfaces/desktop/chat.py` + `channels/image` |
-| `tools/bench.py` | 353 | `tools/bench.py`（改写为调 Engine） |
-| 3 个测试文件 | 727 | `tests/unit/`（拆分） |
+| `cli.py` | 380 | 命令行入口，薄：解析参数后调 `Engine` |
+| `engine.py` | 240 | 模型缓存 + 信道解析 + 日志/指标 |
+| `web.py` | 554 | 本机 Web API（含 `/metrics`、`/jobs`、静态 UI） |
+| `webui/index.html` | ~620 | 网页界面，单文件零依赖 |
+| `jobs.py` | 348 | 批处理：线程池、JSONL 断点、逐项结果 |
+| `observability.py` | 190 | 行式日志 + 进程内指标 |
+| `channels/`（8 模块） | 1 016 | `Channel` 协议、三适配器、参数 schema、注册表 |
+| `core/`（8 模块） | 860 | 错误、帧、ECC、密钥、加密、算术编码、进度 |
+| `codec.py` / `model.py` / `punctuation.py` / `compression.py` | 1 599 | 中文信道的算法内核 |
+| `image_stego.py` | 612 | 图片信道 DCT-QIM 内核 |
+| `gif_stego.py` | 362 | GIF 动图信道 |
+| `handshake.py` | 97 | X25519 握手协议（纯逻辑，无 UI 依赖） |
+| `interfaces/desktop/legacy/` | 1 346 | **冻结**的 Tk 界面，不再演进 |
 
+### 与原规划稿的偏差
+
+| 原计划 | 实际 | 理由 |
+|---|---|---|
+| `engine/session.py` | 未创建 | 握手的纯逻辑已在 `handshake.py`，且没有 REST 会话端点；无 Web 聊天面板，拆出来只是空壳 |
+| `interfaces/cli/`（多文件） | 保持单文件 `cli.py` | 380 行不值得拆包；子命令名与参数不变是硬需求，拆包不带来收益 |
+| `channels/chinese/`（子包） | 单文件 `channels/chinese.py` | 适配器只有 186 行，内核仍在顶层；建子包会让"内核在哪"更难找 |
+| `channels/image/dct_qim.py` | 内核留在 `image_stego.py` | 内核 612 行、含大量调参常量；搬进 `channels/` 只换位置不换结构 |
+| `tools/bench.py` 改写为调 `Engine` | **不改**（仍直接调内核） | bench 要记 `lead_profile`/`max_block_change`/`resized` 等内核指标，而 `EmbedReport.distortion` 只是笼统 `dict`，`lead_profile` 在统一接口里无处安放。为让 bench 走 Engine 而把内核细节塞进公共接口是往错误方向重构 |
+| `interfaces/desktop/app.py` + `viewmodels.py` | 直接冻结，未重写 | 网页界面取代桌面；重写一个即将退役的 UI 没有意义 |
+| `tests/unit/`（拆分） | 保持扁平 `tests/` | 14 个测试文件按信道/层命名已足够清晰；拆目录会让 `import fixtures` 变复杂 |
 ## 附录 B：现有好设计（重构时必须保留）
 
 - `progress.ProgressFn` + `Cancelled`：长任务取消的正确形态

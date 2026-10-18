@@ -11,6 +11,7 @@ from .channels import Carrier, CarrierKind
 from .codec import MarkovStegoCodec
 from .core.errors import StegoError
 from .engine import Config, Engine
+from .jobs import ANIMATION_SUFFIXES, TEXT_SUFFIXES
 from .web import DEFAULT_HOST, DEFAULT_PORT
 from .model import (
     MarkovModel,
@@ -127,10 +128,6 @@ class _ConsoleProgress:
         print("\r" + " " * 70 + "\r", end="", file=sys.stderr, flush=True)
 
 
-_TEXT_SUFFIXES = {".txt", ".md", ".csv", ".json", ".log"}
-_ANIMATION_SUFFIXES = {".gif", ".webp", ".apng", ".webm"}
-
-
 def _command_batch(args, progress: "_ConsoleProgress") -> int:
     """Batch embed/extract a folder. Returns a shell exit code."""
     from .jobs import BatchRunner, JobSpec, discover, plan_targets
@@ -215,12 +212,12 @@ def _carrier_from_file(path: Path) -> Carrier:
     validates the bytes and names the real problem if they do not match.
     """
     suffix = path.suffix.lower()
-    if suffix in _TEXT_SUFFIXES:
+    if suffix in TEXT_SUFFIXES:
         return Carrier(kind=CarrierKind.TEXT,
                        load=lambda: read_text_file(path),
                        size_hint=path.stat().st_size if path.exists() else None,
                        media_type="text/plain", label=path.name)
-    kind = CarrierKind.ANIMATION if suffix in _ANIMATION_SUFFIXES else CarrierKind.IMAGE
+    kind = CarrierKind.ANIMATION if suffix in ANIMATION_SUFFIXES else CarrierKind.IMAGE
     return Carrier(kind=kind, load=path.read_bytes,
                    size_hint=path.stat().st_size if path.exists() else None,
                    label=path.name)

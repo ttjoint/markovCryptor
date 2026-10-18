@@ -26,7 +26,7 @@ from pathlib import Path
 import sys
 import threading
 import time
-from typing import Any, Iterable
+from typing import Any
 
 LOGGER_NAME = "markovcryptor"
 
@@ -123,27 +123,6 @@ def event(suffix: str, name: str, level: int = logging.INFO, **fields: Any) -> N
         pass
 
 
-def timed(suffix: str, name: str, **fields: Any):
-    """Context manager logging ``elapsed_ms`` on exit, or ``error`` on raise."""
-
-    class _Timer:
-        def __enter__(self) -> "_Timer":
-            self._start = time.perf_counter()
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> bool:
-            elapsed = (time.perf_counter() - self._start) * 1000
-            if exc is None:
-                event(suffix, name, elapsed_ms=round(elapsed, 1), **fields)
-            else:
-                event(suffix, name,
-                      level=logging.WARNING, elapsed_ms=round(elapsed, 1),
-                      error=type(exc).__name__, **fields)
-            return False
-
-    return _Timer()
-
-
 # --------------------------------------------------------------------- metrics
 
 @dataclass
@@ -205,11 +184,3 @@ def _key(name: str, labels: dict[str, str]) -> str:
 #: The process-wide instance.  Created eagerly so counters survive across
 #: requests without any wiring.
 METRICS = Metrics()
-
-
-def summarise(results: Iterable[Any]) -> dict[str, int]:
-    """Tally job results by outcome.  Used by both CLI and web job reporting."""
-    tally: Counter = Counter()
-    for result in results:
-        tally["failed" if getattr(result, "error", None) else "succeeded"] += 1
-    return dict(tally)

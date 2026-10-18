@@ -80,13 +80,12 @@ def _json_error(error: StegoError) -> JSONResponse:
 
 
 def _carrier_kind(text: str) -> CarrierKind:
+    # ``CarrierKind.of`` owns the message (legal values, then what arrived), so
+    # the CLI, the web API and a plain library call all explain it the same way.
     try:
-        return CarrierKind(text)
-    except ValueError:
-        raise HTTPException(
-            status_code=422,
-            detail=f"kind 必须是 {[k.value for k in CarrierKind]} 之一，收到 {text!r}",
-        ) from None
+        return CarrierKind.of(text)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
 
 
 def create_app(config: ApiConfig | None = None, *, engine: Engine | None = None) -> FastAPI:

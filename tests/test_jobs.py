@@ -15,7 +15,6 @@ No test here reads from a shared fixture folder on disk.
 from __future__ import annotations
 
 from io import BytesIO
-import json
 import shutil
 import tempfile
 import unittest
@@ -270,7 +269,26 @@ class BatchRunnerTest(_TempTree):
             on_progress=on_progress,
         )
         self.assertEqual(status.state, "cancelled")
+        # Deterministic, not a race: items are now submitted lazily, so after the
+        # first result cancels the job the remaining five are never read. (This
+        # used to be a coin flip -- everything was submitted up front, so a fast
+        # machine finished the whole batch before the assertion.)
+        self.assertEqual(status.succeeded + status.failed, 1)
         self.assertLess(status.succeeded + status.failed, status.total)
+
+    def test_a_cancelled_runner_can_be_reused(self):
+        """Cancelling one job must not poison the next."""
+        self.make_images(3)
+        engine = self.engine()
+        items = plan_targets(discover(self.inp, CarrierKind.IMAGE), self.out,
+                             suffix=".png")
+        runner = BatchRunner(engine)
+        runner.cancel()
+        status = runner.run(
+            JobSpec(channel_id="image", items=items, key=b"k", payload=b"p"),
+        )
+        self.assertEqual(status.state, "done", "runner 被上一次取消污染了")
+        self.assertEqual(status.succeeded, len(items))
 
     def test_concurrency_is_capped_by_the_channel_hint(self):
         """GIF re-encodes every frame; the channel says how many at once."""

@@ -24,10 +24,10 @@ from markovcryptor.channels import registry
 from markovcryptor.channels.chinese import ChineseChannel
 from markovcryptor.channels.gif import GifChannel
 from markovcryptor.channels.image import ImageChannel
-from markovcryptor.channels.options import GifOptions, ImageOptions, coerce
+from markovcryptor.channels.options import ImageOptions, coerce
 from markovcryptor.codec import MarkovStegoCodec
 from markovcryptor.model import MarkovModel
-from markovcryptor.core.errors import CapacityExceeded, InvalidInput, NoHiddenFrame
+from markovcryptor.core.errors import CapacityExceeded, InvalidInput
 
 import fixtures
 
@@ -49,6 +49,28 @@ def _model() -> MarkovModel:
     size is used -- it is a fixture, so the result is byte-for-byte reproducible.
     """
     return MarkovModel.train(fixtures.corpus_text(), vocabulary_size=512)
+
+
+class CarrierKindTest(unittest.TestCase):
+    def test_a_string_kind_is_normalised_at_construction(self):
+        """The caller may pass the enum member or its value.
+
+        Regression: ``kind="image"`` used to travel all the way into the first
+        channel and fail as ``'str' object has no attribute 'value'`` -- an error
+        that says nothing about the mistake. README's own example hit this.
+        """
+        carrier = Carrier.of_bytes(b"x", kind="image")
+        self.assertIs(carrier.kind, CarrierKind.IMAGE)
+        self.assertIs(Carrier(kind="animation", load=lambda: b"").kind,
+                      CarrierKind.ANIMATION)
+
+    def test_an_unknown_kind_fails_here_and_names_the_legal_values(self):
+        with self.assertRaises(ValueError) as ctx:
+            Carrier.of_bytes(b"x", kind="video")
+        message = str(ctx.exception)
+        for legal in ("text", "image", "animation"):
+            self.assertIn(legal, message)
+        self.assertIn("video", message)
 
 
 class RegistryTest(unittest.TestCase):

@@ -31,11 +31,12 @@ from ....image_stego import (
     check_cover,
     max_payload_bytes,
     plan,
-    suggest_size,
     upscale_cover,
 )
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+# Demo covers live in the repo-root ``data/`` (gitignored). Five levels up from
+# this file: legacy/ -> desktop/ -> interfaces/ -> markovcryptor/ -> repo root.
+DATA_DIR = Path(__file__).resolve().parents[4] / "data"
 IMAGE_TYPES = [
     ("图片文件", "*.png;*.gif;*.jpg;*.jpeg;*.bmp;*.webp;*.tif;*.tiff"),
     ("PNG（无损，推荐）", "*.png"),

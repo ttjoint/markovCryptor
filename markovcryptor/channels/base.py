@@ -31,6 +31,25 @@ class CarrierKind(str, Enum):
     IMAGE = "image"
     ANIMATION = "animation"
 
+    @classmethod
+    def of(cls, value: "CarrierKind | str") -> "CarrierKind":
+        """Accept the member or its value, rejecting anything else here.
+
+        Without this a stray ``kind="image"`` travels all the way into the first
+        channel and fails as ``'str' object has no attribute 'value'`` -- an
+        error that says nothing about what the caller did wrong. Failing at the
+        constructor names the argument and lists the legal values.
+        """
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(value)
+        except ValueError:
+            legal = ", ".join(member.value for member in cls)
+            raise ValueError(
+                f"kind 必须是 {legal} 之一，收到 {value!r}"
+            ) from None
+
 
 @dataclass(frozen=True)
 class Carrier:
@@ -50,10 +69,15 @@ class Carrier:
     #: Human-facing label, e.g. the original file name. Purely for reports.
     label: str = ""
 
+    def __post_init__(self) -> None:
+        # Normalise here so every channel can trust ``kind`` to be a member.
+        if not isinstance(self.kind, CarrierKind):
+            object.__setattr__(self, "kind", CarrierKind.of(self.kind))
+
     @classmethod
-    def of_bytes(cls, data: bytes, *, kind: CarrierKind,
+    def of_bytes(cls, data: bytes, *, kind: CarrierKind | str,
                  media_type: str | None = None, label: str = "") -> "Carrier":
-        return cls(kind=kind, load=lambda: data, size_hint=len(data),
+        return cls(kind=CarrierKind.of(kind), load=lambda: data, size_hint=len(data),
                    media_type=media_type, label=label)
 
     @classmethod

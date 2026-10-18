@@ -4,11 +4,10 @@ Design goal: the *caller* should be able to decide what to do without parsing
 message text, and the transport layer should be able to map an error to an HTTP
 status without a lookup table maintained in parallel.
 
-Migration note (phase 1): this module is introduced without changing behaviour.
-Existing code still raises ``ValueError`` / ``StegoError`` / ``GifStegoError``;
-the classes below are the target vocabulary and are adopted as each layer is
-moved.  ``GifStegoError`` and ``StegoError`` already subclass the right node so
-``except StegoError`` keeps working during the transition.
+Every channel and every interface raises from this hierarchy. Two classes
+(``InvalidInput``, ``BadKey``) also derive from ``ValueError`` so long-standing
+``except ValueError`` blocks keep working; discriminating on the class is how new
+code tells "bad argument" from "wrong password".
 """
 
 from __future__ import annotations

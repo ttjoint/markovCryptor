@@ -25,7 +25,6 @@ scoring and the embed/extract loop.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import struct
 
 from PIL import Image

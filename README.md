@@ -30,82 +30,38 @@ payload ─→ 压缩 ─→ 加密 ─┼─ 图片信道 ─→ 一张 PNG 照
 
 ---
 
-## 一、中文信道（`codec.py`）
+## 一、三条信道一览
 
-纯 Python 标准库实现（AES 选项需要 `cryptography`）。
+原理、容量推导与错误分类见 [docs/CHANNELS.md](docs/CHANNELS.md)；
+图片/GIF 的 DCT-QIM 内核与压测数据见 [docs/IMAGE_STEGO.md](docs/IMAGE_STEGO.md)。
 
-处理流程：**压缩 → （可选）AES-256-GCM → 帧封装 → 算术编码生成汉字 → 标点层**。
+| | 中文文本 | 图片 | GIF 动图 |
+|---|---|---|---|
+| 载体 | **生成**（一段通顺中文） | 修改一张照片 | 修改动图首帧 |
+| 盲提取 | 需要模型 | ✅ | ✅ |
+| 容量 | ~1 KB | 约 `像素数 × 0.0072` 字节 | 同图片（首帧） |
+| 输出 | `.txt` | `.png`（**必须无损**） | `.gif` |
+| 抗二次压缩 | ❌ | ❌ | ❌ |
 
-- **压缩**：自动在多种方法中取最小者。中文文本用“语料文本模型”：先用自适应二阶 PPM 学习消息本身，遇到没见过的字依次回退到语料统计的一阶、零阶字符表，最后才直接编码 Unicode 码位。二进制数据则用 LZMA / BZip2 / Deflate，都不划算时原样存储。压缩必须在 AES 之前，因为密文无法再压缩。
-- **隐写**：以一阶马尔可夫链为概率分布，对数据比特运行算术*解码器*来生成汉字，使伪装文本是该链的忠实采样。接收方对汉字重新做算术*编码*即可还原比特。整个过程是 32 位有限精度、流式、线性时间。
-- **帧**：3 字节随机数 + 标志位 + 长度 + 4 字节校验，整体用以模型指纹为密钥的 SHAKE-256 掩码白化。校验码同时充当隐式模型识别码，额外开销约 10 字节。
-- **标点层**：数据只藏在汉字里，标点、引号、换行按语料统计另行添加。解码时丢弃所有非汉字字符，因此改标点、重新排版都不影响解码。
+**没有一条信道能扛住有损二次压缩。** 微信/QQ 发图会重编码 JPEG，QIM 格点被破坏；
+传输必须走**文件**方式，不要走图片预览。这是所有 DCT 域隐写的共同限制。
 
-典型效果（神墓训练的 3000 字模型，编码另一本小说的原文）：伪装文本长度约为原文的 **1.0–1.2 倍**；100k 字的编码约 3 秒，解码约 1 秒。
+**中文信道**（`codec.py`）：压缩 → 可选 AES → 帧 → 用一阶马尔可夫链做算术*解码*
+生成汉字 → 按语料统计补标点。接收方对汉字重新做算术*编码*还原比特，
+改标点或重新排版都不影响解码。
 
----
+**图片信道**（`image_stego.py`）：8×8 DCT 取中频 4 个系数作 4 条车道（4 bit/块），
+写中心格点 `(k+0.5)*step` 留余量吸收 RGB↔YCbCr 往返误差；块顺序由密钥派生，
+无需坐标表。引导头单独 RS 编码且永远只占一块，接收方先解出块数与长度，**不用猜**。
+边长 ≥ 40 px；不足 120 px 时按整数倍 LANCZOS 等比放大到刚好够用。
 
-## 二、图片信道（`image_stego.py`）
-
-把任意字节藏进图片的 **DCT 中频系数**，盲提取不需要原图。
-
-- **载体**：8×8 块 DCT，每块取 `(2,2)…(3,3)` 四个中频系数作 4 条车道，即 **4 bit/块**。
-- **QIM**：写**中心格点** `(k+0.5)*step`，左右各留半格余量，吸收 RGB↔YCbCr 往返的 ±1 取整误差。
-- **盲提取**：块顺序由 `SHAKE256(key, "blocks", w, h, step)` 派生，无需坐标表，改动均匀散布全图。
-- **帧结构**：引导头 + 变长载荷。引导头单独 RS 编码且**永远只占一块**，接收方先解出 `nblocks` 与 `length`，**不用猜**，提取耗时恒定约 1 秒。
-- **通道择优**：极端颜色（纯红/黄）的 Y 通道会被色域裁剪卡死，自动在 Y/Cb/Cr 间按
-  `stable × (0.35 + 0.65 × spread)` 打分择优，默认优先 Y。
-- **小图放大**：边长不足时按整数倍 LANCZOS 等比放大到「刚好够用」，不改变构图。
-
-- **双规格引导头**：小图用紧凑档（22 B 码字 = 44 块），大图用宽松档（44 B = 88 块），
-  按底图容量自动选。128² 的握手从 184 块降到 140 块，容量 +25%。
-
-**容量**（约 `像素数 × 0.0072` 字节，即 0.058 bit/px）：
-
-| 尺寸 | 容量 | 中文 | 尺寸 | 容量 | 中文 |
-|---|---|---|---|---|---|
-| 128² | 90 B | 30 字 | 1024² | 7.5 KB | 2 516 字 |
-| 256² | 441 B | 147 字 | 2048² | 30 KB | 10 094 字 |
-| 512² | 1.9 KB | 621 字 | 4096² | 106 KB | 35 328 字 |
-
-**鲁棒性**：PNG 无损 ✅；JPEG q88+ ✅（q85 以下不保证）；亮度 ±20、对比度 1.1×、加噪 ±3 ✅；缩放/旋转/裁剪 ❌（需重新握手）。
-
-**底图要求**：边长 ≥ 20 px（不足自动放大）；**PNG 最佳**。
-
-**性能**（全库 15 062 张实测，含 PNG 往返验证）：
-
-| 指标 | 静态图 | GIF（426 张） |
-|---|---|---|
-| 成功 | 99.8%（24 张 64×64 容量为 0，明确拒绝） | 99.3%（3 张太小） |
-| 中位耗时 | 0.10 s | 0.51 s |
-| p90 / p99 | 0.34 s / 0.68 s | 2.6 s / 9.8 s |
-| 最慢 | 20 s（144 Mpx，主要是 PNG 编解码） | 18 s（1080p / 103 帧） |
-
-三点优化让全库总耗时从 54.6 min 降到 38.6 min：通道评分按 64 k 像素采样、
-提取只读帧头声明的块数不扫全图、写回只碰用到的 8×8 块（不再复制整张平面）。
+**GIF 信道**（`gif_stego.py`）：GIF 是调色板格式，直接套图片信道会被 256 色量化摧毁。
+做法是从**已量化**的像素出发、用更粗的 QIM step（20 起）、存回 GIF 后从重新加载的
+文件验证。默认只嵌首帧——逐帧改会让体积暴涨，只改首帧平均只 +1.1%。
 
 ---
 
-## 三、GIF 动图（`gif_stego.py`）
-
-GIF 是调色板格式，直接套用图片信道会被 256 色量化摧毁。可行路径是：
-**从「已量化」的像素出发 → 用更粗的 QIM step（20 起）→ 存回 GIF → 从重新加载的文件验证**。
-
-- **只嵌首帧**：GIF 靠帧间差异压缩，逐帧都改会让体积暴涨（实测 +3.6%~+168%）。
-  只改第 0 帧时，**平均体积只增加 +1.1%（最大 +4.9%）**。
-- **容量**：取决于首帧像素数。表情包类（150~320 px）约 100~1400 字节，够放 X25519 公钥。
-- **小 GIF**：自动等比放大（所有帧同步放大以免抖动）。
-- **逐帧模式**：`frames_to_use=(0, 1, …)` 可把容量 × 帧数，代价是文件变大。
-
-```python
-from markovcryptor import gif_stego as G
-data, report = G.embed_gif(gif_image, frame_bytes, key)   # 默认嵌首帧
-payload, info = G.extract_gif(data, key)                  # 盲提取
-```
-
----
-
-## 四、隐写握手 + 加密聊天
+## 二、隐写握手 + 加密聊天
 
 `handshake.py` 用图片信道交换 X25519 公钥：
 
@@ -118,7 +74,7 @@ payload, info = G.extract_gif(data, key)                  # 盲提取
 
 ---
 
-## 五、快速开始
+## 三、快速开始
 
 ### 命令行（中文信道）
 
@@ -234,33 +190,36 @@ python run_chat.py
 
 ---
 
-## 六、模块结构
+## 四、模块结构
+
+### 入口
+
+| 文件 | 作用 |
+|---|---|
+| `markovcryptor/cli.py` | 命令行入口（`python -m markovcryptor.cli`） |
+| `markovcryptor/engine.py` | 引擎：模型缓存 + 信道调度，CLI / Web / 批处理都建在它之上 |
+| `markovcryptor/web.py` | 本机 Web API（FastAPI，无鉴权，仅回环） |
+| `markovcryptor/webui/index.html` | 网页界面（单文件、零依赖、无构建） |
+| `markovcryptor/jobs.py` | 批处理作业：线程池、断点续跑、逐项结果 |
+| `markovcryptor/observability.py` | 结构化日志与进程内指标（`/metrics`） |
+
+### 信道算法内核
 
 | 文件 | 作用 |
 |---|---|
 | `markovcryptor/codec.py` | 中文信道：马尔可夫模型 + 算术编码 |
 | `markovcryptor/model.py` | 一阶马尔可夫模型训练与存取 |
-| `markovcryptor/image_stego.py` | 图片信道：DCT-QIM 内核（静图） |
+| `markovcryptor/punctuation.py` | 标点层：按语料统计补标点 |
+| `markovcryptor/compression.py` | 压缩：文本模型 / LZMA / BZip2 / 原样 |
+| `markovcryptor/image_stego.py` | 图片信道：DCT-QIM 内核 |
 | `markovcryptor/gif_stego.py` | GIF 动图信道（调色板适配） |
-| `markovcryptor/handshake.py` | X25519 隐写握手 + HKDF + AES-GCM |
-| `markovcryptor/chat_gui.py` | 双窗口聊天演示 |
-| `markovcryptor/observability.py` | 结构化日志与进程内指标（`/metrics`） |
-| `markovcryptor/interfaces/desktop/legacy/` | 冻结的 Tk 界面（`gui.py` / `chat_gui.py`） |
-| `markovcryptor/webui/index.html` | 网页界面（单文件、零依赖、无构建） |
-| `markovcryptor/core/` | 信道共享内核（见下） |
-| `markovcryptor/channels/` | 统一信道接口与三个适配器（见下） |
-| `markovcryptor/engine.py` | 引擎：模型缓存 + 信道调度 |
-| `markovcryptor/web.py` | 本机 Web API（FastAPI，无鉴权，仅回环） |
-| `markovcryptor/jobs.py` | 批处理作业：线程池、断点续跑、逐项结果 |
-| `docs/CHANNELS.md` | 三条信道总览：原理、容量、要求、错误分类 |
-| `docs/IMAGE_STEGO.md` | 图片/GIF 信道完整原理与容量文档 |
-| `docs/API.md` | Web API：端点、错误码、安全边界、观测 |
-| `docs/PLUGINS.md` | 新增信道的契约与检查清单 |
-| `docs/ARCHITECTURE.md` | 平台化架构方案与迁移进度 |
+| `markovcryptor/handshake.py` | X25519 隐写握手 + HKDF + AES-GCM 会话 |
+
+### 平台层
 
 `markovcryptor/channels/` 把三种算法收成同一个接口——`probe` / `embed` / `extract`
-三个方法加一组元数据。新增算法（视频、直播流）只需实现这三件事并注册，CLI 与
-网页表单会自动出现：
+三个方法加一组元数据。新增算法只需实现这三件事并注册，CLI 与网页表单会自动出现
+（完整示例见 [docs/PLUGINS.md](docs/PLUGINS.md)）：
 
 | 模块 | 内容 |
 |---|---|
@@ -270,41 +229,11 @@ python run_chat.py
 | `channels/image.py` / `gif.py` / `chinese.py` | 三个适配器，内部仍调原有内核 |
 | `channels/registry.py` | 显式注册表 |
 
-程序里用 `Engine` 即可，它负责加载模型并把调用分派给信道：
-
-```python
-from markovcryptor.channels import Carrier, CarrierKind
-from markovcryptor.engine import Engine
-
-engine = Engine()                                  # 自动发现 models/ 下的模型
-for channel in engine.channels():
-    feas = engine.probe(channel.id, carrier, len(payload))
-    if not feas.ok:
-        print(channel.id, "->", feas.reasons)      # 真实原因，不是"无法承载"
-        continue
-    env = engine.embed(channel.id, carrier, payload, key)
-    assert engine.extract(channel.id, env.as_carrier(), key) == payload
-```
-
-也可以不经引擎直接用信道：
-
-```python
-from markovcryptor.channels import registry
-
-for channel in registry.register_defaults():
-    feas = channel.probe(carrier, len(payload))
-    if not feas.ok:
-        print(channel.id, "->", feas.reasons)      # 真实原因，不是"无法承载"
-        continue
-    env = channel.embed(carrier, payload, key)
-    assert channel.extract(env.as_carrier(), key) == payload
-```
-
 `markovcryptor/core/` 是不依赖任何信道的共享层，新增信道直接复用它：
 
 | 模块 | 内容 |
 |---|---|
-| `core/errors.py` | 错误体系（`code` + `http_status`，供将来的 Web API 直接映射） |
+| `core/errors.py` | 错误体系（`code` + `http_status`，Web API 直接映射） |
 | `core/framing.py` | MKX1 帧布局、CRC16、白化、双规格 lead、RS 分块规划 |
 | `core/ecc.py` | Reed-Solomon 编解码（lead 单独成码字） |
 | `core/keys.py` | 口令规范化、域分离、确定性 RNG |
@@ -312,9 +241,42 @@ for channel in registry.register_defaults():
 | `core/arith.py` | 算术编码器/解码器与比特流 |
 | `core/progress.py` | 进度回调与 `Cancelled` |
 
+`markovcryptor/interfaces/desktop/legacy/` 是**已冻结**的 Tk 界面，
+仍可用但不再加功能；新功能都在网页界面。
+
+### 统一用 `Engine`
+
+```python
+from markovcryptor.channels import Carrier
+from markovcryptor.engine import Engine
+
+engine = Engine()                                  # 自动发现 models/ 下的模型
+carrier = Carrier.of_bytes(open("photo.png", "rb").read(),
+                           kind="image", media_type="image/png")
+for info in engine.describe_channels():
+    feas = engine.probe(info["id"], carrier, len(payload))
+    if not feas.ok:
+        print(info["id"], "->", feas.reasons)      # 真实原因，不是"无法承载"
+        continue
+    env = engine.embed(info["id"], carrier, payload, key)
+    assert engine.extract(info["id"], env.as_carrier(), key) == payload
+```
+
+不经引擎、直接用某条信道也可以：
+
+```python
+from markovcryptor.channels import registry
+
+channel = registry.get("image")
+feas = channel.probe(carrier, len(payload))
+if feas.ok:
+    env = channel.embed(carrier, payload, key)
+    assert channel.extract(env.as_carrier(), key) == payload
+```
+
 ---
 
-## 七、测试
+## 五、测试
 
 ```powershell
 python -m unittest discover -s tests
