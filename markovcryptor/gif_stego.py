@@ -110,21 +110,6 @@ def _to_palette(image: Image.Image, colors: int = MAX_COLORS) -> Image.Image:
     return paletted
 
 
-def frame_durations(image: Image.Image) -> list[int]:
-    """Per-frame display durations, without decoding any pixels.
-
-    Walking frames via ``seek`` is cheap for timing metadata, so we never need
-    to materialise an animation we are only going to re-encode as-is.
-    """
-    count = getattr(image, "n_frames", 1)
-    durations: list[int] = []
-    for index in range(count):
-        image.seek(index)
-        durations.append(int(image.info.get("duration", 40) or 40))
-    image.seek(0)
-    return durations
-
-
 def frames_of(image: Image.Image,
               keep: tuple[int, ...] | None = None
               ) -> tuple[list[Image.Image], list[int]]:

@@ -120,10 +120,6 @@ def rs_plan(payload_bytes: int, profile: LeadProfile | None = None) -> tuple[int
     return total_data, total_code
 
 
-def bits_per_block() -> int:
-    return LANES
-
-
 def blocks_needed(payload_bytes: int, profile: LeadProfile | None = None) -> int:
     """8x8 blocks required to carry ``payload_bytes`` under ``profile``."""
     return -(-channel_bits(payload_bytes, profile) // LANES)
@@ -238,12 +234,6 @@ def plan(width: int, height: int, payload_bytes: int = PUBLIC_KEY_BYTES,
     }
 
 
-def rows_used_for(blocks: int, width: int) -> int:
-    """Block-rows the image will touch for ``blocks`` payload blocks."""
-    per_row = max(1, blocks_per_row(width))
-    return min(width // BLOCK, -(-blocks // per_row))
-
-
 # ------------------------------------------------------------------- DCT math
 
 _k = np.arange(BLOCK)
@@ -279,15 +269,20 @@ def _blocks_of(plane: np.ndarray) -> np.ndarray:
     )
 
 
-def _plane_of(blocks: np.ndarray, width: int, rows: int) -> np.ndarray:
-    """Rebuild a cropped plane from blocks (``width``/``BLOCK`` columns)."""
+def _scatter_blocks(plane3: np.ndarray, channel: int, blocks: np.ndarray,
+                    positions: np.ndarray, width: int) -> None:
+    """Write the modified ``blocks`` back into ``plane3`` in place.
+
+    Each block id maps back to a square of pixels; only those squares are
+    updated, so the untouched 99.99% of a large photo is never copied.
+    """
     cols = blocks_per_row(width)
-    return (
-        blocks[: rows * cols]
-        .reshape(rows, cols, BLOCK, BLOCK)
-        .swapaxes(1, 2)
-        .reshape(rows * BLOCK, cols * BLOCK)
-    )
+    values = np.clip(np.rint(blocks[positions]), 0, 255).astype(np.uint8)
+    top = ((positions // cols) * BLOCK)[:, None, None]
+    left = ((positions % cols) * BLOCK)[:, None, None]
+    rows = top + np.arange(BLOCK)[None, :, None]
+    coln = left + np.arange(BLOCK)[None, None, :]
+    plane3[rows, coln, channel] = values
 
 
 def _block_partner(width: int, height: int, key: bytes, step: float) -> np.ndarray:
@@ -676,14 +671,11 @@ def _embed_at_step(cover: Image.Image, frame: bytes, payload: bytes, key: bytes,
             new_block = _idct(coeffs)
             worst = max(worst, float(np.max(np.abs(new_block - blocks[block_id]))))
             blocks[block_id] = new_block
-        # Write back *every* block: the shuffled order scatters the used blocks
-        # over the whole image, so cropping to the first few rows would drop
-        # most of the payload.  The right/bottom offcuts keep their pixels.
-        full_rows = height // BLOCK
-        cols_px = blocks_per_row(width) * BLOCK
-        plane2 = plane.copy()
-        plane2[: full_rows * BLOCK, :cols_px] = _plane_of(blocks, width, full_rows)
-        ycbcr[:, :, plane_index] = np.clip(np.rint(plane2), 0, 255)
+        # Only the blocks we actually touched need writing back.  The order is
+        # shuffled over the whole image, so the used blocks are scattered, but
+        # there are only ``needed`` of them: copying the full plane to patch a
+        # handful of 8x8 squares wastes a second on a 64 Mpx photo.
+        _scatter_blocks(ycbcr, plane_index, blocks, order[:needed], width)
         candidate = Image.fromarray(ycbcr.astype(np.uint8), "YCbCr").convert("RGB")
         try:
             recovered, _ = extract(candidate, key, step=step)
@@ -737,7 +729,8 @@ def embed(image: Image.Image, frame: bytes, key: bytes, *, step: float = DEFAULT
 
 
 def _extract_from_plane(img_rgb: Image.Image, key: bytes, step: float,
-                        plane_index: int, plane_qim_step: float) -> tuple[bytes, dict]:
+                        plane_index: int, plane_qim_step: float,
+                        ycbcr: np.ndarray | None = None) -> tuple[bytes, dict]:
     """Two-stage read: decode the lead, learn the size, then read exactly it.
 
     The lead is one fixed-size RS codeword at the start of the bit stream, so
@@ -747,7 +740,8 @@ def _extract_from_plane(img_rgb: Image.Image, key: bytes, step: float,
     while a handshake needs 80.  Stage two therefore stops as soon as it has
     the exact number of blocks the frame declares.
     """
-    ycbcr = np.asarray(img_rgb.convert("YCbCr"), dtype=np.float64)
+    if ycbcr is None:
+        ycbcr = np.asarray(img_rgb.convert("YCbCr"), dtype=np.float64)
     width, height = img_rgb.size
     plane = ycbcr[:, :, plane_index]
     blocks = _blocks_of(plane)
@@ -840,14 +834,18 @@ def extract(image: Image.Image, key: bytes, *, step: float = DEFAULT_STEP) -> tu
     if min(width, height) < MIN_SIDE // 2 or blocks_per_row(width) == 0:
         raise StegoError(f"图像太小，不可能携带一帧（{width}×{height}）")
     channels, steps = _carriers(width, key, step)
-    ycbcr = np.asarray(img.convert("YCbCr"), dtype=np.float64)
-    best_plane, _score = _pick_carrier(ycbcr, channels)
+    # Convert once and share: scoring the carriers and reading the payload need
+    # the same YCbCr planes, and on a 64 Mpx photo a second conversion costs a
+    # full second.
+    planes = np.asarray(img.convert("YCbCr"), dtype=np.float64)
+    best_plane, _score = _pick_carrier(planes, channels)
     choose = channels.index(best_plane)
     errors: list[str] = []
     for attempt in range(len(channels)):
         plane_index = channels[(choose + attempt) % len(channels)]
         try:
-            return _extract_from_plane(img, key, step, plane_index, steps[plane_index])
+            return _extract_from_plane(img, key, step, plane_index,
+                                       steps[plane_index], ycbcr=planes)
         except StegoError as exc:
             errors.append(f"{CARRIER_NAMES[plane_index]}: {exc}")
     raise StegoError(errors[0] if errors else "没有可识别的隐写帧")
