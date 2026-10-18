@@ -153,8 +153,33 @@ python run_chat.py
 | `markovcryptor/chat_gui.py` | 双窗口聊天演示 |
 | `markovcryptor/gui.py` | 中文信道图形界面 |
 | `markovcryptor/core/` | 信道共享内核（见下） |
+| `markovcryptor/channels/` | 统一信道接口与三个适配器（见下） |
 | `docs/IMAGE_STEGO.md` | 图片/GIF 信道完整原理与容量文档 |
 | `docs/ARCHITECTURE.md` | 平台化架构方案与迁移进度 |
+
+`markovcryptor/channels/` 把三种算法收成同一个接口——`probe` / `embed` / `extract`
+三个方法加一组元数据。新增算法（视频、直播流）只需实现这三件事并注册，CLI 与
+网页表单会自动出现：
+
+| 模块 | 内容 |
+|---|---|
+| `channels/base.py` | `Carrier`（惰性引用）、`Feasibility`、`Envelope`、`EmbedReport` |
+| `channels/protocol.py` | `Channel` Protocol + `describe()`（供 `GET /channels`） |
+| `channels/options.py` | 每信道的参数 schema，网页表单据此自动生成 |
+| `channels/image.py` / `gif.py` / `chinese.py` | 三个适配器，内部仍调原有内核 |
+| `channels/registry.py` | 显式注册表 |
+
+```python
+from markovcryptor.channels import registry
+
+for channel in registry.register_defaults():
+    feas = channel.probe(carrier, len(payload))
+    if not feas.ok:
+        print(channel.id, "->", feas.reasons)      # 真实原因，不是"无法承载"
+        continue
+    env = channel.embed(carrier, payload, key)
+    assert channel.extract(env.as_carrier(), key) == payload
+```
 
 `markovcryptor/core/` 是不依赖任何信道的共享层，新增信道直接复用它：
 
@@ -176,7 +201,7 @@ python run_chat.py
 python -m unittest discover -s tests
 ```
 
-共 71 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项、CLI 端到端 7 项。
+共 91 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项、统一信道接口 20 项、CLI 端到端 7 项。
 全部夹具随仓库分发，**不依赖 `data/`、`corpus/`、`models/`**，干净检出即可跑完，
 无跳过。若需重新生成夹具（例如某个测试要换形状）：
 

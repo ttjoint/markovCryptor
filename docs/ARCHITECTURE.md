@@ -1,8 +1,8 @@
 # 架构方案：从可行性原型到多信道隐写平台
 
-> 状态：**执行中**。阶段 0（安全网）与阶段 1（core 层）已完成，下文相应
-> 章节标注 ✅；其余仍是目标架构与迁移路径。
-> 撰写依据：现有 19 个 Python 模块（5 100 行，阶段 1 后）、71 项测试、全库 15 488 张图的压测数据。
+> 状态：**执行中**。阶段 0（安全网）、阶段 1（core 层）、阶段 2（Channel 抽象）
+> 已完成，下文相应章节标注 ✅；其余仍是目标架构与迁移路径。
+> 撰写依据：现有 26 个 Python 模块（6 071 行，阶段 2 后）、91 项测试、全库 15 488 张图的压测数据。
 
 ---
 
@@ -779,7 +779,7 @@ Tk 需要 Python + 图形栈；浏览器只需一个 URL。对本地其它系统
 `except StegoError` 兜底——两者毫无关系，只是因为没人构造过损坏帧才没暴露。
 迁移后统一抛 `NoHiddenFrame`/`CarrierDamaged`，错误才真正可被分类。
 
-### 阶段 2：Channel 抽象 + 三个适配器（2 天）
+### 阶段 2：Channel 抽象 + 三个适配器（2 天）✅ 已完成
 
 **这是最关键的一步，也是整个方案的核心价值。**
 
@@ -799,6 +799,38 @@ for ch in engine.channels():
     env = engine.embed(ch.id, carrier, payload, key)
     assert engine.extract(ch.id, env.as_carrier(), key) == payload
 ```
+
+**实际结果**：`channels/` 新增 8 个模块 971 行，`tests/test_channels.py` 20 项；
+总测试 **91 项全绿**，干净检出同样 91 项、零跳过。
+
+| 模块 | 行 | 内容 |
+|---|---|---|
+| `base.py` | 153 | `CarrierKind`/`Carrier`/`Feasibility`/`Envelope`/`EmbedReport` |
+| `protocol.py` | 95 | `Channel` Protocol（runtime_checkable）+ `describe()` |
+| `options.py` | 111 | 三份 Pydantic schema（表单自动生成的基础） |
+| `image.py` | 176 | 静图适配器 |
+| `gif.py` | 152 | 动图适配器 |
+| `chinese.py` | 184 | 中文文本适配器 |
+| `registry.py` | 77 | 显式注册（不做 import 扫描） |
+
+实施中的五项判断：
+
+1. **`Carrier.load` 是 thunk。** 批量预检 500 个文件时不应先解码 500 张图；
+   `probe` 可以在不加载载体的前提下给出结论。
+2. **`embed` 只收 `bytes`。** 消息**编码**（压缩、算术编码、选模型）属于
+   `Engine`，不属于信道。这个切分是“新信道自动复用整条消息流水线”的前提。
+3. **中文信道诚实声明自己是“生成载体”而非“修改载体”。** 它的 `probe` 不加
+   载载体，容量由**模型**决定。没有抹平差异，而是把这个差异写进 `probe` 语义
+   和文档字符串。
+4. **`GifOptions.step` 默认 `None` 而不是 `20.0`。** 踩过的坑：`embed_gif` 本
+   来自动从 20 逐档试到 128，适配器硬传 `20.0` 把这个能力关掉了，夹具动图直接
+   报’无法稳定承载’。改为 `None` 才恢复了原有行为。
+5. **错误分类要区分 `BadKey` 与 `NoHiddenFrame`。** 中文信道解码时原本把
+   `BadKey` 一并归成 `NoHiddenFrame`，等于告诉调用方“这里没有隐写”——实际是
+   “有隐写、但密码错了”。HTTP 上这是 401 与 404 的区别，必须分开。
+
+**未做**：`Carrier.media_type` 目前只用于展示，不做内容嗅探。真实文件类型以
+解码结果为准（PIL 已经会拒绝非图片），加一层魔数检测只会多一处真源。
 
 ### 阶段 3：Engine + CLI 迁移（1.5 天）
 
