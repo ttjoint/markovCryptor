@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Demo artefacts written by the chat GUI
+_alice.png
+_bob.png
+*.log
+
+# Local-only assets: never versioned, only source and docs are.
+#   corpus/  145 MB of training novels
+#   models/   11 MB of trained JSON
+#   data/     32 MB of test photos and GIFs (including data/gif/)
+corpus/
+models/
+data/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local agent config
+.claude/
