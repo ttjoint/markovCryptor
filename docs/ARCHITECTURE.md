@@ -83,7 +83,7 @@ image_stego ──┬─ gif_stego ── chat_gui
   需要线程池 + 任务队列隔离。
 - 无请求追踪、无配额、无大文件流式处理。
 
-#### P1-1：GUI 与业务逻辑耦合
+#### P1-1：GUI 与业务逻辑耦合（决策 4 后转为「规划迁移」而非「拆薄」）
 
 - `gui.py` 840 行：`MarkovCryptorApp(tk.Tk)` 一个类里同时有模型列表、
   训练对话框、编解码表单、进度条、文件选择。逻辑无法被 CLI 或 Web 复用。
@@ -96,6 +96,7 @@ image_stego ──┬─ gif_stego ── chat_gui
 
 - 包名 `markovcryptor` 绑定在「马尔可夫链中文隐写」上，但项目已含图片、
   GIF 信道，目标是通用平台。
+  *（决策 1 已确认保持现名：改名收益不抵一次性迁移风险，此处记为已知取舍。）*
 - 顶层 19 个模块平铺，算法层/领域层/接口层混在一起
   （`arith.py` 与 `gui.py` 同级）。
 - 没有 `py.typed`、没有 `pyproject.toml` 的正式项目元数据
@@ -134,13 +135,15 @@ image_stego ──┬─ gif_stego ── chat_gui
 ```
 ┌───────────────────────────────────────────────────────────────────┐
 │  接口层  Interfaces                                                │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐   │
-│  │   CLI    │  │  Web API │  │ Desktop  │  │ Python SDK       │   │
-│  │ (Typer)  │  │(FastAPI) │  │  (Tk)    │  │  (import 即用)    │   │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────────┬─────────┘   │
-└───────┼─────────────┼─────────────┼─────────────────┼─────────────┘
-        └─────────────┴──────┬──────┴─────────────────┘
-                             ▼
+│  ┌──────────┐  ┌──────────────────────────┐  ┌──────────────────┐  │
+│  │   CLI    │  │  Web API (FastAPI)       │  │ Python SDK       │  │
+│  │ (Typer)  │  │  ├─ REST + 响应头        │  │  (import 即用)    │  │
+│  │          │  │  ├─ SSE 进度流           │  │                  │  │
+│  │          │  │  └─ Web UI (静态前端)    │  │                  │  │
+│  └────┬─────┘  └────────────┬─────────────┘  └────────┬─────────┘  │
+└───────┼─────────────────────┼─────────────────────────┼────────────┘
+        └─────────────────────┼─────────────────────────┘
+                              ▼
 ┌───────────────────────────────────────────────────────────────────┐
 │  应用服务层  Application (Engine)                                  │
 │   Engine.embed(channel, cover, payload, key, opts) -> Envelope     │
@@ -271,7 +274,7 @@ class ImageChannel:                       # 适配 image_stego
 现状：图片信道自带 `MKX1` 帧（magic/profile/nonce/nblocks/length/CRC16），
 中文信道有自己的一套帧头 + `PROTOCOL_VERSION=5`。两套互不兼容。
 
-**决策：保留各自的帧，但在领域核心层提供统一的「信封」概念。**
+**决策（已确认，决策 2）：保留各自的帧，但在领域核心层提供统一的「信封」概念。**
 
 理由：图片帧为了盲提取必须极简（44/88 块成本已压到极限），
 中文帧需要携带模型识别码；强行统一会同时伤害两者的效率。
@@ -325,8 +328,8 @@ markovCryptor/                        # 仓库根
 │       │   ├── gif/
 │       │   │   ├── channel.py       # GifChannel
 │       │   │   └── encoder.py       # 现 gif_stego.py
-│       │   ├── video/               # 预留（§5.1）
-│       │   └── stream/              # 预留（§5.2）
+│       │   ├── video/               # 本期仅 README 占位（决策 3）
+│       │   └── stream/              # 本期仅 README 占位（决策 3）
 │       │
 │       ├── engine/                   # 应用服务层
 │       │   ├── engine.py            # Engine 门面
@@ -340,19 +343,24 @@ markovCryptor/                        # 仓库根
 │       │   │   ├── main.py           # Typer 应用
 │       │   │   └── commands/         # encode/decode/train/serve/batch
 │       │   ├── web/
-│       │   │   ├── app.py            # FastAPI 工厂
+│       │   │   ├── app.py            # FastAPI 工厂（同时挂载 Web UI）
 │       │   │   ├── routes/
 │       │   │   │   ├── channels.py   # GET /channels, POST /probe
 │       │   │   │   ├── encode.py     # POST /encode
 │       │   │   │   ├── decode.py     # POST /decode
-│       │   │   │   ├── batch.py      # POST /jobs, GET /jobs/{id}
-│       │   │   │   └── models.py     # GET /models, POST /train
+│       │   │   │   ├── batch.py      # POST /jobs, GET /jobs/{id}/events
+│       │   │   │   ├── models.py     # GET/POST /models, POST /train
+│       │   │   │   └── chat.py       # 握手会话（现 chat_gui 协议时序）
+│       │   │   ├── auth.py           # 本地 token / 仅回环绑定
 │       │   │   ├── schemas.py        # Pydantic 请求/响应
 │       │   │   └── deps.py           # 依赖注入（Engine 单例）
-│       │   └── desktop/              # Tk 界面（保留，供离线使用）
-│       │       ├── app.py            # 主窗口（现 gui.py 拆薄）
-│       │       ├── chat.py           # 双窗口聊天（现 chat_gui.py 拆薄）
-│       │       └── widgets/          # 复用控件（进度、模型选择、载体预览）
+│       │   ├── webui/                # 前端（无构建步骤，见 §4.8）
+│       │   │   ├── index.html        # 单页，首屏即能力探测
+│       │   │   ├── app.js            # 含 SSE 进度、作业轮询
+│       │   │   ├── channels.js       # 按 options_schema 生成表单
+│       │   │   └── style.css
+│       │   └── desktop/              # Tk（冻结，见 §6 阶段 6）
+│       │       └── legacy/           # 现 gui.py / chat_gui.py 原样保留
 │       │
 │       └── infra/                    # 基础设施
 │           ├── config.py             # 设置（pydantic-settings）
@@ -370,6 +378,8 @@ markovCryptor/                        # 仓库根
 └── data/ corpus/ models/             # 不入版本库（现 .gitignore 已排除）
 ```
 
+> **决策 1：包名保持 `markovcryptor`。** 以下为当时的权衡记录。
+
 **关于包名**：改名为 `stegoplatform` 更能反映定位，但会打断所有 import。
 折中方案——**分两步**：先原地重组为子包（`markovcryptor/core`、
 `markovcryptor/channels`、…），保留 `markovcryptor` 顶层名；
@@ -377,7 +387,7 @@ markovCryptor/                        # 仓库根
 
 > 因此实际落地路径是：
 > `markovcryptor/{core,channels,engine,interfaces,infra}/`，
-> 本文其余部分直接用这个路径。
+> 本文其余部分直接用这个路径。**已确认（决策 1）。**
 
 ---
 
@@ -526,8 +536,9 @@ class JobStatus:
 | 界面 | 技术 | 职责 | 明确不做什么 |
 |---|---|---|---|
 | CLI | Typer | 单次编解码、批处理、训练、`serve` 启动 | 不实现业务规则，只调 Engine |
-| Web API | FastAPI | 远程调用、批处理作业、能力探测 | 不做渲染；大文件用流式上传 |
-| Desktop | Tk（保留） | 离线使用、聊天演示、模型管理 | 不直调 `image_stego` 底层 |
+| Web API | FastAPI | 远程调用、批处理作业、能力探测、SSE 进度 | 不做业务逻辑；大文件用流式上传 |
+| Web UI | 原生 JS（无构建） | 全部交互：编解码、批处理面板、模型管理、聊天 | **不重复实现任何判定**，一切以 API 为准 |
+| Desktop | Tk（冻结） | 仅保留可用性，不再演进 | 不再新增功能；见 §6 阶段 6 |
 
 **关键**：三者都只依赖 `Engine`。`gui.py` 840 行里属于业务的部分
 （模型列表构建、训练参数校验、统计行格式化）下沉到 Engine 或
@@ -574,11 +585,68 @@ GET  /sessions/{id}/handshake     双窗口会话（可选）
 
 ---
 
+### 4.8 Web UI：为什么它可以取代桌面 GUI
+
+决策 4 选择转为 Web UI，主要理由是**便于 agent 自动化处置**。这个理由站得住，
+而且有具体的技术依据，不只是趋势判断：
+
+**1. agent 操作 GUI 的成本远高于操作 HTTP。**
+桌面 GUI 需要截图、坐标点击、等待渲染，每一步都可能因为主题、DPI、
+窗口遮挡而失败。而 HTTP + JSON + 二进制响应是 agent 天然能处理的形式：
+读 `Options` 的 JSON Schema 就能构造合法请求，读 `X-Stego-*` 头就能判断结果。
+
+**2. 同一个进程同时服务人（浏览器）和 agent（HTTP）。**
+桌面程序是进程隔离的，agent 想用就得先教会它点按钮。Web 服务则天然
+是「人机共用一套接口」——人在浏览器里做同样的事，走的是同一批端点。
+
+**3. 无需安装。**
+Tk 需要 Python + 图形栈；浏览器只需一个 URL。对本地其它系统集成也更友好。
+
+**技术选型：原生 JS + 无构建步骤。**
+
+不引入 React/Vite 的理由：本项目的前端需求是**表单 + 文件上传 + 进度条**，
+没有复杂状态树。而引入构建链意味着 `node_modules`、产物目录、版本漂移，
+对一个以 Python 为主的项目是净负担。具体做法：
+
+- 单个 `index.html` + 若干 `.js` ES module（浏览器原生支持）。
+- **表单由 API 生成**：`GET /channels` 返回每个信道的 `options_schema`，
+  前端用一段通用代码把 JSON Schema 渲染成控件。这是「接入新算法不改界面」
+  在 UI 侧的实现——新信道注册后，它的参数表单自动出现。
+- **进度用 SSE**：`GET /jobs/{id}/events` 推 `ProgressFn` 的
+  `(fraction, message)`，正好是现有 `progress.ProgressFn` 的形状，无需转换。
+- 静态文件由 FastAPI 的 `StaticFiles` 挂载，`serve` 命令启动后
+  打开浏览器即用。
+
+**必要的界面（对齐现有 Tk 功能）**：
+
+| 面板 | 对应现有实现 |
+|---|---|
+| 编解码（文本/文件） | `gui.py` 的文本页、文件页 |
+| 模型管理（列表/导入/删除/训练） | `gui.py` 的模型页 + 训练对话框 |
+| 批处理（提交/进度/结果下载） | 新增（Tk 里没有） |
+| 载体探测（容量/建议） | `chat_gui.CoverInfo` 的 summary |
+| 聊天会话（双窗口握手） | `chat_gui` 的全流程 |
+
+**安全边界**（当前完全没有，必须补）：
+
+- 默认 `--host 127.0.0.1`，仅回环。绑 `0.0.0.0` 必须在启动时显式加
+  `--allow-remote` 并打印警告。
+- 本地 token：启动时生成写入 `~/.stego/token`，前端从 URL 或环境变量取；
+  API 接受 `Authorization: Bearer`。这样「本地其它系统」有稳定的接入方式，
+  而随机网页无法驱动本地服务（防 DNS rebinding / CSRF）。
+- 上传大小上限可配，默认 64 MB（覆盖实测最大 144 Mpx 图约 20 MB PNG）。
+- 训练等长任务一律异步化（作业模型），避免请求超时。
+
 ## 5. 扩展路线：新信道如何接入
 
 这是平台化最重要的验收标准——**加一个信道不应改动任何界面代码**。
 
-### 5.1 视频隐写（`channels/video`）
+> **决策 3：视频与流信道不在本期范围。** 本节描述的是接入方法，
+> 供平台稳定后单独立项时参考，避免届时重新摸索。本期只做目录占位
+> （`channels/video/`、`channels/stream/` 各放一个 `README.md` 说明意图），
+> 不写实现、不注册、不出现在 `GET /channels` 里。
+
+### 5.1 视频隐写（`channels/video`，**本期不实现**）
 
 已具备的基础：环境有 `opencv-python 4.11`、`PyAV 13.1`。
 
@@ -598,7 +666,7 @@ GET  /sessions/{id}/handshake     双窗口会话（可选）
 **待验证的风险**：不同编码器（x264/x265/硬件编码）对 I 帧的
 量化差异很大，必须在 `docs/CHANNELS.md` 给出实测矩阵后再宣称支持。
 
-### 5.2 直播数据流隐写（`channels/stream`）
+### 5.2 直播数据流隐写（`channels/stream`，**本期不实现**）
 
 这是最激进的目标，需要**先降低预期**：
 
@@ -611,8 +679,10 @@ GET  /sessions/{id}/handshake     双窗口会话（可选）
   但 stream 信道需要新增 `stream_extract(reader, ...)`，
   **建议作为 Channel 协议的 v2 扩展**，不在 v1 落地。
 
-**建议顺序**：先做视频（离线、可复现、可压测），
-直播流等视频信道稳定后再评估。
+**建议顺序**（待本期完成后立项）：先做视频（离线、可复现、可压测），
+直播流等视频信道稳定后再评估。届时 Web API 与作业模型已经就位，
+新增信道应只需实现 `Channel` 三个方法 + 注册，**不改任何 interface 代码**——
+这也是 §5 开头那条验收标准的真正检验。
 
 ### 5.3 其它候选
 
@@ -713,25 +783,54 @@ for ch in engine.channels():
 **验收**：用 `D:/Pictures/表情包` 跑 1 000 张，中断后能续跑；
 失败项有明确原因；进度流正常。
 
-### 阶段 6：GUI 拆薄（2 天）
+### 阶段 6：Web UI + 桌面 GUI 冻结（3 天）
 
-- `gui.py` 的业务逻辑下沉为 `interfaces/desktop/viewmodels.py`
-- `chat_gui.py` 的 `CoverInfo` 下沉到 `channels/image`
-- 两个 GUI 改调 Engine
-- 抽出复用控件
+**决策 4 已定：以 Web UI 取代桌面 GUI。** 因此阶段 6 从原方案
+「把 Tk 拆薄」改为「实现 Web UI + 冻结 Tk」。这实际上**更省事**：
+Tk 里那批业务方法（`gui.py` 52 个方法中约 30 个是业务逻辑：
+模型列表/导入/删除/训练编排、编解码、统计格式化）不再需要小心翼翼地拆进
+`viewmodels.py`——它们对应的能力由 Engine + REST 直接提供，Web UI 消费 API 即可。
+已核对：这些能力现有内核全部支撑（`load_models`/`discover_model_paths`/
+`MarkovModel.train_many`/`encode_with_stats`/`decode`/`PunctuationModel.summary`）。
 
-**验收**：两个 GUI 功能不变；GUI 层不再直接 import
-`image_stego`/`gif_stego`（可用 import 检查测试断言）。
+- **6a. 会话逻辑搬迁**（0.5 天）：`chat_gui.py` 里的握手时序
+  （`send_handshake`/`receive_image`/`_maybe_finish`/`send_message`）
+  是纯协议逻辑，与 Tk 无关，整体搬入 `engine/session.py`；
+  `CoverInfo` 搬入 `channels/image`，成为领域概念「载体可装多少」。
+  **这一步必须做**，否则 Web UI 的聊天面板得重写一遍协议。
+- **6b. Web UI 实现**（2 天）：
+  - `GET /channels` 驱动参数表单（§4.8）
+  - 编解码面板（文本 + 文件，含载体探测结果展示）
+  - 批处理面板（提交、SSE 进度、失败项列表、结果下载）
+  - 模型管理（列表、导入、删除、训练，训练走作业）
+  - 聊天面板（双人握手，用 `engine/session.py`）
+  - 鉴权：本地 token + 默认回环绑定
+- **6c. 冻结 Tk**（0.5 天）：`markovcryptor/gui.py`、`chat_gui.py`
+  原样移入 `interfaces/desktop/legacy/`，**不改一行**，入口保留并打印
+  「已停止演进，请用 `stego serve`」。这样旧用户不会突然失去可用工具，
+  也不产生维护负担。等 Web UI 稳定一个版本后再删除。
+
+**验收**：
+- 浏览器可完成编解码、批处理、模型管理、聊天全流程
+- agent 写一段脚本（只凭 `GET /channels` 的 schema）能提交并完成一次批处理
+- Tk 仍可启动（冻结态）
+
+> 原方案的「GUI 拆薄」被取消，连带省掉 `viewmodels.py` 与
+> `interfaces/desktop/widgets/` 的维护成本。
 
 ### 阶段 7：可观测性与文档（1 天）
 
 - 结构化日志、指标端点
 - `docs/CHANNELS.md`（合并 `IMAGE_STEGO.md` 并补中文信道）
-- `docs/API.md`、`docs/PLUGINS.md`
+- `docs/API.md`（含给 agent 用的「最小调用序列」示例）、`docs/PLUGINS.md`
 - README 重写为平台定位
 
-**总估**：约 11.5 个工作日。阶段 1~2 是风险最高的部分，
-其余基本是装配工作。
+**总估**：约 12.5 个工作日（原 11.5 + Web UI 的 2 天，
+减去取消 GUI 拆薄省下的 0.5，加会话搬迁 0.5）。
+阶段 1~2 风险最高，其余基本是装配工作。
+
+> **视频/流信道不在本期**（决策 3）：待上述重构与测试全部完成后，
+> 再单独立项评估，避免与平台化改造的风险叠加。
 
 ---
 
@@ -743,28 +842,31 @@ for ch in engine.channels():
 | 中文信道容量无统一模型 | `probe` 对它意义不明 | 中文容量 = `f(模型熵, 目标文本长度)`；`probe` 返回「每 N 字可承载 M 字节」的区间，而非单一数字 |
 | 大图/视频在 Web 侧 OOM | 服务被打挂 | 请求体上限、流式上传、`Carrier` 惰性加载、worker 池限流、按信道声明内存预估 |
 | 视频信道实测不达标 | 宣称支持但不可用 | 先写实测矩阵（`docs/CHANNELS.md`），达不到就明确标注「实验性」并默认关闭 |
-| 重构打断现有 GUI | 用户体验倒退 | 阶段 3 保留旧入口；阶段 6 才动 GUI，且有 e2e 兜底 |
+| Web UI 功能不如 Tk 完整 | 用户失去能力 | 阶段 6 用「对齐表」（§4.8）逐项核对；Tk 冻结不删，可随时回退 |
+| 本地 API 被任意网页驱动 | 隐私/资源滥用 | 默认回环绑定 + 本地 token（§4.8）；绑外部地址需显式确认 |
+| 前端代码腐化 | 需要重引入构建链 | 限定为「表单 + 上传 + SSE」，不引入状态库；表单由 schema 生成，天然跟随后端演进 |
 | 包改名打断外部引用 | 依赖方 import 失败 | 本期不改名（见 §3 决策），只做内部子包重组 |
 | 测试仍依赖本地大目录 | CI 不可用 | 阶段 0 的 fixtures 先落地，`data/`/`corpus/`/`models/` 全部移出测试路径 |
 
 ---
 
-## 8. 需要你拍板的四个决策
+## 8. 已确认的决策
 
-1. **包名**：本期保持 `markovcryptor`（内部重组为子包），
-   还是直接改为 `stegoplatform` 并承担一次性迁移成本？
-   ——我建议前者。
+| # | 决策 | 结论 | 对方案的影响 |
+|---|---|---|---|
+| 1 | 包名 | **保持 `markovcryptor`** | 仅内部重组为子包，不做改名迁移 |
+| 2 | 帧格式 | **中文/图片各保留现有帧** | §2.4 维持原判；图片小图容量不牺牲 |
+| 3 | 视频/流信道 | **等重构与测试完成后再评估** | 从本期路线图移出；`channels/video`、`channels/stream` 仅留目录占位 |
+| 4 | 桌面 GUI | **转为 Web UI** | 阶段 6 改为「实现 Web UI + 冻结 Tk」（§4.8）；取消 `viewmodels.py` 拆分 |
 
-2. **帧格式统一**：本文建议保留中文/图片两套帧（理由见 §2.4）。
-   若你希望单一通用帧，会牺牲图片小图容量（引导头变大）。
+**决策 4 的连带收益**（记录在案，便于日后回溯为何这样选）：
 
-3. **视频信道优先级**：是否在 Web API 之后立刻做视频（阶段 4.5），
-   还是先让三信道平台稳定一段时间？
-   ——我建议先稳定，视频信道需要独立的实测调优周期。
-
-4. **桌面 GUI 的长期定位**：保留 Tk 作为离线入口，还是最终以
-   Web UI（本地起服务 + 浏览器）取代？
-   ——这影响阶段 6 是「拆薄」还是「冻结」。
+- 不再需要把 `gui.py`（840 行）的业务逻辑逐块拆进 `viewmodels.py`；
+  Engine + REST 已经提供了同样的能力，Web UI 直接消费。
+- 「人机共用一套接口」：agent 与浏览器走同一批端点，
+  不需要为自动化单独维护一条路径。
+- 代价：前端多一份代码（原生 JS，无构建步骤），
+  且 Tk 的离线能力退化为冻结态。
 
 ---
 
