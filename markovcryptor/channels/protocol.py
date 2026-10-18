@@ -92,6 +92,9 @@ def describe(channel: Channel) -> dict[str, Any]:
         "summary": channel.summary,
         "mime_in": list(channel.mime_in),
         "mime_out": channel.mime_out,
+        # Exposed so a caller can size its own worker pool without guessing;
+        # it is advice, not a limit.
+        "concurrency_hint": getattr(channel, "concurrency_hint", None),
         "options_schema": schema,
     }
 

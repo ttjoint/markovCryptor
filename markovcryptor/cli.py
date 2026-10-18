@@ -28,6 +28,14 @@ def build_parser() -> argparse.ArgumentParser:
         prog="markovcryptor",
         description="语料压缩 + 一阶马尔可夫链算术编码的中文伪装隐写工具（数据只存于汉字，标点由语料统计后加）",
     )
+    # Global, before the subcommand: verbose logging is a property of the run,
+    # not of any one subcommand, and putting it on each would multiply the flags.
+    parser.add_argument("--log-level", default=None,
+                        metavar="{DEBUG,INFO,WARNING,ERROR}",
+                        help="日志级别，默认 INFO，也可用环境变量 MKX1_LOG_LEVEL")
+    parser.add_argument("--log-file", type=Path, default=None,
+                        help="日志写到文件而非 stderr（UTF-8，单行 key=value）")
+
     sub = parser.add_subparsers(dest="command", required=True)
 
     train = sub.add_parser("train", help="从一个或多个中文语料文件/文件夹训练模型")
@@ -228,7 +236,15 @@ def _describe(model: MarkovModel, path: Path) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    from . import observability
+
+    observability.configure(args.log_level, log_file=args.log_file)
+    return _dispatch(args, parser)
+
+
+def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     progress = _ConsoleProgress()
 
     if args.command == "channels":

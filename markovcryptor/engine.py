@@ -24,6 +24,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+import logging
+import time
+
+from . import observability
 from .channels import Carrier, Feasibility
 from .channels import registry
 from .channels.base import Envelope
@@ -116,10 +120,29 @@ class Engine:
 
     # ---------------------------------------------------------------- channels
 
+    #: Ids that ``register_defaults`` owns. Anything else registered by a plugin
+    #: must survive a rebuild -- otherwise an external channel added after the
+    #: Engine was constructed would vanish on the next ``channels()`` call.
+    BUILTIN_IDS = frozenset({"image", "gif", "chinese"})
+
+    def _registered(self):
+        """The channel registry, with built-ins refreshed and plugins preserved.
+
+        Rebuilding the registry on every call is what keeps ``chinese`` in sync
+        with the models on disk. Doing it *destructively* was a real defect: the
+        registry is process-global, so a plugin registered by the embedding
+        application disappeared the next time anything listed channels.
+        """
+        plugins = [channel for channel in registry.all_channels()
+                   if channel.id not in self.BUILTIN_IDS]
+        registry.register_defaults(self.default_model)
+        for channel in plugins:
+            registry.register(channel)
+        return registry.all_channels()
+
     def channels(self):
         """Registered channels, with ``chinese`` present only if a model exists."""
-        registry.register_defaults(self.default_model)
-        return registry.all_channels()
+        return self._registered()
 
     def channel(self, channel_id: str):
         self.channels()                     # ensure registration happened
@@ -137,14 +160,43 @@ class Engine:
     def embed(self, channel_id: str, carrier: Carrier, payload: bytes, key: bytes,
               options: Any = None, progress: ProgressFn | None = None) -> Envelope:
         channel = self.channel(channel_id)
-        return channel.embed(carrier, payload, key,
-                             coerce(channel.options_schema, options), progress)
+        # Measured here rather than taken from the report: the report's
+        # elapsed_ms is per-channel and may be absent or zero for channels that
+        # do not time themselves, which would make the metric useless.
+        start = time.perf_counter()
+        try:
+            envelope = channel.embed(carrier, payload, key,
+                                     coerce(channel.options_schema, options), progress)
+        except Exception as exc:
+            observability.event("engine", "embed_failed", level=logging.WARNING,
+                                channel=channel_id, error=type(exc).__name__)
+            raise
+        elapsed = (time.perf_counter() - start) * 1000
+        observability.METRICS.incr("embed", channel=channel_id)
+        observability.METRICS.observe("embed_ms", elapsed, channel=channel_id)
+        observability.event("engine", "embed", channel=channel_id,
+                            payload_bytes=len(payload),
+                            carrier_bytes=envelope.report.carrier_bytes,
+                            elapsed_ms=round(elapsed, 1))
+        return envelope
 
     def extract(self, channel_id: str, carrier: Carrier, key: bytes,
                 options: Any = None, progress: ProgressFn | None = None) -> bytes:
         channel = self.channel(channel_id)
-        return channel.extract(carrier, key,
-                               coerce(channel.options_schema, options), progress)
+        start = time.perf_counter()
+        try:
+            payload = channel.extract(carrier, key,
+                                      coerce(channel.options_schema, options), progress)
+        except Exception as exc:
+            observability.event("engine", "extract_failed", level=logging.WARNING,
+                                channel=channel_id, error=type(exc).__name__)
+            raise
+        elapsed = (time.perf_counter() - start) * 1000
+        observability.METRICS.incr("extract", channel=channel_id)
+        observability.METRICS.observe("extract_ms", elapsed, channel=channel_id)
+        observability.event("engine", "extract", channel=channel_id,
+                            payload_bytes=len(payload), elapsed_ms=round(elapsed, 1))
+        return payload
 
     # -------------------------------------------------------------- convenience
 

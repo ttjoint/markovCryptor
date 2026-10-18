@@ -1,14 +1,32 @@
 # markovCryptor
 
-两条并列的**中文/图片隐写信道**，外加 X25519 隐写握手的 Python 实现。
+**多信道隐写加解密平台**：三条信道、统一的插件接口、CLI / Web API / 网页界面 /
+批处理。全部在**盲提取**下工作——接收方只需要共享口令或密钥，不需要原始载体。
 
 ```
-                      ┌─ 中文信道 ─→ 一段通顺中文（codec.py）
-payload ─→ 压缩 ─→ 加密 ─┤
-                      └─ 图片信道 ─→ 一张普通图片 / GIF（image_stego.py, gif_stego.py）
+                        ┌─ 中文信道 ─→ 一段通顺中文    (codec.py)
+payload ─→ 压缩 ─→ 加密 ─┼─ 图片信道 ─→ 一张 PNG 照片    (image_stego.py)
+                        └─ GIF 信道 ─→ 一张动图          (gif_stego.py)
 ```
 
-两者都在**盲提取**下工作：接收方只需要共享口令/密钥，不需要原始载体。
+## 两种用法
+
+| 我是…… | 用这个 |
+|---|---|
+| 只想藏个文件 | `python -m markovcryptor.cli serve` → 打开 <http://127.0.0.1:8731/> |
+| 写脚本批量处理 | 同上的 HTTP API（见 [docs/API.md](docs/API.md)） |
+| 不想离开终端 | `python -m markovcryptor.cli encode / decode`（见下方「快速开始」） |
+| 要给项目加一条新信道 | 实现三个方法，见 [docs/PLUGINS.md](docs/PLUGINS.md) |
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/CHANNELS.md](docs/CHANNELS.md) | 三条信道的原理、容量、要求、错误分类 |
+| [docs/IMAGE_STEGO.md](docs/IMAGE_STEGO.md) | 图片/GIF 信道完整原理（DCT-QIM、帧结构、压测数据） |
+| [docs/API.md](docs/API.md) | Web API 端点、错误码、安全边界、可观测性 |
+| [docs/PLUGINS.md](docs/PLUGINS.md) | 如何新增一条信道（附可运行的完整示例） |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 平台化架构与迁移进度 |
 
 ---
 
@@ -226,13 +244,18 @@ python run_chat.py
 | `markovcryptor/gif_stego.py` | GIF 动图信道（调色板适配） |
 | `markovcryptor/handshake.py` | X25519 隐写握手 + HKDF + AES-GCM |
 | `markovcryptor/chat_gui.py` | 双窗口聊天演示 |
-| `markovcryptor/gui.py` | 中文信道图形界面 |
+| `markovcryptor/observability.py` | 结构化日志与进程内指标（`/metrics`） |
+| `markovcryptor/interfaces/desktop/legacy/` | 冻结的 Tk 界面（`gui.py` / `chat_gui.py`） |
+| `markovcryptor/webui/index.html` | 网页界面（单文件、零依赖、无构建） |
 | `markovcryptor/core/` | 信道共享内核（见下） |
 | `markovcryptor/channels/` | 统一信道接口与三个适配器（见下） |
 | `markovcryptor/engine.py` | 引擎：模型缓存 + 信道调度 |
 | `markovcryptor/web.py` | 本机 Web API（FastAPI，无鉴权，仅回环） |
 | `markovcryptor/jobs.py` | 批处理作业：线程池、断点续跑、逐项结果 |
+| `docs/CHANNELS.md` | 三条信道总览：原理、容量、要求、错误分类 |
 | `docs/IMAGE_STEGO.md` | 图片/GIF 信道完整原理与容量文档 |
+| `docs/API.md` | Web API：端点、错误码、安全边界、观测 |
+| `docs/PLUGINS.md` | 新增信道的契约与检查清单 |
 | `docs/ARCHITECTURE.md` | 平台化架构方案与迁移进度 |
 
 `markovcryptor/channels/` 把三种算法收成同一个接口——`probe` / `embed` / `extract`
@@ -297,8 +320,9 @@ for channel in registry.register_defaults():
 python -m unittest discover -s tests
 ```
 
-共 166 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项、统一信道接口 20 项、
-引擎与缓存 14 项、批处理作业 20 项、CLI 端到端 16 项、Web API 24 项、Web UI 8 项。
+共 197 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项、统一信道接口 20 项、
+引擎与缓存 14 项、批处理作业 20 项、CLI 端到端 16 项、Web API 24 项、Web UI 8 项、
+可观测性 20 项、插件契约 12 项。
 全部夹具随仓库分发，**不依赖 `data/`、`corpus/`、`models/`**，干净检出即可跑完，
 无跳过。若需重新生成夹具（例如某个测试要换形状）：
 

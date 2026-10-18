@@ -25,8 +25,10 @@ which would turn "start the API" into "hunt for a free port".
 from __future__ import annotations
 
 import ipaddress
+import logging
 from dataclasses import dataclass, field
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -37,6 +39,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from .channels import Carrier, CarrierKind
 from .core.errors import InvalidInput, StegoError
 from .engine import Config, Engine
+from .observability import METRICS, event as log_event
 from . import jobs
 
 #: Loopback-only default port. Chosen to be memorable (`MKX1` is not, but 8731
@@ -105,8 +108,33 @@ def create_app(config: ApiConfig | None = None, *, engine: Engine | None = None)
     app.state.jobs = {}
 
     @app.exception_handler(StegoError)
-    async def _handle_stego_error(_request: Request, exc: StegoError) -> JSONResponse:
+    async def _handle_stego_error(request: Request, exc: StegoError) -> JSONResponse:
+        # Every failed request is counted under its stable code, so "what is
+        # breaking" is answerable from /metrics without reading logs.
+        METRICS.incr("requests_failed", code=exc.code)
+        log_event("web", "request_failed", level=logging.WARNING,
+                  path=request.url.path, code=exc.code, message=str(exc))
         return _json_error(exc)
+
+    @app.middleware("http")
+    async def _observe(request: Request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        elapsed = (time.perf_counter() - start) * 1000
+        if request.url.path == "/metrics":
+            # Watching must not change what is watched: a scraper polling this
+            # endpoint would otherwise dominate its own counters.
+            return response
+        route = request.scope.get("route")
+        # Labelled by route template, not raw path: /jobs/<uuid> would otherwise
+        # create one counter per job and make the metric unreadable.
+        label = getattr(route, "path", request.url.path)
+        METRICS.observe("request_ms", elapsed, route=label)
+        METRICS.incr("requests", route=label, status=str(response.status_code))
+        log_event("web", "request", path=request.url.path,
+                  method=request.method, status=response.status_code,
+                  elapsed_ms=round(elapsed, 1))
+        return response
 
     # ------------------------------------------------------------------- the UI
     #
@@ -119,6 +147,19 @@ def create_app(config: ApiConfig | None = None, *, engine: Engine | None = None)
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
         return FileResponse(ui_dir / "index.html", media_type="text/html")
+
+    # ------------------------------------------------------------------- metrics
+
+    @app.get("/metrics")
+    def metrics() -> dict[str, Any]:
+        """Counters and mean latency since start.  Plain JSON, not Prometheus.
+
+        No Prometheus text format: exposing that would invite a scraper to
+        depend on this local-only, unauthenticated service, and nothing about
+        the format helps a single-machine operator.  JSON also composes with
+        ``/health`` in the same client code.
+        """
+        return {"ok": True, **METRICS.snapshot()}
 
     # ------------------------------------------------------------------ metadata
 
