@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import sys
@@ -81,6 +82,23 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=DEFAULT_PORT,
                        help=f"端口，默认 {DEFAULT_PORT}（也可用环境变量 MKX1_PORT）")
     serve.add_argument("--model-dir", type=Path, default=default_model_dir())
+
+    batch = sub.add_parser("batch", help="对一整个文件夹批量嵌入或提取")
+    batch.add_argument("--channel", required=True, help="信道 id，见 channels 子命令")
+    batch.add_argument("--input", type=Path, required=True, help="输入文件夹")
+    batch.add_argument("--output", type=Path, required=True, help="输出文件夹")
+    batch.add_argument("--action", choices=("embed", "extract"), default="embed")
+    batch.add_argument("--payload", type=Path, help="嵌入时每个载体要携带的载荷文件")
+    batch.add_argument("--key", default="", help="口令")
+    batch.add_argument("--options", default=None, help="信道参数的 JSON 字符串")
+    batch.add_argument("--kind", default="image", choices=("image", "animation", "text"))
+    batch.add_argument("--workers", type=int, default=4)
+    batch.add_argument("--limit", type=int, default=None, help="只处理前 N 个文件")
+    batch.add_argument("--on-error", choices=("skip", "abort", "retry"), default="skip")
+    batch.add_argument("--resume", type=Path, help="断点文件（JSONL）；再次运行会跳过已完成项")
+    batch.add_argument("--no-recursive", action="store_true")
+    batch.add_argument("--report", type=Path, help="把逐项结果写成 CSV")
+    batch.add_argument("--model-dir", type=Path, default=default_model_dir())
     return parser
 
 
@@ -103,6 +121,83 @@ class _ConsoleProgress:
 
 _TEXT_SUFFIXES = {".txt", ".md", ".csv", ".json", ".log"}
 _ANIMATION_SUFFIXES = {".gif", ".webp", ".apng", ".webm"}
+
+
+def _command_batch(args, progress: "_ConsoleProgress") -> int:
+    """Batch embed/extract a folder. Returns a shell exit code."""
+    from .jobs import BatchRunner, JobSpec, discover, plan_targets
+
+    if not args.input.is_dir():
+        print(f"输入不是一个文件夹：{args.input}", file=sys.stderr)
+        return 2
+    kind = CarrierKind(args.kind)
+    sources = discover(args.input, kind, recursive=not args.no_recursive,
+                       limit=args.limit)
+    if not sources:
+        print(f"{args.input} 下没有 {args.kind} 类型的文件", file=sys.stderr)
+        return 2
+
+    payload = b""
+    if args.action == "embed":
+        if args.payload is None:
+            print("批量嵌入需要 --payload 指定载荷文件", file=sys.stderr)
+            return 2
+        payload = args.payload.read_bytes()
+
+    suffix = ".png" if args.action == "embed" and kind is not CarrierKind.TEXT else ""
+    if args.action == "embed" and kind is CarrierKind.ANIMATION:
+        suffix = ".gif"
+    if args.action == "extract":
+        suffix = ".bin" if kind is not CarrierKind.TEXT else ".txt"
+    # The output name for an embed is whatever the channel emits; the file suffix
+    # is therefore cosmetic, and the channel is free to disagree.
+    items = plan_targets(sources, args.output, suffix=suffix)
+
+    engine = Engine(Config(model_dir=args.model_dir))
+    runner = BatchRunner(engine, args.resume)
+    spec = JobSpec(
+        channel_id=args.channel, items=items, key=args.key.encode(),
+        options=json.loads(args.options) if args.options else {},
+        action=args.action, payload=payload, on_error=args.on_error,
+        max_workers=args.workers, kind=kind,
+    )
+
+    def on_progress(status) -> None:
+        progress(status.progress,
+                 f"{status.succeeded} 成功 / {status.failed} 失败 / {status.total}")
+
+    try:
+        status = runner.run(spec, on_progress=on_progress)
+    except KeyboardInterrupt:
+        print(chr(10) + "已中断。加 --resume <断点文件> 可从断点继续。", file=sys.stderr)
+        return 130
+    progress.done()
+
+    if args.report:
+        _write_batch_report(status.results, args.report)
+
+    print(f"{status.state}：{status.succeeded} 成功，{status.failed} 失败，"
+          f"共 {status.total} 项，耗时 {status.elapsed:.1f}s")
+    failures = [r for r in status.results if not r.ok]
+    for result in failures[:10]:
+        print(f"  {result.source}: {result.error}")
+    if len(failures) > 10:
+        print(f"  ...其余 {len(failures) - 10} 项见 --report 输出")
+    return 0 if status.state == "done" and not failures else 1
+
+
+def _write_batch_report(results, path: Path) -> None:
+    import csv
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["source", "target", "ok", "error_code", "error",
+                         "reasons", "hints", "payload_bytes", "elapsed_ms"])
+        for r in results:
+            writer.writerow([r.source, r.target, r.ok, r.error_code, r.error,
+                             " | ".join(r.reasons), " | ".join(r.hints),
+                             r.payload_bytes, r.elapsed_ms])
 
 
 def _carrier_from_file(path: Path) -> Carrier:
@@ -160,6 +255,9 @@ def main(argv: list[str] | None = None) -> int:
         for key, value in feas.cost.items():
             print(f"  {key}: {value}")
         return 0 if feas.ok else 1
+
+    if args.command == "batch":
+        return _command_batch(args, progress)
 
     if args.command == "serve":
         from .web import ApiConfig, run_server

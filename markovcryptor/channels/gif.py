@@ -33,6 +33,8 @@ class GifChannel:
     mime_in = ("image/gif",)
     mime_out = "image/gif"
     options_schema = GifOptions
+    concurrency_hint = 2
+    #: GIF re-encodes every frame per candidate step, so it is heavier per item.
 
     # ------------------------------------------------------------------ helpers
 

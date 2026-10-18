@@ -14,6 +14,7 @@ matter: the service must refuse to listen off-loopback.
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 import unittest
 
 from httpx import ASGITransport, AsyncClient
@@ -225,6 +226,132 @@ class WebApiTest(unittest.TestCase):
             _run(client.aclose())
         self.assertEqual(response.status_code, 422)
         self.assertIn("上限", response.json()["message"])
+
+
+class JobApiTest(unittest.TestCase):
+    """Batch over HTTP: submit, poll, report.
+
+    A job outlives the request, so these tests poll. The poll loop is bounded by
+    a wall clock rather than a fixed count, because a slow machine must not turn
+    a correct job into a test failure.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+
+        cls.model = MarkovModel.train(fixtures.corpus_text(), vocabulary_size=512)
+        cls.app = create_app(engine=Engine(model=cls.model))
+        cls.root = Path(tempfile.mkdtemp(prefix="mkx1-webjobs-"))
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def setUp(self):
+        self.client = AsyncClient(
+            transport=ASGITransport(app=self.app), base_url="http://test"
+        )
+
+    def tearDown(self):
+        _run(self.client.aclose())
+
+    def _wait(self, job_id: str, timeout: float = 120.0) -> dict:
+        import time
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            body = _run(self.client.get(f"/jobs/{job_id}")).json()
+            if body["state"] in ("done", "failed", "cancelled"):
+                return body
+            time.sleep(0.1)
+        self.fail(f"作业 {job_id} 超时未结束")
+
+    def _folder(self, name: str, count: int) -> Path:
+        directory = self.root / name
+        directory.mkdir(parents=True, exist_ok=True)
+        for i in range(count):
+            (directory / f"i{i}.png").write_bytes(_png(fixtures.varied_photo(i)))
+        return directory
+
+    def test_submit_then_poll_to_completion(self):
+        source = self._folder("sub", 3)
+        out = self.root / "sub-out"
+        submitted = _run(self.client.post(
+            "/jobs",
+            params={"channel": "image", "input_dir": str(source),
+                    "output_dir": str(out), "key": "k", "kind": "image"},
+            files={"payload_file": ("p.bin", b"job-secret",
+                                    "application/octet-stream")},
+        ))
+        self.assertEqual(submitted.status_code, 202, submitted.text)
+        body = self._wait(submitted.json()["job_id"])
+        self.assertEqual(body["state"], "done")
+        self.assertEqual((body["succeeded"], body["failed"]), (3, 0))
+        self.assertEqual(body["progress"], 1.0)
+        self.assertEqual(len(list(out.glob("*.png"))), 3)
+
+    def test_report_endpoint_lists_failures(self):
+        source = self._folder("rep", 2)
+        (source / "broken.png").write_bytes(b"PNG-nope")
+        out = self.root / "rep-out"
+        submitted = _run(self.client.post(
+            "/jobs",
+            params={"channel": "image", "input_dir": str(source),
+                    "output_dir": str(out), "key": "k"},
+            files={"payload_file": ("p.bin", b"x", "application/octet-stream")},
+        ))
+        job_id = submitted.json()["job_id"]
+        body = self._wait(job_id)
+        self.assertEqual(body["state"], "done")
+        self.assertEqual(body["failed"], 1)
+
+        failures = _run(self.client.get(
+            f"/jobs/{job_id}/report", params={"failures_only": True}
+        )).json()["results"]
+        self.assertEqual(len(failures), 1)
+        self.assertIn("broken.png", failures[0]["source"])
+        self.assertTrue(failures[0]["error"], "失败项必须带原因")
+
+    def test_missing_input_folder_is_422(self):
+        response = _run(self.client.post(
+            "/jobs",
+            params={"channel": "image", "input_dir": str(self.root / "nope"),
+                    "output_dir": str(self.root / "x")},
+            files={"payload_file": ("p.bin", b"x", "application/octet-stream")},
+        ))
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("文件夹", response.json()["message"])
+
+    def test_empty_folder_says_so(self):
+        empty = self.root / "empty"
+        empty.mkdir(exist_ok=True)
+        response = _run(self.client.post(
+            "/jobs",
+            params={"channel": "image", "input_dir": str(empty),
+                    "output_dir": str(self.root / "y")},
+            files={"payload_file": ("p.bin", b"x", "application/octet-stream")},
+        ))
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("没有", response.json()["message"])
+
+    def test_unknown_job_is_422_with_the_id(self):
+        response = _run(self.client.get("/jobs/deadbeef"))
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("deadbeef", response.json()["message"])
+
+    def test_job_listing_includes_submitted_jobs(self):
+        source = self._folder("list", 1)
+        _run(self.client.post(
+            "/jobs",
+            params={"channel": "image", "input_dir": str(source),
+                    "output_dir": str(self.root / "list-out")},
+            files={"payload_file": ("p.bin", b"x", "application/octet-stream")},
+        ))
+        listed = _run(self.client.get("/jobs")).json()
+        self.assertTrue(any(j["total"] >= 1 for j in listed))
 
 
 class RealServerTest(unittest.TestCase):

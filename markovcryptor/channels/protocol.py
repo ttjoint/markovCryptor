@@ -39,6 +39,10 @@ class Channel(Protocol):
     #: Pydantic model class declaring the per-channel options. ``None`` means
     #: the channel takes no options at all.
     options_schema: type | None
+    #: Suggested worker count for batch jobs; ``None`` means "no opinion".
+    #: Pillow's decode/encode holds the GIL, so a CPU-count default oversubscribes;
+    #: this is how a channel says so without the job engine hard-coding it.
+    concurrency_hint: int | None
 
     def probe(self, cover: Carrier, payload_bytes: int) -> Feasibility:
         """Can ``cover`` hold ``payload_bytes``? Never raises for a bad fit.

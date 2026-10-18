@@ -40,6 +40,8 @@ class ImageChannel:
     mime_in = ("image/png", "image/jpeg", "image/webp", "image/bmp", "image/tiff")
     mime_out = "image/png"
     options_schema = ImageOptions
+    concurrency_hint = 4
+    #: numpy releases the GIL for the DCT work, Pillow does not for decode/encode.
 
     # ------------------------------------------------------------------ helpers
 

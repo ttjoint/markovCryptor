@@ -25,7 +25,9 @@ which would turn "start the API" into "hunt for a free port".
 from __future__ import annotations
 
 import ipaddress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,7 @@ from fastapi.responses import JSONResponse, Response
 from .channels import Carrier, CarrierKind
 from .core.errors import InvalidInput, StegoError
 from .engine import Config, Engine
+from . import jobs
 
 #: Loopback-only default port. Chosen to be memorable (`MKX1` is not, but 8731
 #: is not claimed by anything common) and above the usual dev-server range.
@@ -98,6 +101,8 @@ def create_app(config: ApiConfig | None = None, *, engine: Engine | None = None)
         Config(model_dir=settings.model_dir) if settings.model_dir else Config()
     )
     app.state.config = settings
+
+    app.state.jobs = {}
 
     @app.exception_handler(StegoError)
     async def _handle_stego_error(_request: Request, exc: StegoError) -> JSONResponse:
@@ -201,7 +206,102 @@ def create_app(config: ApiConfig | None = None, *, engine: Engine | None = None)
             headers={"X-Payload-Bytes": str(len(payload))},
         )
 
-    # ------------------------------------------------------------------- helper
+    # ------------------------------------------------------------------- jobs
+    #
+    # A batch can run for hours, so it cannot be a request body that the caller
+    # waits on. Submit returns an id, progress is polled (and streamed), and the
+    # job lives in memory for the life of the process. Deliberately no worker
+    # queue or persistence: this is a single-user local service, and a job that
+    # needs to survive a restart is what --resume on the CLI is for.
+
+    @app.post("/jobs", status_code=202)
+    async def submit_job(
+        channel: str = Query(...),
+        input_dir: str = Query(..., description="服务端可读的输入文件夹"),
+        output_dir: str = Query(..., description="服务端可写的输出文件夹"),
+        action: str = Query("embed", pattern="^(embed|extract)$"),
+        kind: str = Query("image"),
+        key: str = Query(""),
+        options: str | None = Query(None),
+        payload_file: UploadFile | None = None,
+        limit: int | None = Query(None, ge=1),
+        workers: int = Query(4, ge=1, le=64),
+        on_error: str = Query("skip", pattern="^(skip|abort|retry)$"),
+        resume: str | None = Query(None, description="断点 JSONL 路径"),
+    ) -> dict[str, Any]:
+        """Start a batch over a folder. Returns immediately with a job id.
+
+        Paths are resolved on the *server*, which is why this endpoint takes
+        folders rather than 500 uploads: the caller and the service are on the
+        same machine by construction (loopback-only), so pointing at a directory
+        is both simpler and avoids copying gigabytes through HTTP.
+        """
+        source = Path(input_dir)
+        if not source.is_dir():
+            raise InvalidInput(f"输入不是一个文件夹：{source}")
+        carrier_kind = _carrier_kind(kind)
+        files = jobs.discover(source, carrier_kind, limit=limit)
+        if not files:
+            raise InvalidInput(f"{source} 下没有 {kind} 类型的文件")
+        payload = b""
+        if action == "embed":
+            if payload_file is None:
+                raise InvalidInput("批量嵌入需要上传 payload_file")
+            payload = await _read_upload(payload_file, settings.max_upload_bytes)
+
+        suffix = {("embed", "animation"): ".gif", ("embed", "text"): ".txt",
+                  ("embed", "image"): ".png"}.get((action, kind), ".bin")
+        items = jobs.plan_targets(files, Path(output_dir), suffix=suffix)
+        spec = jobs.JobSpec(
+            channel_id=channel, items=items, key=key.encode(),
+            options=_parse_options(options) or {}, action=action,
+            payload=payload, on_error=on_error, max_workers=workers,
+            kind=carrier_kind,
+        )
+        runner = jobs.BatchRunner(app.state.engine, Path(resume) if resume else None)
+        job_id = uuid.uuid4().hex[:12]
+        status = jobs.JobStatus(job_id=job_id, state="running", total=len(items))
+        app.state.jobs[job_id] = _RunningJob(runner=runner, status=status)
+
+        def _work() -> None:
+            try:
+                final = runner.run(spec, job_id=job_id,
+                                   on_progress=lambda s: _remember(app, job_id, s))
+                _remember(app, job_id, final)
+            except Exception as exc:                       # noqa: BLE001
+                _remember_failed(app, job_id, exc)
+
+        threading.Thread(target=_work, daemon=True, name=f"job-{job_id}").start()
+        return {"job_id": job_id, "total": len(items), "state": "running"}
+
+    @app.get("/jobs")
+    def list_jobs() -> list[dict[str, Any]]:
+        return [entry.status_summary() for entry in app.state.jobs.values()]
+
+    @app.get("/jobs/{job_id}")
+    def job_status(job_id: str) -> dict[str, Any]:
+        entry = app.state.jobs.get(job_id)
+        if entry is None:
+            raise InvalidInput(f"没有这个作业：{job_id}")
+        return entry.status_summary(with_results=True)
+
+    @app.post("/jobs/{job_id}/cancel")
+    def cancel_job(job_id: str) -> dict[str, Any]:
+        entry = app.state.jobs.get(job_id)
+        if entry is None:
+            raise InvalidInput(f"没有这个作业：{job_id}")
+        entry.runner.cancel()
+        return {"job_id": job_id, "state": "cancelling"}
+
+    @app.get("/jobs/{job_id}/report")
+    def job_report(job_id: str, failures_only: bool = False) -> dict[str, Any]:
+        entry = app.state.jobs.get(job_id)
+        if entry is None:
+            raise InvalidInput(f"没有这个作业：{job_id}")
+        results = entry.status.results
+        if failures_only:
+            results = [r for r in results if not r.ok]
+        return {"job_id": job_id, "results": [r.as_dict() for r in results]}
 
     return app
 
@@ -344,6 +444,55 @@ def run_server(config: ApiConfig | None = None, *, allow_remote: bool = False) -
         )
     uvicorn.run(create_app(settings), host=settings.host, port=settings.port,
                 log_level="info")
+
+
+@dataclass
+class _RunningJob:
+    """One in-flight or finished job, kept in ``app.state.jobs``."""
+
+    runner: Any
+    status: Any
+    lock: Any = field(default_factory=threading.Lock)
+
+    def status_summary(self, *, with_results: bool = False) -> dict[str, Any]:
+        with self.lock:
+            status = self.status
+            data = {
+                "job_id": status.job_id,
+                "state": status.state,
+                "total": status.total,
+                "succeeded": status.succeeded,
+                "failed": status.failed,
+                "skipped": status.skipped,
+                "current": status.current,
+                "progress": round(status.progress, 4),
+                "elapsed": round(status.elapsed, 3),
+            }
+        if with_results:
+            data["results"] = [r.as_dict() for r in status.results if not r.ok]
+        return data
+
+
+def _remember(app: FastAPI, job_id: str, status: Any) -> None:
+    entry = app.state.jobs.get(job_id)
+    if entry is None:
+        return
+    with entry.lock:
+        entry.status = status
+
+
+def _remember_failed(app: FastAPI, job_id: str, exc: BaseException) -> None:
+    entry = app.state.jobs.get(job_id)
+    if entry is None:
+        return
+    with entry.lock:
+        entry.status.state = "failed"
+        code, message, reasons, hints = jobs.classify(exc)
+        entry.status.results.append(jobs.ItemResult(
+            source="<job>", target="", ok=False, error=message,
+            error_code=code, reasons=reasons, hints=hints,
+        ))
+        entry.status.failed += 1
 
 
 __all__ = [

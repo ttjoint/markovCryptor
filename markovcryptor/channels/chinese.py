@@ -42,6 +42,8 @@ class ChineseChannel:
     mime_in = ("text/plain",)
     mime_out = "text/plain"
     options_schema = ChineseOptions
+    concurrency_hint = 4
+    #: Arithmetic coding is pure Python, so more workers mostly just contend.
 
     def __init__(self, codec: MarkovStegoCodec) -> None:
         self._codec = codec

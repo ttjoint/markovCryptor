@@ -178,6 +178,66 @@ class CliTest(unittest.TestCase):
         combined = result.stdout + result.stderr
         self.assertIn("image", combined)
 
+    def test_batch_embeds_a_folder_and_reports(self):
+        from io import BytesIO
+
+        images = self.tmp / "batch-in"
+        images.mkdir()
+        buffer = BytesIO()
+        F.photo().save(buffer, format="PNG")
+        for i in range(3):
+            (images / f"p{i}.png").write_bytes(buffer.getvalue())
+        out = self.tmp / "batch-out"
+        payload = self.tmp / "batch-payload.bin"
+        payload.write_bytes(b"batch-cli-secret")
+        report = self.tmp / "batch-report.csv"
+
+        result = _run("batch", "--channel", "image", "--input", str(images),
+                      "--output", str(out), "--payload", str(payload),
+                      "--key", "k", "--report", str(report))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(list(out.glob("*.png"))), 3)
+        self.assertTrue(report.exists())
+        self.assertIn("3 成功", result.stdout)
+
+    def test_batch_resume_skips_finished_items(self):
+        from io import BytesIO
+
+        images = self.tmp / "resume-in"
+        images.mkdir()
+        buffer = BytesIO()
+        F.photo().save(buffer, format="PNG")
+        (images / "a.png").write_bytes(buffer.getvalue())
+        out = self.tmp / "resume-out"
+        payload = self.tmp / "resume-payload.bin"
+        payload.write_bytes(b"resume")
+        checkpoint = self.tmp / "resume.jsonl"
+
+        args = ("batch", "--channel", "image", "--input", str(images),
+                "--output", str(out), "--payload", str(payload),
+                "--key", "k", "--resume", str(checkpoint))
+        first = _run(*args)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        import shutil
+        shutil.rmtree(out)
+
+        second = _run(*args)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertFalse(out.exists(), "续跑不应重新生成输出")
+
+    def test_batch_without_payload_is_rejected(self):
+        from io import BytesIO
+
+        images = self.tmp / "nopay"
+        images.mkdir()
+        buffer = BytesIO()
+        F.photo().save(buffer, format="PNG")
+        (images / "a.png").write_bytes(buffer.getvalue())
+        result = _run("batch", "--channel", "image", "--input", str(images),
+                      "--output", str(self.tmp / "nopay-out"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--payload", result.stderr)
+
     def test_serve_refuses_a_public_bind(self):
         """No auth on this service -- leaving loopback must fail loudly."""
         result = _run("serve", "--host", "0.0.0.0", "--port", "8731")

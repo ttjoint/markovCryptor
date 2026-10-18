@@ -1,9 +1,9 @@
 # 架构方案：从可行性原型到多信道隐写平台
 
 > 状态：**执行中**。阶段 0（安全网）、阶段 1（core 层）、阶段 2（Channel 抽象）、
-> 阶段 3（Engine + CLI）、阶段 4（Web API）已完成，下文相应章节标注 ✅；其余仍是
-> 目标架构与迁移路径。
-> 撰写依据：现有 29 个 Python 模块（6 703 行，阶段 4 后）、129 项测试、全库 15 488 张图的压测数据。
+> 阶段 3（Engine + CLI）、阶段 4（Web API）、阶段 5（批处理作业）已完成，下文相应
+> 章节标注 ✅；其余仍是目标架构与迁移路径。
+> 撰写依据：现有 30 个 Python 模块（7 308 行，阶段 5 后）、158 项测试、全库 15 488 张图的压测数据。
 
 ---
 
@@ -909,15 +909,47 @@ CLI 新增 `serve` 子命令。总测试 **129 项全绿**。
 **未做**：没有 `deps.py`。只有一个 Engine，FastAPI 的 `app.state` 已经足够；
 单独一层依赖注入文件在这个规模上是纯仪式。
 
-### 阶段 5：批处理作业（1.5 天）
+### 阶段 5：批处理作业（1.5 天）✅ 已完成
 
-- `engine/jobs.py`：作业模型、线程池、JSONL checkpoint
-- `POST /jobs`、`GET /jobs/{id}`、SSE 进度
+- `markovcryptor/jobs.py`：作业模型、线程池、JSONL checkpoint
+- `POST /jobs`、`GET /jobs`、`GET /jobs/{id}`、`POST /jobs/{id}/cancel`、
+  `GET /jobs/{id}/report`
 - CLI `batch` 子命令
-- `tools/bench.py` 改为调用 Engine（顺带获得断点续跑）
+- `Channel.concurrency_hint` 新增（Protocol 的一部分）
 
-**验收**：用 `D:/Pictures/表情包` 跑 1 000 张，中断后能续跑；
-失败项有明确原因；进度流正常。
+**实际结果**：新增 `markovcryptor/jobs.py`（348 行）、`tests/test_jobs.py`（20 项）；
+`tests/test_web.py` 18 → 24 项；`tests/test_cli.py` 13 → 16 项。总测试 **158 项全绿**。
+
+实测（40 张表情包，`--resume`）：首次 35.0s，续跑 **1.4s**（跳过全部）；
+批量提取回收 40/40 全部一致。
+
+**三项设计判断**：
+
+1. **checkpoint 用 JSONL 追加，而不是每次重写整个 JSON。**
+   重写在 15 000 项时是 O(n²)——每完成一项就重写 15 000 条记录，会成为整个
+   批处理的主要耗时。追加是 O(1)，代价只是硬杀时会留下半行；`Checkpoint._load`
+   显式跳过解析失败的末行，这正是它该做的事。
+2. **`probe` 仍然不接受 options**，因此批处理不做预检、直接试着嵌入。
+   这是有意的：`probe` 回答的是"这个载体装得下这么多字节吗"，与参数无关；
+   若让它接受 options，就得分清"因为参数才失败"和"因为载体本身才失败"，
+   而后者才是调用方要的信息。实际影响是失败项要在嵌入阶段才暴露——
+   代价由"逐项记录真实原因"承担，而不是靠预检。
+3. **`tools/bench.py` 不改调 Engine**（与原计划相反）。bench 是**测量**工具，
+   它要记录 `lead_profile`、`max_block_change`、`resized` 这些内核级指标，
+   而 `EmbedReport.distortion` 只是笼统的 `dict[str, float]`，`lead_profile`
+   在统一接口里无处安放。为了让 bench 走 Engine 而把内核细节塞进公共接口，
+   是用错误的方向重构。要跑整库测量时 `bench` 仍直接调内核。
+
+**未做 SSE 进度流。** 计划里写了 SSE，实际先只做轮询（`GET /jobs/{id}`）。
+理由：批处理的调用方是脚本和（后续的）网页，两者都能轮询；SSE 的收益是
+"推送而不是轮询"，在单机本地服务上几乎为零，而它的成本（断线重连、
+`EventSource` 生命周期、代理缓冲）是实打实的。等阶段 6 的网页确实需要进度条
+时再评估——那时才知道需要什么样的粒度。
+
+实施中发现并修掉一个真实缺陷：**`on_error="abort"` 会把状态写成 `cancelled`。**
+abort 分支设 `state="failed"` 后置 `_cancelled=True`，下一轮循环开头无脑覆盖为
+`cancelled`，于是"因错误中止"和"用户主动取消"在报告里无法区分。改为只在
+状态仍是 `running` 时才写 `cancelled`。
 
 ### 阶段 6：Web UI + 桌面 GUI 冻结（3 天）
 

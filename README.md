@@ -152,6 +152,31 @@ curl -F payload_file=@secret.bin -F cover_file=@photo.png      "http://127.0.0.1
 curl -F file=@hidden.png      "http://127.0.0.1:8731/extract?channel=image&kind=image&key=口令" -o back.bin
 ```
 
+批处理作业（异步，提交后轮询）：
+
+```
+POST /jobs?channel=image&input_dir=...&output_dir=...&key=...
+GET  /jobs/{id}              # 状态与进度
+GET  /jobs/{id}/report       # 逐项结果（failures_only=true 只看失败）
+POST /jobs/{id}/cancel
+```
+
+### 批量嵌入 / 提取
+
+```powershell
+python -m markovcryptor.cli batch --channel image `
+  --input D:\Pictures\表情包 --output D:\out --payload secret.bin `
+  --key 口令 --resume D:\out\ck.jsonl --report D:\out\r.csv
+```
+
+- **断点续跑**：`--resume` 指定的 JSONL 每完成一项就追加一行；重跑会跳过已完成项
+  （实测 40 张：首次 35.0s，续跑 1.4s）。
+- **单项失败不影响整批**：默认 `--on-error skip`，失败项各自记录真实原因与建议，
+  写进 `--report` 的 CSV。`abort` 遇错即停，`retry` 对可重试的损坏重试。
+- **并发按信道定**：图片 4、GIF 2（GIF 要为每个候选步长重编码全部帧）、
+  中文 4（算术编码是纯 Python）。
+- `--action extract` 反向读取；`--limit N` 只处理前 N 个；`--no-recursive` 不递归。
+
 ### 图形界面（中文信道）
 
 ```powershell
@@ -190,6 +215,7 @@ python run_chat.py
 | `markovcryptor/channels/` | 统一信道接口与三个适配器（见下） |
 | `markovcryptor/engine.py` | 引擎：模型缓存 + 信道调度 |
 | `markovcryptor/web.py` | 本机 Web API（FastAPI，无鉴权，仅回环） |
+| `markovcryptor/jobs.py` | 批处理作业：线程池、断点续跑、逐项结果 |
 | `docs/IMAGE_STEGO.md` | 图片/GIF 信道完整原理与容量文档 |
 | `docs/ARCHITECTURE.md` | 平台化架构方案与迁移进度 |
 
@@ -255,8 +281,8 @@ for channel in registry.register_defaults():
 python -m unittest discover -s tests
 ```
 
-共 129 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项、统一信道接口 20 项、
-引擎与缓存 14 项、CLI 端到端 13 项、Web API 18 项。
+共 158 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项、统一信道接口 20 项、
+引擎与缓存 14 项、批处理作业 20 项、CLI 端到端 16 项、Web API 24 项。
 全部夹具随仓库分发，**不依赖 `data/`、`corpus/`、`models/`**，干净检出即可跑完，
 无跳过。若需重新生成夹具（例如某个测试要换形状）：
 
