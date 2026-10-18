@@ -23,9 +23,9 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from PIL import Image, ImageTk
 
-from . import gif_stego
-from .handshake import HandshakeParty, HandshakeError, seal, open_
-from .image_stego import (
+from .... import gif_stego
+from ....handshake import HandshakeParty, HandshakeError, seal, open_
+from ....image_stego import (
     DEFAULT_STEP,
     StegoError,
     check_cover,

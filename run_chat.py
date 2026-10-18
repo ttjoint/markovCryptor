@@ -1,6 +1,11 @@
-"""Launch the two-window MKX1 stego key-exchange chat demo."""
+"""Launch the frozen Tkinter two-window chat demo.
 
-from markovcryptor.chat_gui import main
+The desktop UI is frozen: it still works, but new features land in the web UI
+(``python -m markovcryptor.cli serve``). See
+``markovcryptor/interfaces/desktop/legacy/``.
+"""
+
+from markovcryptor.interfaces.desktop.legacy import chat_main
 
 if __name__ == "__main__":
-    main()
+    chat_main()

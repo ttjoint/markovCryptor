@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>markovCryptor</title>
+<style>
+  /* Deliberately plain: this UI exists to drive the API, not to win design
+     awards. No framework, no build step -- the file the server sends is the
+     file you edit. */
+  :root {
+    --bg: #16181d; --panel: #1e2128; --line: #2c313a; --text: #d8dde5;
+    --dim: #8b95a5; --accent: #5aa9e6; --ok: #57b87a; --warn: #d9a441;
+    --err: #d95f5f;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f6f8; --panel: #fff; --line: #d9dde4; --text: #232830;
+      --dim: #66707f; --accent: #1b6fb8;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  header {
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .meta { color: var(--dim); font-size: 12px; }
+  nav { display: flex; gap: 4px; padding: 0 20px; border-bottom: 1px solid var(--line); }
+  nav button {
+    background: none; border: 0; border-bottom: 2px solid transparent;
+    color: var(--dim); padding: 10px 14px; cursor: pointer; font: inherit;
+  }
+  nav button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+  main { padding: 20px; max-width: 900px; }
+  section[hidden] { display: none; }
+  fieldset {
+    border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px;
+    margin: 0 0 14px; background: var(--panel);
+  }
+  legend { padding: 0 6px; color: var(--dim); font-size: 12px; }
+  label { display: block; margin: 0 0 10px; }
+  label > span { display: block; font-size: 12px; color: var(--dim); margin-bottom: 3px; }
+  input[type="text"], input[type="number"], input[type="password"], select, textarea {
+    width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--bg); color: var(--text); font: inherit;
+  }
+  input[type="file"] { color: var(--dim); font-size: 13px; }
+  .hint { font-size: 12px; color: var(--dim); margin: 2px 0 10px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row > * { flex: 1 1 180px; }
+  button.action {
+    background: var(--accent); color: #fff; border: 0; border-radius: 6px;
+    padding: 9px 18px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button.action:disabled { opacity: .5; cursor: default; }
+  button.ghost {
+    background: none; border: 1px solid var(--line); color: var(--text);
+    border-radius: 6px; padding: 7px 14px; font: inherit; cursor: pointer;
+  }
+  pre.out {
+    white-space: pre-wrap; word-break: break-word; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 6px; padding: 10px;
+    font-size: 12px; max-height: 320px; overflow: auto; margin: 10px 0 0;
+  }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
+  .dim { color: var(--dim); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  td.mono { font-family: Consolas, monospace; font-size: 12px; word-break: break-all; }
+  progress { width: 100%; height: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>markovCryptor</h1>
+  <span class="meta" id="health">正在连接…</span>
+</header>
+
+<nav id="tabs">
+  <button data-tab="codec" aria-selected="true">编解码</button>
+  <button data-tab="batch" aria-selected="false">批处理</button>
+  <button data-tab="channels" aria-selected="false">信道</button>
+</nav>
+
+<main>
+  <!-- ------------------------------------------------------------ codec -->
+  <section id="tab-codec">
+    <fieldset>
+      <legend>信道</legend>
+      <label><span>选择信道</span><select id="channel"></select></label>
+      <p class="hint" id="channel-summary"></p>
+      <div id="options"></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>操作</legend>
+      <div class="row">
+        <label><span>模式</span>
+          <select id="mode">
+            <option value="embed">嵌入（藏东西）</option>
+            <option value="extract">提取（取出东西）</option>
+          </select>
+        </label>
+        <label><span>口令（可留空）</span><input type="password" id="key" autocomplete="off"></label>
+      </div>
+      <label><span>载体（图片 / 动图 / 文本；中文信道嵌入时可留空）</span>
+        <input type="file" id="cover"></label>
+      <label id="payload-row"><span>载荷（要隐藏的内容）</span>
+        <input type="file" id="payload"></label>
+      <button class="action" id="run">执行</button>
+      <pre class="out" id="result" hidden></pre>
+    </fieldset>
+  </section>
+
+  <!-- ------------------------------------------------------------ batch -->
+  <section id="tab-batch" hidden>
+    <fieldset>
+      <legend>批量处理服务端文件夹</legend>
+      <div class="row">
+        <label><span>信道</span><select id="b-channel"></select></label>
+        <label><span>动作</span>
+          <select id="b-action">
+            <option value="embed">嵌入</option>
+            <option value="extract">提取</option>
+          </select>
+        </label>
+      </div>
+      <label><span>输入文件夹（服务端路径）</span><input type="text" id="b-input" placeholder="D:\Pictures\表情包"></label>
+      <label><span>输出文件夹</span><input type="text" id="b-output" placeholder="D:\out"></label>
+      <div class="row">
+        <label><span>口令</span><input type="password" id="b-key" autocomplete="off"></label>
+        <label><span>上限（留空为全部）</span><input type="number" id="b-limit" min="1"></label>
+        <label><span>断点文件（可留空）</span><input type="text" id="b-resume" placeholder="D:\out\ck.jsonl"></label>
+      </div>
+      <label><span>载荷（仅嵌入时）</span><input type="file" id="b-payload"></label>
+      <button class="action" id="b-run">提交作业</button>
+    </fieldset>
+
+    <fieldset>
+      <legend>作业</legend>
+      <p class="hint">整批在服务端跑，页面只负责看进度。关掉页面不影响作业。</p>
+      <div id="jobs"><p class="dim">尚无作业。</p></div>
+    </fieldset>
+  </section>
+
+  <!-- ------------------------------------------------------------ channels -->
+  <section id="tab-channels" hidden>
+    <fieldset>
+      <legend>可用信道</legend>
+      <p class="hint">这些内容直接来自 <code>GET /channels</code>；表单就是据此生成的。</p>
+      <div id="channel-detail"></div>
+    </fieldset>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+// ------------------------------------------------------------------ helpers
+
+const $ = (id) => document.getElementById(id);
+
+async function api(path, init) {
+  const response = await fetch(path, init);
+  const type = response.headers.get("content-type") || "";
+  if (!response.ok) {
+    // The server always sends {code, message, reasons, hints}; surface all of
+    // it, because the reason is what makes a failure actionable.
+    let body = null;
+    try { body = await response.json(); } catch { /* not JSON */ }
+    const error = new Error((body && (body.message || body.detail)) || response.statusText);
+    error.payload = body;
+    error.status = response.status;
+    throw error;
+  }
+  if (type.includes("application/json")) return response.json();
+  return response;
+}
+
+function show(node, text, cls) {
+  node.hidden = false;
+  node.textContent = text;
+  node.className = "out " + (cls || "");
+}
+
+function describeError(error) {
+  const lines = [`[${error.status || "?"}] ${error.message}`];
+  const body = error.payload;
+  if (body) {
+    for (const reason of body.reasons || []) lines.push(`原因：${reason}`);
+    for (const hint of body.hints || []) lines.push(`建议：${hint}`);
+  }
+  return lines.join("\n");
+}
+
+function fillChannels(select) {
+  select.innerHTML = "";
+  for (const channel of state.channels) {
+    const option = document.createElement("option");
+    option.value = channel.id;
+    option.textContent = channel.display_name;
+    select.appendChild(option);
+  }
+}
+
+// -------------------------------------------------------------- option form
+
+// Fields are generated from the JSON Schema the channel declares, so adding an
+// option on the Python side makes it appear here with no front-end change.
+// `anyOf` (used for nullable numbers) is unwrapped to its non-null branch.
+function unwrap(spec) {
+  if (spec.anyOf) {
+    return spec.anyOf.find((branch) => branch.type !== "null") || {};
+  }
+  return spec;
+}
+
+function buildOptions(container, channel) {
+  container.innerHTML = "";
+  const schema = (channel.options_schema && channel.options_schema.properties) || {};
+  const names = Object.keys(schema);
+  if (!names.length) {
+    container.innerHTML = '<p class="hint">这个信道没有可调参数。</p>';
+    return;
+  }
+  for (const name of names) {
+    const spec = schema[name];
+    const kind = unwrap(spec).type;
+    const label = document.createElement("label");
+    const caption = document.createElement("span");
+    caption.textContent = spec.title || name;
+    label.appendChild(caption);
+
+    let input;
+    if (kind === "boolean") {
+      input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = spec.default === true;
+    } else if (kind === "number" || kind === "integer") {
+      input = document.createElement("input");
+      input.type = "number";
+      if (kind === "number") input.step = "any";
+      const branch = unwrap(spec);
+      if (branch.minimum !== undefined) input.min = branch.minimum;
+      if (branch.maximum !== undefined) input.max = branch.maximum;
+      input.value = spec.default === null || spec.default === undefined ? "" : spec.default;
+      // A nullable field left blank must stay absent rather than become 0.
+      if (spec.anyOf) input.placeholder = "留空 = 自动";
+    } else {
+      input = document.createElement("input");
+      input.type = "text";
+      input.value = spec.default === null || spec.default === undefined ? "" : spec.default;
+    }
+    input.dataset.optionName = name;
+    input.dataset.optionKind = kind;
+    label.appendChild(input);
+
+    if (spec.description) {
+      const hint = document.createElement("span");
+      hint.className = "hint";
+      hint.textContent = spec.description;
+      label.appendChild(hint);
+    }
+    container.appendChild(label);
+  }
+}
+
+function collectOptions(container) {
+  const options = {};
+  for (const input of container.querySelectorAll("[data-option-name]")) {
+    const name = input.dataset.optionName;
+    const kind = input.dataset.optionKind;
+    if (kind === "boolean") {
+      options[name] = input.checked;
+    } else if (kind === "number" || kind === "integer") {
+      if (input.value === "") continue;          // null means "let the channel decide"
+      options[name] = kind === "integer" ? parseInt(input.value, 10) : parseFloat(input.value);
+    } else if (input.value !== "") {
+      options[name] = input.value;
+    }
+  }
+  return options;
+}
+
+// ------------------------------------------------------------------- state
+
+const state = { channels: [], jobs: new Map(), poller: null };
+
+function currentChannel() {
+  const id = $("channel").value;
+  return state.channels.find((c) => c.id === id) || null;
+}
+
+function syncChannel() {
+  const channel = currentChannel();
+  if (!channel) return;
+  $("channel-summary").textContent = channel.summary;
+  buildOptions($("options"), channel);
+  // Only embed needs a payload; the payload row would be noise when extracting.
+  $("payload-row").hidden = $("mode").value === "extract";
+}
+
+// ------------------------------------------------------------------- codec
+
+async function runCodec() {
+  const button = $("run");
+  const out = $("result");
+  const channel = currentChannel();
+  if (!channel) return;
+  const mode = $("mode").value;
+  const form = new FormData();
+  const cover = $("cover").files[0];
+  const payload = $("payload").files[0];
+
+  if (cover) form.append(mode === "embed" ? "cover_file" : "file", cover);
+  if (mode === "embed") {
+    if (!payload) {
+      show(out, "请选择载荷文件。", "err");
+      return;
+    }
+    form.append("payload_file", payload);
+  } else if (!cover) {
+    show(out, "请选择要提取的载体文件。", "err");
+    return;
+  }
+
+  const options = collectOptions($("options"));
+  const query = new URLSearchParams({
+    channel: channel.id,
+    kind: kindFor(channel),
+    key: $("key").value,
+  });
+  if (Object.keys(options).length) query.set("options", JSON.stringify(options));
+
+  button.disabled = true;
+  show(out, "处理中…", "dim");
+  try {
+    const response = await api(`/${mode}?${query}`, { method: "POST", body: form });
+    const blob = await response.blob();
+    const report = response.headers.get("X-Report");
+    const name = downloadName(channel, mode, cover);
+
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+
+    const lines = [`完成：已下载 ${name}（${formatBytes(blob.size)}）`];
+    if (report) {
+      const data = JSON.parse(report);
+      lines.push(`实际生效参数：${JSON.stringify(data.options_used)}`);
+      lines.push(`容量利用：${(data.utilization * 100).toFixed(1)}%`);
+    }
+    show(out, lines.join("\n"), "ok");
+  } catch (error) {
+    show(out, describeError(error), "err");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function kindFor(channel) {
+  if (channel.id === "gif") return "animation";
+  if (channel.id === "chinese") return "text";
+  return "image";
+}
+
+function downloadName(channel, mode, cover) {
+  const stem = cover ? cover.name.replace(/\.[^.]+$/, "") : "cover";
+  if (mode === "extract") return `${stem}.bin`;
+  if (channel.id === "chinese") return `${stem}.txt`;
+  if (channel.id === "gif") return `${stem}.gif`;
+  return `${stem}.png`;
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// ------------------------------------------------------------------- batch
+
+async function submitBatch() {
+  const form = new FormData();
+  const payload = $("b-payload").files[0];
+  if ($("b-action").value === "embed") {
+    if (!payload) {
+      alert("批量嵌入需要选择载荷文件。");
+      return;
+    }
+    form.append("payload_file", payload);
+  }
+  const query = new URLSearchParams({
+    channel: $("b-channel").value,
+    input_dir: $("b-input").value.trim(),
+    output_dir: $("b-output").value.trim(),
+    action: $("b-action").value,
+    key: $("b-key").value,
+  });
+  const limit = $("b-limit").value.trim();
+  if (limit) query.set("limit", limit);
+  const resume = $("b-resume").value.trim();
+  if (resume) query.set("resume", resume);
+
+  try {
+    const body = await api(`/jobs?${query}`, { method: "POST", body: form });
+    state.jobs.set(body.job_id, { job_id: body.job_id, total: body.total,
+                                  state: "running", progress: 0,
+                                  succeeded: 0, failed: 0 });
+    renderJobs();
+    startPolling();
+  } catch (error) {
+    alert(describeError(error));
+  }
+}
+
+function renderJobs() {
+  const host = $("jobs");
+  if (!state.jobs.size) {
+    host.innerHTML = '<p class="dim">尚无作业。</p>';
+    return;
+  }
+  host.innerHTML = "";
+  for (const job of state.jobs.values()) {
+    const box = document.createElement("div");
+    box.style.marginBottom = "14px";
+    const pct = Math.round((job.progress || 0) * 100);
+    box.innerHTML = `
+      <div class="row" style="align-items:baseline">
+        <strong class="mono">${job.job_id}</strong>
+        <span class="${job.state === "done" ? "ok" : job.state === "failed" ? "err" : "dim"}">
+          ${job.state}
+        </span>
+        <span class="dim">${job.succeeded || 0} 成功 / ${job.failed || 0} 失败 / ${job.total} 共</span>
+      </div>
+      <progress max="100" value="${pct}"></progress>`;
+    if (job.state === "running") {
+      const cancel = document.createElement("button");
+      cancel.className = "ghost";
+      cancel.textContent = "取消";
+      cancel.onclick = () => api(`/jobs/${job.job_id}/cancel`, { method: "POST" })
+        .then(() => refreshJobs());
+      box.appendChild(cancel);
+    }
+    if ((job.failed || 0) > 0) {
+      const report = document.createElement("button");
+      report.className = "ghost";
+      report.textContent = "查看失败项";
+      report.onclick = () => loadFailures(job.job_id, box);
+      box.appendChild(report);
+    }
+    host.appendChild(box);
+  }
+}
+
+async function loadFailures(jobId, box) {
+  try {
+    const data = await api(`/jobs/${jobId}/report?failures_only=true`);
+    const lines = data.results.map((r) => {
+      const extra = [r.error, ...(r.reasons || []), ...(r.hints || [])]
+        .filter(Boolean).join(" / ");
+      return `${r.source}\n    ${extra}`;
+    });
+    const pre = document.createElement("pre");
+    pre.className = "out err";
+    pre.textContent = lines.join("\n") || "没有失败项。";
+    box.appendChild(pre);
+  } catch (error) {
+    alert(describeError(error));
+  }
+}
+
+async function refreshJobs() {
+  const listed = await api("/jobs");
+  // A job that appeared from another tab (or a previous page load) must show up.
+  for (const job of listed) state.jobs.set(job.job_id, job);
+  renderJobs();
+  const running = [...state.jobs.values()].some((j) => j.state === "running");
+  if (!running) stopPolling();
+}
+
+function startPolling() {
+  if (state.poller) return;
+  // One second: a batch takes minutes, so a tighter loop would only burn CPU.
+  state.poller = setInterval(() => refreshJobs().catch(() => stopPolling()), 1000);
+  refreshJobs().catch(() => {});
+}
+
+function stopPolling() {
+  if (state.poller) { clearInterval(state.poller); state.poller = null; }
+}
+
+// ---------------------------------------------------------------- channels
+
+function renderChannelDetail() {
+  const host = $("channel-detail");
+  host.innerHTML = "";
+  for (const channel of state.channels) {
+    const block = document.createElement("div");
+    block.style.marginBottom = "16px";
+    const schema = (channel.options_schema && channel.options_schema.properties) || {};
+    const rows = Object.entries(schema).map(([name, spec]) =>
+      `<tr><td class="mono">${name}</td><td class="mono">${JSON.stringify(spec.default)}</td>`
+      + `<td>${spec.description || ""}</td></tr>`).join("");
+    block.innerHTML = `
+      <strong>${channel.display_name}</strong>
+      <span class="dim mono"> ${channel.id}</span>
+      <p class="hint">${channel.summary}<br>
+        ${channel.mime_in.join(", ")} → ${channel.mime_out}</p>
+      ${rows ? `<table><tr><th>参数</th><th>默认</th><th>说明</th></tr>${rows}</table>` : ""}`;
+    host.appendChild(block);
+  }
+}
+
+// -------------------------------------------------------------------- boot
+
+async function boot() {
+  try {
+    const health = await api("/health");
+    $("health").textContent =
+      `${health.channels.length} 个信道 · ${health.models} 个模型 · ${location.host}`;
+    state.channels = await api("/channels");
+    fillChannels($("channel"));
+    fillChannels($("b-channel"));
+    syncChannel();
+    renderChannelDetail();
+    refreshJobs().catch(() => {});
+    startPolling();
+  } catch (error) {
+    $("health").textContent = "连接失败：" + error.message;
+    $("health").className = "meta err";
+  }
+}
+
+for (const tab of document.querySelectorAll("#tabs button")) {
+  tab.onclick = () => {
+    for (const other of document.querySelectorAll("#tabs button")) {
+      other.setAttribute("aria-selected", String(other === tab));
+      $(`tab-${other.dataset.tab}`).hidden = other !== tab;
+    }
+  };
+}
+
+$("channel").onchange = syncChannel;
+$("mode").onchange = syncChannel;
+$("run").onclick = runCodec;
+$("b-run").onclick = submitBatch;
+
+boot();
+</script>
+</body>
+</html>

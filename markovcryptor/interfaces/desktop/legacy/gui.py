@@ -9,8 +9,8 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any, Callable
 
-from .codec import CodecStats, MarkovStegoCodec, decode_with_models
-from .model import (
+from ....codec import CodecStats, MarkovStegoCodec, decode_with_models
+from ....model import (
     MarkovModel,
     default_model_dir,
     discover_corpus_files,
@@ -18,8 +18,8 @@ from .model import (
     read_text_file,
     unique_model_path,
 )
-from .core.progress import Cancelled, ProgressFn, stage
-from .punctuation import OPEN_TO_CLOSE
+from ....core.progress import Cancelled, ProgressFn, stage
+from ....punctuation import OPEN_TO_CLOSE
 
 _POLL_MS = 100
 

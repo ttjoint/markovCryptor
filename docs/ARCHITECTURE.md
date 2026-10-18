@@ -1,9 +1,9 @@
 # 架构方案：从可行性原型到多信道隐写平台
 
 > 状态：**执行中**。阶段 0（安全网）、阶段 1（core 层）、阶段 2（Channel 抽象）、
-> 阶段 3（Engine + CLI）、阶段 4（Web API）、阶段 5（批处理作业）已完成，下文相应
-> 章节标注 ✅；其余仍是目标架构与迁移路径。
-> 撰写依据：现有 30 个 Python 模块（7 308 行，阶段 5 后）、158 项测试、全库 15 488 张图的压测数据。
+> 阶段 3（Engine + CLI）、阶段 4（Web API）、阶段 5（批处理作业）、
+> 阶段 6（Web UI + Tk 冻结）已完成，下文相应章节标注 ✅；其余仍是目标架构与迁移路径。
+> 撰写依据：现有 33 个 Python 模块（7 333 行，阶段 6 后）、166 项测试、全库 15 488 张图的压测数据。
 
 ---
 
@@ -951,40 +951,49 @@ abort 分支设 `state="failed"` 后置 `_cancelled=True`，下一轮循环开�
 `cancelled`，于是"因错误中止"和"用户主动取消"在报告里无法区分。改为只在
 状态仍是 `running` 时才写 `cancelled`。
 
-### 阶段 6：Web UI + 桌面 GUI 冻结（3 天）
+### 阶段 6：Web UI + 桌面 GUI 冻结（3 天）✅ 已完成
 
-**决策 4 已定：以 Web UI 取代桌面 GUI。** 因此阶段 6 从原方案
-「把 Tk 拆薄」改为「实现 Web UI + 冻结 Tk」。这实际上**更省事**：
-Tk 里那批业务方法（`gui.py` 52 个方法中约 30 个是业务逻辑：
-模型列表/导入/删除/训练编排、编解码、统计格式化）不再需要小心翼翼地拆进
-`viewmodels.py`——它们对应的能力由 Engine + REST 直接提供，Web UI 消费 API 即可。
-已核对：这些能力现有内核全部支撑（`load_models`/`discover_model_paths`/
-`MarkovModel.train_many`/`encode_with_stats`/`decode`/`PunctuationModel.summary`）。
+**实际结果**：新增 `markovcryptor/webui/index.html`（单文件前端，约 600 行）、
+`tests/test_webui.py`（8 项）、`tools/ui_smoke.py`（真实浏览器冒烟）。
+Tk 移入 `markovcryptor/interfaces/desktop/legacy/`。总测试 **166 项全绿**。
 
-- **6a. 会话逻辑搬迁**（0.5 天）：`chat_gui.py` 里的握手时序
-  （`send_handshake`/`receive_image`/`_maybe_finish`/`send_message`）
-  是纯协议逻辑，与 Tk 无关，整体搬入 `engine/session.py`；
-  `CoverInfo` 搬入 `channels/image`，成为领域概念「载体可装多少」。
-  **这一步必须做**，否则 Web UI 的聊天面板得重写一遍协议。
-- **6b. Web UI 实现**（2 天）：
-  - `GET /channels` 驱动参数表单（§4.8）
-  - 编解码面板（文本 + 文件，含载体探测结果展示）
-  - 批处理面板（提交、SSE 进度、失败项列表、结果下载）
-  - 模型管理（列表、导入、删除、训练，训练走作业）
-  - 聊天面板（双人握手，用 `engine/session.py`）
-  - 鉴权：无 token；默认仅回环绑定（见 §安全边界）
-- **6c. 冻结 Tk**（0.5 天）：`markovcryptor/gui.py`、`chat_gui.py`
-  原样移入 `interfaces/desktop/legacy/`，**不改一行**，入口保留并打印
-  「已停止演进，请用 `stego serve`」。这样旧用户不会突然失去可用工具，
-  也不产生维护负担。等 Web UI 稳定一个版本后再删除。
+**6b. Web UI** —— 实现了三个面板：编解码、批处理、信道详情。
+参数表单完全由 `GET /channels` 的 schema 生成：信道有新参数时前端零改动。
+支持亮暗两套配色（`prefers-color-scheme`）、错误体完整展示 `reasons`/`hints`。
 
-**验收**：
-- 浏览器可完成编解码、批处理、模型管理、聊天全流程
-- agent 写一段脚本（只凭 `GET /channels` 的 schema）能提交并完成一次批处理
-- Tk 仍可启动（冻结态）
+三项实现判断：
 
-> 原方案的「GUI 拆薄」被取消，连带省掉 `viewmodels.py` 与
-> `interfaces/desktop/widgets/` 的维护成本。
+1. **单文件、零依赖、无构建。** `index.html` 不引用任何外部资源——没有 CDN、
+   没有字体、没有 `npm`。测试里显式断言这一点（`test_index_has_no_external_
+   dependencies`），因为一个 `https://` 引用会让整个 UI 在离线/内网环境失效，
+   而"能跑在内网"正是本机服务的价值所在。
+2. **前端不重复实现任何判定。** 信道列表、参数默认值、容量判定全部来自 API；
+   页面只负责渲染与转发。有一个测试专门校验：schema 里出现的每种类型
+   表单都必须能渲染，否则选项会**静默消失**——用户会以一个自己没选过的
+   默认值完成嵌入，这是最坏的失败方式，所以要在测试里失败而不是在用户手里。
+3. **批处理进度用轮询，不用 SSE。** 阶段 5 就已经这么决定；实测轮询代码
+   （一个 `setInterval` + 状态合并）只有 20 行，验证了这个选择的性价比。
+   页面关闭不影响作业，重开页面从 `GET /jobs` 恢复列表。
+
+**6c. 冻结 Tk** —— 与原计划有一处偏差，且是必须的：计划说"**不改一行**"，
+但 `git mv` 到 `interfaces/desktop/legacy/` 后相对导入深度变了，`.codec`
+这类导入**必然**失效。所以实际改的是：只重写导入行，一行逻辑未动。
+`__init__.py` 的 docstring 写明"只修了导入、不要在这里加功能"。
+`run_gui.py`/`run_chat.py` 保留并指向新位置。实测模块可导入、Tk root 可创建。
+
+**未做**：模型管理与聊天面板。理由：
+
+- 模型管理：训练走作业、列出/删除模型，这些端点 API 已就绪，但网页表单
+  相比 `markovcryptor train ...` 没有增量价值——训练是低频操作，CLI 更合适。
+  等有真实需求（比如远程训练）再加。
+- 聊天面板：需要 `engine/session.py`（6a 的会话逻辑搬迁）。本期没有做 6a，
+  因为 `handshake.py` 已经是纯协议层（无 Tk 依赖），Web 聊天面板可以直接
+  调它，只是还没有对应的 REST 端点。**聊天面板推迟到有 REST 会话端点之后。**
+
+**真实浏览器验证**：`tools/ui_smoke.py` 用 CDP（Chrome DevTools 协议）驱动
+无头 Chrome/Edge，验证页面加载、表单生成、取值、同源 embed、页签切换。
+8 项全部通过。浏览器查找顺序：Chrome → Edge；清理只匹配本脚本专用的
+`--user-data-dir` 与 `--remote-debugging-port`，绝不按进程名杀。
 
 ### 阶段 7：可观测性与文档（1 天）
 

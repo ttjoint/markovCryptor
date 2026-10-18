@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from .channels import Carrier, CarrierKind
 from .core.errors import InvalidInput, StegoError
@@ -107,6 +107,18 @@ def create_app(config: ApiConfig | None = None, *, engine: Engine | None = None)
     @app.exception_handler(StegoError)
     async def _handle_stego_error(_request: Request, exc: StegoError) -> JSONResponse:
         return _json_error(exc)
+
+    # ------------------------------------------------------------------- the UI
+    #
+    # Served from the same origin as the API on purpose: a separate dev server
+    # would need CORS, and CORS on a service with no auth means any page the
+    # user visits could drive it. One origin, no CORS, one process to start.
+
+    ui_dir = Path(__file__).parent / "webui"
+
+    @app.get("/", include_in_schema=False)
+    def index() -> FileResponse:
+        return FileResponse(ui_dir / "index.html", media_type="text/html")
 
     # ------------------------------------------------------------------ metadata
 

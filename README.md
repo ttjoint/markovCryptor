@@ -177,11 +177,27 @@ python -m markovcryptor.cli batch --channel image `
   中文 4（算术编码是纯 Python）。
 - `--action extract` 反向读取；`--limit N` 只处理前 N 个；`--no-recursive` 不递归。
 
-### 图形界面（中文信道）
+### 网页界面
 
 ```powershell
-python run_gui.py
+python -m markovcryptor.cli serve
+# 打开 http://127.0.0.1:8731/
 ```
+
+三个面板：**编解码**（选信道 → 参数表单自动生成 → 上传 → 下载结果）、
+**批处理**（提交服务端文件夹作业、看进度、查看失败项原因）、
+**信道**（各信道参数与说明）。前端是单文件、零依赖、无构建的 `index.html`，
+参数表单由 `GET /channels` 的 schema 自动生成——信道加参数，网页零改动。
+
+### 桌面界面（已冻结）
+
+```powershell
+python run_gui.py       # 中文信道（Tk，已停止演进）
+python run_chat.py      # 双窗口隐写握手演示（Tk，已停止演进）
+```
+
+桌面 UI 移入 `markovcryptor/interfaces/desktop/legacy/`，仍可用但不再加功能；
+新功能都在网页界面。
 
 训练、文本编解码和文件编解码都在后台线程运行，窗口顶部显示进度条，可随时取消。
 
@@ -281,8 +297,8 @@ for channel in registry.register_defaults():
 python -m unittest discover -s tests
 ```
 
-共 158 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项、统一信道接口 20 项、
-引擎与缓存 14 项、批处理作业 20 项、CLI 端到端 16 项、Web API 24 项。
+共 166 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项、统一信道接口 20 项、
+引擎与缓存 14 项、批处理作业 20 项、CLI 端到端 16 项、Web API 24 项、Web UI 8 项。
 全部夹具随仓库分发，**不依赖 `data/`、`corpus/`、`models/`**，干净检出即可跑完，
 无跳过。若需重新生成夹具（例如某个测试要换形状）：
 
