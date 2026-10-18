@@ -178,6 +178,18 @@ class CliTest(unittest.TestCase):
         combined = result.stdout + result.stderr
         self.assertIn("image", combined)
 
+    def test_serve_refuses_a_public_bind(self):
+        """No auth on this service -- leaving loopback must fail loudly."""
+        result = _run("serve", "--host", "0.0.0.0", "--port", "8731")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("0.0.0.0", result.stderr)
+
+    def test_serve_help_shows_the_configurable_port(self):
+        result = _run("serve", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--port", result.stdout)
+        self.assertIn("8731", result.stdout)
+
     def test_missing_corpus_exits_nonzero(self):
         result = _run("train", "--corpus", str(self.tmp / "nope.txt"),
                       "--model", str(self.tmp / "x"))

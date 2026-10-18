@@ -1,8 +1,9 @@
 # 架构方案：从可行性原型到多信道隐写平台
 
 > 状态：**执行中**。阶段 0（安全网）、阶段 1（core 层）、阶段 2（Channel 抽象）、
-> 阶段 3（Engine + CLI）已完成，下文相应章节标注 ✅；其余仍是目标架构与迁移路径。
-> 撰写依据：现有 28 个 Python 模块（6 329 行，阶段 3 后）、109 项测试、全库 15 488 张图的压测数据。
+> 阶段 3（Engine + CLI）、阶段 4（Web API）已完成，下文相应章节标注 ✅；其余仍是
+> 目标架构与迁移路径。
+> 撰写依据：现有 29 个 Python 模块（6 703 行，阶段 4 后）、129 项测试、全库 15 488 张图的压测数据。
 
 ---
 
@@ -352,7 +353,7 @@ markovCryptor/                        # 仓库根
 │       │   │   │   ├── batch.py      # POST /jobs, GET /jobs/{id}/events
 │       │   │   │   ├── models.py     # GET/POST /models, POST /train
 │       │   │   │   └── chat.py       # 握手会话（现 chat_gui 协议时序）
-│       │   │   ├── auth.py           # 本地 token / 仅回环绑定
+│       │   │   ├── auth.py           # 仅回环绑定（无 token，见 §安全边界）
 │       │   │   ├── schemas.py        # Pydantic 请求/响应
 │       │   │   └── deps.py           # 依赖注入（Engine 单例）
 │       │   ├── webui/                # 前端（无构建步骤，见 §4.8）
@@ -628,14 +629,19 @@ Tk 需要 Python + 图形栈；浏览器只需一个 URL。对本地其它系统
 | 载体探测（容量/建议） | `chat_gui.CoverInfo` 的 summary |
 | 聊天会话（双窗口握手） | `chat_gui` 的全流程 |
 
-**安全边界**（当前完全没有，必须补）：
+**安全边界**（本服务是**单机本地**服务，无鉴权，这是经过确认的决策）：
 
-- 默认 `--host 127.0.0.1`，仅回环。绑 `0.0.0.0` 必须在启动时显式加
-  `--allow-remote` 并打印警告。
-- 本地 token：启动时生成写入 `~/.stego/token`，前端从 URL 或环境变量取；
-  API 接受 `Authorization: Bearer`。这样「本地其它系统」有稳定的接入方式，
-  而随机网页无法驱动本地服务（防 DNS rebinding / CSRF）。
+- 默认 `--host 127.0.0.1`，仅回环。`run_server` 在非回环地址上直接拒绝启动，
+  除非调用方显式传 `allow_remote=True`；CLI **没有**这个开关，所以意外暴露
+  必须改代码，而不是敲错一个参数。
+- **没有 token。** 理由：调用方是同机上的另一个程序，而任何能访问本地端口的
+  进程本来就能直接读密钥；加 token 只增加「token 从哪来/为什么变了」这类
+  故障点，不增加安全性。代价是接口被信任——不限流、不校验 CSRF、不签名请求。
+- 端口可配置（`--port` 或环境变量 `MKX1_PORT`），**默认 8731**。
+  刻意避开 8000/8080：这些端口常被开发服务器占用，选中它们会把「启动 API」
+  变成「满机器找空闲端口」。
 - 上传大小上限可配，默认 64 MB（覆盖实测最大 144 Mpx 图约 20 MB PNG）。
+  这不是安全措施，而是防止一张 500 MB 的图被解码成几十 GB 像素把进程拖死。
 - 训练等长任务一律异步化（作业模型），避免请求超时。
 
 ## 5. 扩展路线：新信道如何接入
@@ -869,15 +875,39 @@ for ch in engine.channels():
 **未做**：`Engine` 不包装 `Channel` 的错误。它们已经带 `code`/`http_status`
 与原文原因，再包一层正是这些信息丢失的方式。
 
-### 阶段 4：Web API（2 天）
+### 阶段 4：Web API（2 天）✅ 已完成
 
-- FastAPI 应用工厂 + `deps.py` 注入 Engine 单例
-- `/channels`、`/probe`、`/encode`、`/decode`
+- FastAPI 应用工厂 `create_app(config, engine=...)`，Engine 单例挂在 `app.state`
+- `/health`、`/channels`、`/probe`、`/embed`、`/extract`
 - 错误 → HTTP 映射（`core/errors.py` 已带 `http_status`）
-- `X-Stego-*` 响应头
-- `tests/e2e/web/`：用 `httpx.ASGITransport`，不需真起服务
+- `X-Report` 响应头（ASCII 安全 JSON）+ 若干 `X-Option-*`
+- `tests/test_web.py`：用 `httpx.ASGITransport`，另加一项真起 uvicorn 的冒烟
 
-**验收**：三信道经 HTTP 往返；错误码正确；大图不 OOM。
+**实际结果**：新增 `markovcryptor/web.py`（352 行）、`tests/test_web.py`（18 项），
+CLI 新增 `serve` 子命令。总测试 **129 项全绿**。
+
+与原计划的三处偏离，都是实施后确认的：
+
+1. **`/encode`、`/decode` 改名为 `/embed`、`/extract`。** `encode` 在本项目里
+   已经有确定含义（二进制 → 中文伪装文本），而 `/embed` 要对三个信道都成立。
+   沿用 `encode` 会让人以为该接口只管中文。
+2. **载荷与载体是两个独立上传字段**（`payload_file` / `cover_file`）。
+   原计划想用同一个字段，但中文信道没有载体，那样只能靠约定区分。
+   现在「载荷是要藏的东西、载体是藏它的东西」在接口上直接可见。
+3. **`options` 走 query 参数里的 JSON 字符串**，而不是 body 字段。
+   该接口已经是 multipart；放 query 才能让整个接口只用 `curl -F` 就能调通。
+
+实施中发现并修掉两个真实缺陷：
+
+- **`kind=text` 时上传的载体文本被忽略。** `_read_carrier` 只读 query 里的
+  `text`，于是中文信道经 HTTP 永远提取失败（`embed` 拿空载体生成、`extract`
+  拿空文本解）。改用文件优先、`text` 兜底，并显式以 `utf-8-sig` 解码。
+- **HTTP 头只能是 latin-1，`options_used` 里可能是中文（如口令）。**
+  构建响应时抛 `UnicodeEncodeError` 变成 500。改为非 ASCII 值不进头，
+  完整报告放进 `X-Report`（`ensure_ascii=True`）。
+
+**未做**：没有 `deps.py`。只有一个 Engine，FastAPI 的 `app.state` 已经足够；
+单独一层依赖注入文件在这个规模上是纯仪式。
 
 ### 阶段 5：批处理作业（1.5 天）
 
@@ -910,7 +940,7 @@ Tk 里那批业务方法（`gui.py` 52 个方法中约 30 个是业务逻辑：
   - 批处理面板（提交、SSE 进度、失败项列表、结果下载）
   - 模型管理（列表、导入、删除、训练，训练走作业）
   - 聊天面板（双人握手，用 `engine/session.py`）
-  - 鉴权：本地 token + 默认回环绑定
+  - 鉴权：无 token；默认仅回环绑定（见 §安全边界）
 - **6c. 冻结 Tk**（0.5 天）：`markovcryptor/gui.py`、`chat_gui.py`
   原样移入 `interfaces/desktop/legacy/`，**不改一行**，入口保留并打印
   「已停止演进，请用 `stego serve`」。这样旧用户不会突然失去可用工具，
@@ -949,7 +979,7 @@ Tk 里那批业务方法（`gui.py` 52 个方法中约 30 个是业务逻辑：
 | 大图/视频在 Web 侧 OOM | 服务被打挂 | 请求体上限、流式上传、`Carrier` 惰性加载、worker 池限流、按信道声明内存预估 |
 | 视频信道实测不达标 | 宣称支持但不可用 | 先写实测矩阵（`docs/CHANNELS.md`），达不到就明确标注「实验性」并默认关闭 |
 | Web UI 功能不如 Tk 完整 | 用户失去能力 | 阶段 6 用「对齐表」（§4.8）逐项核对；Tk 冻结不删，可随时回退 |
-| 本地 API 被任意网页驱动 | 隐私/资源滥用 | 默认回环绑定 + 本地 token（§4.8）；绑外部地址需显式确认 |
+| 本地 API 被任意网页驱动 | 隐私/资源滥用 | 默认仅回环绑定，非回环地址直接拒绝启动（§安全边界）；服务无 token，代价已接受 |
 | 前端代码腐化 | 需要重引入构建链 | 限定为「表单 + 上传 + SSE」，不引入状态库；表单由 schema 生成，天然跟随后端演进 |
 | 包改名打断外部引用 | 依赖方 import 失败 | 本期不改名（见 §3 决策），只做内部子包重组 |
 | 测试仍依赖本地大目录 | CI 不可用 | 阶段 0 的 fixtures 先落地，`data/`/`corpus/`/`models/` 全部移出测试路径 |

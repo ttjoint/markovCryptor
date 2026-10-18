@@ -130,6 +130,28 @@ python -m markovcryptor.cli probe --channel image --input photo.png --bytes 512
 `probe` 不可承载时退出码为 1，并打印真实原因与可操作建议，例如
 `容量不足：最多 162 字节，需要 99999 字节` + `放大到 3840×3840（24.0×）即可承载`。
 
+### 本机 Web API
+
+```powershell
+python -m markovcryptor.cli serve                  # 默认 http://127.0.0.1:8731
+python -m markovcryptor.cli serve --port 9101      # 端口可配
+$env:MKX1_PORT=9101; python -m markovcryptor.cli serve   # 或用环境变量
+```
+
+供本机其它程序调用：`GET /health`、`GET /channels`、`POST /probe`、
+`POST /embed`、`POST /extract`。交互式文档在 `/docs`。
+
+- **无鉴权。** 这是单机服务，调用方是同机的另一个程序；能访问本地端口的进程
+  本来就能直接读密钥，加 token 只增加故障点。因此服务**只允许监听回环地址** ——
+  `--host 0.0.0.0` 会被直接拒绝启动（CLI 没有绕过开关）。
+- 默认端口 **8731**，刻意避开 8000/8080 这类常被开发服务器占用的端口。
+- 上传上限默认 64 MB；防止一张巨型图被解码成几十 GB 像素拖死进程。
+
+```bash
+curl -F payload_file=@secret.bin -F cover_file=@photo.png      "http://127.0.0.1:8731/embed?channel=image&kind=image&key=口令" -o hidden.png
+curl -F file=@hidden.png      "http://127.0.0.1:8731/extract?channel=image&kind=image&key=口令" -o back.bin
+```
+
 ### 图形界面（中文信道）
 
 ```powershell
@@ -167,6 +189,7 @@ python run_chat.py
 | `markovcryptor/core/` | 信道共享内核（见下） |
 | `markovcryptor/channels/` | 统一信道接口与三个适配器（见下） |
 | `markovcryptor/engine.py` | 引擎：模型缓存 + 信道调度 |
+| `markovcryptor/web.py` | 本机 Web API（FastAPI，无鉴权，仅回环） |
 | `docs/IMAGE_STEGO.md` | 图片/GIF 信道完整原理与容量文档 |
 | `docs/ARCHITECTURE.md` | 平台化架构方案与迁移进度 |
 
@@ -232,8 +255,8 @@ for channel in registry.register_defaults():
 python -m unittest discover -s tests
 ```
 
-共 109 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项、统一信道接口 20 项、
-引擎与缓存 14 项、CLI 端到端 11 项。
+共 129 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项、统一信道接口 20 项、
+引擎与缓存 14 项、CLI 端到端 13 项、Web API 18 项。
 全部夹具随仓库分发，**不依赖 `data/`、`corpus/`、`models/`**，干净检出即可跑完，
 无跳过。若需重新生成夹具（例如某个测试要换形状）：
 

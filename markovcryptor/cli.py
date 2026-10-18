@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import sys
 import time
 
 from .channels import Carrier, CarrierKind
 from .codec import MarkovStegoCodec
+from .core.errors import StegoError
 from .engine import Config, Engine
+from .web import DEFAULT_HOST, DEFAULT_PORT
 from .model import (
     MarkovModel,
     default_model_dir,
@@ -72,6 +75,12 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--input", type=Path, required=True, help="载体文件")
     probe.add_argument("--bytes", type=int, required=True, help="载荷字节数")
     probe.add_argument("--model-dir", type=Path, default=default_model_dir())
+
+    serve = sub.add_parser("serve", help="启动本机 Web API（无鉴权，仅监听回环地址）")
+    serve.add_argument("--host", default=DEFAULT_HOST, help=f"监听地址，默认 {DEFAULT_HOST}")
+    serve.add_argument("--port", type=int, default=DEFAULT_PORT,
+                       help=f"端口，默认 {DEFAULT_PORT}（也可用环境变量 MKX1_PORT）")
+    serve.add_argument("--model-dir", type=Path, default=default_model_dir())
     return parser
 
 
@@ -151,6 +160,19 @@ def main(argv: list[str] | None = None) -> int:
         for key, value in feas.cost.items():
             print(f"  {key}: {value}")
         return 0 if feas.ok else 1
+
+    if args.command == "serve":
+        from .web import ApiConfig, run_server
+
+        port = int(os.environ.get("MKX1_PORT") or args.port)
+        try:
+            run_server(ApiConfig(host=args.host, port=port, model_dir=args.model_dir))
+        except StegoError as exc:
+            print(exc, file=sys.stderr)
+            for hint in exc.hints:
+                print(f"  建议：{hint}", file=sys.stderr)
+            return 2
+        return 0
 
     if args.command == "train":
         files = discover_corpus_files(args.corpus)
