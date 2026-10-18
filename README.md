@@ -162,6 +162,12 @@ python run_chat.py
 python -m unittest discover -s tests
 ```
 
-共 64 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项。
+共 71 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项、CLI 端到端 7 项。
+全部夹具随仓库分发，**不依赖 `data/`、`corpus/`、`models/`**，干净检出即可跑完，
+无跳过。若需重新生成夹具（例如某个测试要换形状）：
+
+```powershell
+python -m tools.make_fixtures
+```
 
 模型格式为 `markovcryptor-model-v3`，旧版模型需要重新训练。

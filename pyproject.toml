@@ -1,2 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "markovcryptor"
+version = "0.3.0"
+description = "多信道隐写加解密平台：中文文本、静态图、动图"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "ttjoint", email = "bignesslaski@gmail.com" }]
+
+# Runtime deps mirror what the channel kernels actually import.  Kept as lower
+# bounds rather than pins: the kernels use no recently-added APIs, and pinning
+# would fight any host project that already has these installed.
+dependencies = [
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "reedsolo>=1.7",
+    "cryptography>=42.0",
+]
+
+[project.optional-dependencies]
+# Web API + Web UI landing in the next refactor phases (docs/ARCHITECTURE.md §6).
+web = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.9",
+]
+# Video / stream channels are out of scope for now (ARCHITECTURE.md decision 3).
+# Listed so the eventual work does not have to rediscover the choice.
+media = [
+    "opencv-python>=4.9",
+    "av>=12.0",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+markovcryptor = "markovcryptor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["markovcryptor*"]
+
+# The suite is stdlib unittest, so configure nothing for pytest beyond the path:
+# it is optional (see [project.optional-dependencies].dev) for anyone who wants it.
 [tool.pytest.ini_options]
 pythonpath = ["."]
+testpaths = ["tests"]

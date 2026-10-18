@@ -13,9 +13,11 @@ from PIL import Image
 from markovcryptor import image_stego as S
 from markovcryptor.handshake import HandshakeParty, HandshakeError, seal, open_
 
+import fixtures as F
+
 
 def _cover() -> Image.Image:
-    return Image.open("data/0.png").convert("RGB")
+    return F.photo()
 
 
 class ImageStegoTest(unittest.TestCase):
@@ -136,7 +138,7 @@ class CoverConstraintTest(unittest.TestCase):
 
     def test_non_multiple_of_eight(self):
         for size in ((491, 512), (410, 512), (474, 512), (352, 512)):
-            image = Image.open("data/6.png").convert("RGB").resize(size)
+            image = F.photo(size)
             self.assertTrue(self._roundtrip(image), size)
 
     def test_geometric_edits_break_the_frame(self):
@@ -150,7 +152,7 @@ class CoverConstraintTest(unittest.TestCase):
 class HandshakeTest(unittest.TestCase):
     def test_full_exchange(self):
         random.seed(3)
-        covers = [Image.open(f"data/{i}.png").convert("RGB") for i in (0, 1, 2)]
+        covers = [F.varied_photo(i) for i in (0, 1, 2)]
         alice = HandshakeParty("Alice", "口令")
         bob = HandshakeParty("Bob", "口令")
         bob.receive_stego_image(alice.make_stego_image(random.choice(covers))[0])

@@ -709,15 +709,38 @@ Tk 需要 Python + 图形栈；浏览器只需一个 URL。对本地其它系统
 
 原则：**每一步结束时测试全绿、CLI 可用**。不做「大爆炸式」重写。
 
-### 阶段 0：建立安全网（0.5 天）
+### 阶段 0：建立安全网 ✅ 已完成
 
-- 把 64 项测试按 `tests/unit/` 重组（只挪文件，不改断言）
-- 加 `tools/make_fixtures.py` 生成小图/小 GIF/迷你语料，
-  摆脱对 `data/`、`corpus/` 的依赖（当前测试已基本做到）
-- `pyproject.toml` 补正式元数据、依赖、入口点
-- 建立 `tests/e2e/` 骨架：现在 CLI 的行为快照
+**实施中发现的实情**（比方案预估严重）：这不是「当前测试已基本做到」，
+而是**干净检出下 10 项直接报错、8 项静默跳过**——图片测试硬读 `data/*.png`
+（不存在则 `FileNotFoundError`），GIF 测试在找不到 `data/gif` 时
+`raise unittest.SkipTest`。也就是说 GIF 信道在 CI 上从来没有被真正测过。
 
-**验收**：`python -m unittest discover` 64 项全绿。
+已完成：
+
+- `tools/make_fixtures.py`：确定性生成 6 个夹具（160² 照片、120² 最小图、
+  非方形、JPEG 源、3 帧 GIF、13 KB 中文语料），共 167 KB，随仓库分发
+- `tests/fixtures.py`：统一的载体访问层，`require()` 缺夹具时**报错而非跳过**
+  （静默跳过正是旧问题被隐藏的原因）
+- 消除全部 `data/`、`data/gif/` 引用；GIF 测试由「遍历外部样本」
+  改为「使用版本化夹具」
+- `pyproject.toml` 补正式元数据、`[project.scripts]`、可选依赖分组
+  （`web`/`media`/`dev`）；`pip install -e .` 验证通过，`markovcryptor` 命令可用
+- 新增 `tests/test_cli.py`：7 项 CLI 端到端测试（子进程方式，
+  覆盖 train/encode/decode/identify/models/demo/错误退出码）
+- 顺手修掉两个测试卫生问题：`ResourceWarning`（缓存了未关闭的
+  `Image.open` 句柄）与 `DeprecationWarning`（`getdata` → `get_flattened_data`）
+
+**验收结果**：`python -m unittest discover -s tests` →
+**71 项全绿，零跳过**；在无 `data/`、`corpus/`、`models/` 的干净目录里
+同样 71 项全绿，耗时 50 s → 16 s。
+
+**未做**：原计划的 `tests/unit/` 目录重组。理由：搬运文件不与阶段 1 的
+模块搬迁同时进行，减少同期的路径变更噪音；等 core/channels 分层落地后
+再一次性按层组织测试目录更合理。
+
+> 注：`tests/` 不设 `__init__.py`，唯一入口是 `discover -s tests`。
+> 设为包会让该命令要求改用相对导入，两种调用方式互相排斥。
 
 ### 阶段 1：抽 core 层（1 天）
 

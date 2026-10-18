@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import glob
-import os
 import unittest
 from io import BytesIO
 
@@ -13,18 +11,16 @@ from PIL import Image
 from markovcryptor import gif_stego as G
 from markovcryptor import image_stego as S
 
-
-def _first_frame(path: str) -> Image.Image:
-    image = Image.open(path)
-    image.seek(0)
-    return image.convert("RGB")
+import fixtures as F
 
 
-def _sample_gif() -> str:
-    files = sorted(glob.glob(os.path.join("data", "gif", "*.gif")))
-    if not files:
-        raise unittest.SkipTest("data/gif 中没有 GIF 样本")
-    return files[0]
+def _sample_gif() -> Image.Image:
+    """The versioned fixture animation (3 frames, 120x120).
+
+    Previously this read ``data/gif/*.gif``, which is not versioned — so on a
+    clean checkout every GIF test quietly skipped and the channel was untested.
+    """
+    return F.animation_image()
 
 
 class GifStegoTest(unittest.TestCase):
@@ -35,7 +31,7 @@ class GifStegoTest(unittest.TestCase):
         return S.build_frame(payload if payload is not None else self.payload)
 
     def test_embed_and_extract(self):
-        source = Image.open(_sample_gif())
+        source = _sample_gif()
         data, report = G.embed_gif(source, self.frame(), self.key)
         self.assertIn(report["step"], G.GIF_STEPS)
         got, info = G.extract_gif(data, self.key)
@@ -43,20 +39,20 @@ class GifStegoTest(unittest.TestCase):
         self.assertEqual(info["gif_frames"], report["frames"])
 
     def test_output_is_a_valid_gif(self):
-        source = Image.open(_sample_gif())
+        source = _sample_gif()
         data, report = G.embed_gif(source, self.frame(), self.key)
         reloaded = Image.open(BytesIO(data))
         self.assertEqual(reloaded.format, "GIF")
         self.assertEqual(reloaded.n_frames, report["frames"])
 
     def test_wrong_key_rejected(self):
-        source = Image.open(_sample_gif())
+        source = _sample_gif()
         data, _ = G.embed_gif(source, self.frame(), self.key)
         with self.assertRaises(S.StegoError):
             G.extract_gif(data, S.normalise_key("different-key"))
 
     def test_clean_gif_is_rejected(self):
-        source = Image.open(_sample_gif())
+        source = _sample_gif()
         frames, durations = G.frames_of(source)
         clean = G.encode_gif([G._to_palette(f) for f in frames], durations)
         with self.assertRaises(G.GifStegoError):
@@ -65,8 +61,7 @@ class GifStegoTest(unittest.TestCase):
     def test_palette_quantisation_is_lossless_for_gif_frames(self):
         # The whole scheme depends on this: a frame that a GIF can already
         # represent must survive a round trip through the palette unchanged.
-        for path in sorted(glob.glob(os.path.join("data", "gif", "*.gif")))[:4]:
-            source = Image.open(path)
+        for label, source in (("fixture", _sample_gif()),):
             frames, _durations = G.frames_of(source)
             for frame in frames[:2]:
                 palette = G._to_palette(frame)
@@ -74,39 +69,30 @@ class GifStegoTest(unittest.TestCase):
                 original = frame.quantize(
                     256, method=Image.MEDIANCUT, dither=Image.NONE
                 ).convert("RGB")
-                self.assertEqual(list(again.getdata()), list(original.getdata()), path)
+                self.assertEqual(
+                    list(again.get_flattened_data()),
+                    list(original.get_flattened_data()),
+                    label,
+                )
 
     def test_every_sample_survives(self):
-        files = sorted(glob.glob(os.path.join("data", "gif", "*.gif")))
-        if not files:
-            raise unittest.SkipTest("data/gif 中没有 GIF 样本")
-        for path in files:
-            with self.subTest(path=os.path.basename(path)):
-                data, _report = G.embed_gif(Image.open(path), self.frame(), self.key)
-                got, _info = G.extract_gif(data, self.key)
-                self.assertEqual(got, self.payload)
+        data, _report = G.embed_gif(_sample_gif(), self.frame(), self.key)
+        got, _info = G.extract_gif(data, self.key)
+        self.assertEqual(got, self.payload)
 
     def test_size_overhead_is_small(self):
         # Embedding touches one frame only, so the file may not balloon.  We
         # compare against a plain re-encode, since that isolates the cost of
         # steganography from the cost of PIL's own GIF writer.
-        files = sorted(glob.glob(os.path.join("data", "gif", "*.gif")))
-        if not files:
-            raise unittest.SkipTest("data/gif 中没有 GIF 样本")
-        for path in files[:6]:
-            with self.subTest(path=os.path.basename(path)):
-                source = Image.open(path)
-                frames, durations = G.frames_of(Image.open(path))
-                control = G.encode_gif(
-                    [G._to_palette(f) for f in frames], durations
-                )
-                data, _ = G.embed_gif(source, self.frame(), self.key)
-                growth = (len(data) - len(control)) / len(control)
-                self.assertLess(growth, 0.10, f"{growth:.1%} 增长过大")
+        source = _sample_gif()
+        frames, durations = G.frames_of(source)
+        control = G.encode_gif([G._to_palette(f) for f in frames], durations)
+        data, _ = G.embed_gif(source, self.frame(), self.key)
+        growth = (len(data) - len(control)) / len(control)
+        self.assertLess(growth, 0.10, f"{growth:.1%} 增长过大")
 
     def test_multiple_frames(self):
-        path = _sample_gif()
-        source = Image.open(path)
+        source = _sample_gif()
         if getattr(source, "n_frames", 1) < 2:
             self.skipTest("样本只有一帧")
         data, report = G.embed_gif(source, self.frame(), self.key,
@@ -117,7 +103,7 @@ class GifStegoTest(unittest.TestCase):
             self.assertEqual(got, self.payload)
 
     def test_capacity_report(self):
-        info = G.capacity(Image.open(_sample_gif()))
+        info = G.capacity(_sample_gif())
         self.assertGreater(info["max_payload_bytes"], 32)
         self.assertGreaterEqual(info["frames"], 1)
 

@@ -1,0 +1,158 @@
+"""End-to-end tests for the command line interface.
+
+These exercise the real entry points (``python -m markovcryptor.cli``) rather than
+calling library functions, so argument parsing, exit codes and progress output
+are covered too.  Every test builds its own temporary model directory from the
+versioned fixture corpus — nothing here depends on ``data/``, ``corpus/`` or
+``models/``.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+import fixtures as F
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _run(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    """Run the CLI as a subprocess, exactly as a user would."""
+    return subprocess.run(
+        [sys.executable, "-m", "markovcryptor.cli", *args],
+        cwd=str(cwd or ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+    )
+
+
+class CliTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.tmp = Path(cls._tmp.name)
+        cls.model_dir = cls.tmp / "models"
+        cls.model_dir.mkdir()
+        result = _run(
+            "train",
+            "--corpus", str(F.require(F.CORPUS)),
+            "--model-dir", str(cls.model_dir),
+            "--name", "fixture",
+        )
+        if result.returncode != 0:
+            raise AssertionError(
+                f"训练失败，后续测试无意义\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+        cls.models = sorted(cls.model_dir.glob("*.json"))
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def setUp(self) -> None:
+        self.assertTrue(self.models, "训练应产出至少一个模型文件")
+
+    def test_help_lists_subcommands(self):
+        result = _run("--help")
+        self.assertEqual(result.returncode, 0)
+        for command in ("train", "encode", "decode", "models", "identify"):
+            self.assertIn(command, result.stdout)
+
+    def test_models_lists_trained_model(self):
+        result = _run("models", "--model", str(self.model_dir))
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("fixture", result.stdout)
+
+    def test_encode_decode_roundtrip(self):
+        payload = self.tmp / "payload.bin"
+        payload.write_bytes(bytes(range(48)))
+        hidden = self.tmp / "hidden.txt"
+        recovered = self.tmp / "recovered.bin"
+
+        encoded = _run(
+            "encode", "--model", str(self.models[0]),
+            "--input", str(payload), "--output", str(hidden),
+        )
+        self.assertEqual(encoded.returncode, 0, encoded.stderr)
+        self.assertTrue(hidden.exists())
+
+        # The carrier must look like prose: no raw payload bytes leaking through.
+        text = hidden.read_text(encoding="utf-8")
+        self.assertNotIn("MAGIC", text)
+
+        decoded = _run(
+            "decode", "--model", str(self.model_dir),
+            "--input", str(hidden), "--output", str(recovered),
+        )
+        self.assertEqual(decoded.returncode, 0, decoded.stderr)
+        self.assertEqual(recovered.read_bytes(), bytes(range(48)))
+
+    def test_identify_reports_model(self):
+        payload = self.tmp / "payload.bin"
+        payload.write_bytes(b"identify me")
+        hidden = self.tmp / "hidden.txt"
+        _run("encode", "--model", str(self.models[0]),
+             "--input", str(payload), "--output", str(hidden))
+
+        result = _run("identify", "--model", str(self.model_dir),
+                      "--input", str(hidden))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("fixture", result.stdout)
+
+    def test_decode_wrong_model_fails_loudly(self):
+        """A mismatched model must error, not silently emit garbage."""
+        # Not created here: `train` refuses an existing directory it does not
+        # own, so let it create the folder itself.
+        other_dir = self.tmp / "models_other"
+        # Train a second model on deliberately different statistics.  Needs
+        # >= 64 distinct hanzi or training refuses (a real constraint of the
+        # trainer, not a test artefact), so build a wide alphabet rather than
+        # repeating a short one.
+        alt_corpus = self.tmp / "alt.txt"
+        alphabet = "".join(chr(0x4E00 + i) for i in range(120))
+        alt_corpus.write_text(
+            "\n".join(alphabet[i:i + 60] for i in range(0, len(alphabet), 60)) * 20,
+            encoding="utf-8",
+        )
+        trained = _run("train", "--corpus", str(alt_corpus),
+                       "--model", str(other_dir), "--name", "alt")
+        self.assertEqual(trained.returncode, 0, trained.stderr)
+
+        payload = self.tmp / "payload.bin"
+        payload.write_bytes(bytes(range(24)))
+        hidden = self.tmp / "hidden.txt"
+        _run("encode", "--model", str(self.models[0]),
+             "--input", str(payload), "--output", str(hidden))
+
+        result = _run("decode", "--model", str(other_dir),
+                      "--input", str(hidden), "--output", str(self.tmp / "out.bin"))
+        # Either it refuses (correct) or it decodes to the right answer by
+        # luck — what it must never do is claim a wrong result silently.
+        if result.returncode == 0:
+            self.assertEqual((self.tmp / "out.bin").read_bytes(), bytes(range(24)))
+        else:
+            # The message names the real reason ("no supplied model matches
+            # this cover text") — assert on that, not on a vague phrase.
+            self.assertIn("no supplied model matches", result.stderr + result.stdout)
+
+    def test_demo_runs(self):
+        result = _run("demo", "--model", str(self.models[0]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("round-trip ok", result.stdout + result.stderr)
+
+    def test_missing_corpus_exits_nonzero(self):
+        result = _run("train", "--corpus", str(self.tmp / "nope.txt"),
+                      "--model", str(self.tmp / "x"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stderr.strip() or result.stdout.strip())
+
+
+if __name__ == "__main__":
+    unittest.main()
