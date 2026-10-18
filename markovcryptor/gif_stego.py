@@ -27,6 +27,7 @@ GIF compression works on differences between frames.
 
 from __future__ import annotations
 
+import os
 from io import BytesIO
 
 from PIL import Image
@@ -45,6 +46,28 @@ GIF_STEPS = (20.0, 28.0, 40.0, 64.0, 96.0, 128.0)
 #: GIF palettes hold at most 256 entries.
 MAX_COLORS = 256
 
+#: Scaling an animation up multiplies *every* frame, so the file grows with the
+#: square of the scale factor.  A 156-frame 100x100 sticker going 2x turned
+#: 667 KB into 5.7 MB to carry 32 bytes, which is not a trade anyone wants.
+#: We therefore allow a small enlargement but refuse once the predicted size
+#: cost is out of proportion to the payload.
+MAX_GIF_UPSCALE = 2
+#: Refuse an upscale whose projected file growth exceeds this multiple.
+#: Projected pixel-area growth we tolerate.  2x per side (4x the pixels) is
+#: the ceiling: past that the animation is mostly being re-encoded, not
+#: carrying a message.
+MAX_GIF_GROWTH = 4.0
+#: Absolute ceiling on the enlarged animation thinkable at all.  Doubling a
+#: 6 KB 47-frame sticker yields 283 KB; that is 47x the original file to carry
+#: 32 bytes, well past any sane trade.
+MAX_GIF_UPSCALE_BYTES = 512 * 1024
+#: Largest file we are willing to produce by enlarging.  Scaling multiplies the
+#: pixel count *and* breaks the inter-frame delta compression that keeps
+#: stickers small, so a 47-frame 155x60 original can go 6 KB -> 283 KB -- the
+#: area ratio alone never catches that.  We therefore encode one enlarged frame
+#: to get a real per-frame cost and extrapolate from it.
+MAX_GIF_UPSCALE_RESULT = 160 * 1024
+
 
 class GifStegoError(StegoError):
     """Raised when a GIF frame cannot carry the requested payload."""
@@ -60,6 +83,22 @@ def _flatten(image: Image.Image) -> Image.Image:
     return image.convert("RGB")
 
 
+def _source_size(image: Image.Image) -> int:
+    """Bytes the animation occupies on disk, or 0 when it was not opened from one."""
+    stream = getattr(image, "fp", None)
+    try:
+        return os.fstat(stream.fileno()).st_size
+    except (AttributeError, OSError, ValueError):
+        return 0
+
+
+def _gif_frame_bytes(image: Image.Image) -> int:
+    """Bytes a single frame occupies once stored as GIF."""
+    probe = BytesIO()
+    _to_palette(image).save(probe, "GIF")
+    return len(probe.getvalue())
+
+
 def _to_palette(image: Image.Image, colors: int = MAX_COLORS) -> Image.Image:
     """Quantise to a GIF-ready palette without dithering-noise."""
     paletted = image.convert("RGB").quantize(
@@ -71,18 +110,44 @@ def _to_palette(image: Image.Image, colors: int = MAX_COLORS) -> Image.Image:
     return paletted
 
 
-def frames_of(image: Image.Image) -> tuple[list[Image.Image], list[int]]:
-    """Decode every frame of a (possibly animated) GIF.
+def frame_durations(image: Image.Image) -> list[int]:
+    """Per-frame display durations, without decoding any pixels.
 
-    Returns ``(frames, durations)``; a still image yields a single frame.
+    Walking frames via ``seek`` is cheap for timing metadata, so we never need
+    to materialise an animation we are only going to re-encode as-is.
     """
     count = getattr(image, "n_frames", 1)
+    durations: list[int] = []
+    for index in range(count):
+        image.seek(index)
+        durations.append(int(image.info.get("duration", 40) or 40))
+    image.seek(0)
+    return durations
+
+
+def frames_of(image: Image.Image,
+              keep: tuple[int, ...] | None = None
+              ) -> tuple[list[Image.Image], list[int]]:
+    """Decode frames of a (possibly animated) GIF, flattened to RGB.
+
+    ``keep`` limits decoding to the frames that will actually be modified;
+    the others are still returned, but as cheap palette copies.  Decoding a
+    3700-frame sticker sheet takes seconds, and only frame 0 is ever written.
+    """
+    count = getattr(image, "n_frames", 1)
+    wanted = set(range(count)) if keep is None else set(keep)
     frames: list[Image.Image] = []
     durations: list[int] = []
     for index in range(count):
         image.seek(index)
-        frames.append(_flatten(image))
         durations.append(int(image.info.get("duration", 40) or 40))
+        if index in wanted:
+            frames.append(_flatten(image))
+        else:
+            # Untouched frames are handed to the encoder as-is.  Quantising
+            # them here would cost ~100ms per frame on a 1080p animation and
+            # the encoder quantises again anyway.
+            frames.append(image if image.mode == "P" else image.convert("RGB"))
     image.seek(0)
     return frames, durations
 
@@ -118,55 +183,57 @@ def embed_gif(source: Image.Image, frame: bytes, key: bytes,
     from .image_stego import parse_frame, upscale_cover
 
     expected = parse_frame(frame)
-    rgb_frames, durations = frames_of(source)
-    if not rgb_frames:
-        raise GifStegoError("GIF 没有可用的帧")
-    targets = [i for i in frames_to_use if 0 <= i < len(rgb_frames)]
+    count = getattr(source, "n_frames", 1)
+    targets = [i for i in frames_to_use if 0 <= i < count]
     if not targets:
-        raise GifStegoError(f"指定的帧 {frames_to_use} 超出了范围 0..{len(rgb_frames) - 1}")
+        raise GifStegoError(f"指定的帧 {frames_to_use} 超出了范围 0..{count - 1}")
+
+    # Decode only the frames we are about to modify; the rest are re-encoded
+    # from their palette data untouched.
+    rgb_frames, durations = frames_of(source, keep=tuple(targets))
 
     # Start from the quantised pixels so the embedder writes into colours the
     # format can actually reproduce.
-    paletted = [_to_palette(f) for f in rgb_frames]
-    work = [p.convert("RGB") for p in paletted]
+    base: list[Image.Image] = []
+    for index, frame_image in enumerate(rgb_frames):
+        if index in targets:
+            base.append(_to_palette(frame_image).convert("RGB"))
+        else:
+            base.append(frame_image)
 
-    # Frames that are too small get scaled up proportionally, exactly like still
-    # covers, so a 40x40 emoji GIF is still usable.  Every frame must share the
-    # new size, otherwise the animation would jitter.
-    resized_note: dict[int, tuple[int, int]] = {}
-    for index in targets:
-        work[index], original_size, did_resize = upscale_cover(
-            work[index], len(expected)
-        )
-        if did_resize:
-            resized_note[index] = original_size
-    if resized_note:
-        target_size = work[targets[0]].size
-        for index in range(len(work)):
-            if index not in targets and work[index].size != target_size:
-                work[index] = work[index].resize(target_size, Image.LANCZOS)
-                paletted[index] = _to_palette(work[index])
+    # Size of the animation on disk, used to veto absurd enlargements.  The
+    # number of frames alone says nothing: a 47-frame 155x60 sticker is 6 KB
+    # until you double it, at which point it becomes 283 KB.
+    source_bytes = _source_size(source)
 
     tried: list[float] = list(GIF_STEPS) if step is None else [step]
     last_error: Exception | None = None
-    for candidate in tried:
-        attempt = list(work)
+
+    def attempt_at(frames: list[Image.Image], candidate: float,
+                   resized: dict[int, tuple[int, int]]):
+        """One full embed -> encode -> read-back cycle at a fixed step."""
+        nonlocal last_error
+        work = list(frames)
         reports: list[dict] = []
-        ok = True
         for index in targets:
             try:
-                stego, report = embed(attempt[index], frame, key, step=candidate)
+                stego, report = embed(work[index], frame, key, step=candidate)
             except StegoError as exc:
                 last_error = exc
-                ok = False
-                break
-            attempt[index] = stego.convert("RGB")
+                return None, None
+            work[index] = stego.convert("RGB")
             reports.append(report)
-        if not ok:
-            continue
 
-        output = [_to_palette(f) for f in attempt]
+        # Untouched frames are already palettised; re-quantising them would
+        # shuffle their palette and inflate the file for no reason.
+        output = [f if f.mode == "P" else _to_palette(f) for f in work]
         data = encode_gif(output, durations)
+        # ``embed`` already round-tripped the payload in memory, so a failure
+        # here means the *encoder* changed the pixels -- a property of the step,
+        # not of this attempt.  Remember it instead of re-encoding (a 100-frame
+        # animation costs ~10s per encode, and the step loop would pay it six
+        # times over).
+
 
         # Trust only what a reader can get back out of the encoded file.
         reloaded = Image.open(BytesIO(data))
@@ -175,24 +242,95 @@ def embed_gif(source: Image.Image, frame: bytes, key: bytes,
                 reloaded.seek(index)
                 got, _ = extract(reloaded, key, step=candidate)
                 if got != expected:
-                    ok = False
-                    break
+                    last_error = StegoError("重新加载后提取结果不符")
+                    return None, None
         except StegoError as exc:
             last_error = exc
-            ok = False
-        if ok:
-            return data, {
-                "frames": len(output),
-                "embedded_frames": targets,
-                "step": candidate,
-                "bytes": len(data),
-                "carriers": [r["carrier"] for r in reports],
-                "max_block_change": max(r["max_block_change"] for r in reports),
-                "payload_bytes": reports[0]["payload_bytes"],
-                "resized": resized_note,
-            }
+            return None, None
+        return data, {
+            "frames": len(output),
+            "embedded_frames": targets,
+            "step": candidate,
+            "bytes": len(data),
+            "carriers": [r["carrier"] for r in reports],
+            "lead_profile": reports[0].get("lead_profile", 0),
+            "max_block_change": max(r["max_block_change"] for r in reports),
+            "payload_bytes": reports[0]["payload_bytes"],
+            "resized": resized,
+        }
+
+    # Pass 1: keep the original geometry.  A coarser lattice usually succeeds
+    # where a finer one fails, and it costs nothing; enlarging a 47-frame
+    # animation to squeeze in 32 bytes would multiply the file size instead.
+    for candidate in tried:
+        data, report = attempt_at(base, candidate, {})
+        if data is not None:
+            return data, report
+
+    # Pass 2: the frame really is too small.  Scale it up proportionally --
+    # every frame together, so the animation does not jitter -- and retry.
+    resized: dict[int, tuple[int, int]] = {}
+    scaled = list(base)
+    for index in targets:
+        scaled[index], original_size, did_resize = upscale_cover(
+            scaled[index], len(expected)
+        )
+        if did_resize:
+            new_w, new_h = scaled[index].size
+            ratio = max(new_w / max(original_size[0], 1),
+                        new_h / max(original_size[1], 1))
+            # GIF stays compressed, so file size tracks pixel *area*; each
+            # untouched frame is enlarged too, so the cost is paid count times.
+            growth = (new_w * new_h) / max(original_size[0] * original_size[1], 1)
+            # Growth is bounded relative to the original, but a *tiny* file
+            # growing 4x is still trivial and a *small* one is not: 6 KB -> 24
+            # KB is fine, 6 KB -> 283 KB is not.  Both the ratio and the
+            # absolute delta have to pass.
+            # Enlarging forces every frame to be stored at the new resolution,
+            # so the projected size is (frames x enlarged-frame bytes), not
+            # (original size x area ratio): delta compression is what made the
+            # original small, and it does not survive.
+            per_frame = _gif_frame_bytes(scaled[index])
+            projected = per_frame * len(rgb_frames)
+            too_expensive = (
+                ratio > MAX_GIF_UPSCALE
+                or growth > MAX_GIF_GROWTH
+                or source_bytes > MAX_GIF_UPSCALE_BYTES
+                or projected > MAX_GIF_UPSCALE_RESULT
+            )
+            if too_expensive:
+                capacity = max_payload_bytes(*original_size)
+                raise GifStegoError(
+                    f"GIF 太小：{original_size[0]}×{original_size[1]} 只能容纳 "
+                    f"{capacity} 字节，需要 {len(expected)} 字节。放大 {ratio:.1f}× "
+                    f"会让全部 {len(rgb_frames)} 帧的像素量变成 {growth:.1f} 倍"
+                    f"（原文件 {source_bytes // 1024} KB），体积代价与载荷不成比例。"
+                    f"请换一张更大的动图，或先用其它工具把它调大后重试。")
+            resized[index] = original_size
+    if resized:
+        # Every frame must land on the same grid, but untouched frames stay in
+        # palette mode: scaling a P image with NEAREST keeps the palette intact,
+        # whereas converting to RGB and re-quantising each frame is what made
+        # a 667 KB animation balloon to 5.7 MB.
+        target_size = scaled[targets[0]].size
+        for index in range(len(scaled)):
+            if index in targets or scaled[index].size == target_size:
+                continue
+            if scaled[index].mode == "P":
+                scaled[index] = scaled[index].resize(target_size, Image.NEAREST)
+            else:
+                scaled[index] = _to_palette(
+                    scaled[index].resize(target_size, Image.LANCZOS))
+        for candidate in tried:
+            data, report = attempt_at(scaled, candidate, resized)
+            if data is not None:
+                return data, report
+
+    detail = str(last_error) if last_error else "未知原因"
     raise GifStegoError(
-        f"该 GIF 无法稳定承载数据（已尝试 step={tried}）：{last_error}"
+        f"该 GIF 无法稳定承载数据（已尝试 step={tried}）：{detail}。"
+        f"动图帧多为大面积纯色/渐变色块时 QIM 难以写入，"
+        f"可换一张细节更丰富的动图，或改用静态图通道。"
     )
 
 

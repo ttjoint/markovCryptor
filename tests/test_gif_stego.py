@@ -7,6 +7,7 @@ import os
 import unittest
 from io import BytesIO
 
+import numpy as np
 from PIL import Image
 
 from markovcryptor import gif_stego as G
@@ -136,18 +137,31 @@ class GifGeometryTest(unittest.TestCase):
 
     key = S.normalise_key("gif-geometry")
 
-    def test_tiny_gif_is_upscaled(self):
-        frames, durations = [], []
-        for i in range(3):
-            image = Image.new("RGB", (40, 40), (40 + i * 30, 90, 140 - i * 20))
-            frames.append(image)
-            durations.append(50)
-        raw = G.encode_gif([G._to_palette(f) for f in frames], durations)
-        source = Image.open(BytesIO(raw))
+    def _animated(self, size, count, base=(40, 90, 140)):
+        frames = [
+            Image.fromarray(
+                np.random.default_rng(11 + i).integers(
+                    0, 256, (size[1], size[0], 3), dtype=np.uint8), "RGB")
+            for i in range(count)
+        ]
+        raw = G.encode_gif([G._to_palette(f) for f in frames], [50] * count)
+        return Image.open(BytesIO(raw))
+
+    def test_small_gif_is_upscaled(self):
+        # 90x90 carries no handshake on its own; a modest enlargement does.
+        source = self._animated((90, 90), 3)
         payload = bytes(range(32))
         data, report = G.embed_gif(source, S.build_frame(payload), self.key)
-        got, _ = G.extract_gif(data, self.key)
-        self.assertEqual(got, payload)
+        self.assertTrue(report["resized"], "expected an enlargement")
+        self.assertEqual(G.extract_gif(data, self.key)[0], payload)
+
+    def test_tiny_gif_is_refused_not_blown_up(self):
+        # 40x40 would need 3x, i.e. 9x the pixels on *every* frame, which turns
+        # a few KB into a few hundred KB to carry 32 bytes.
+        source = self._animated((40, 40), 3)
+        with self.assertRaises(G.GifStegoError) as ctx:
+            G.embed_gif(source, S.build_frame(bytes(range(32))), self.key)
+        self.assertIn("太小", str(ctx.exception))
 
     def test_low_color_gif_works(self):
         frames = [Image.new("RGB", (256, 256), (30, 60, 90)) for _ in range(2)]

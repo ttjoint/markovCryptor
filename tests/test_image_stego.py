@@ -179,5 +179,55 @@ class HandshakeTest(unittest.TestCase):
         self.assertEqual(open_(party.psk[:32], nonce, ct).decode(), "秘密")
 
 
+class LeadProfileTest(unittest.TestCase):
+    """The lead header adapts to the cover so small images carry more payload."""
+
+    key = S.normalise_key("lead-profile")
+
+    def _cover(self, side):
+        return Image.fromarray(
+            np.random.default_rng(side).integers(0, 256, (side, side, 3), dtype=np.uint8),
+            "RGB")
+
+    def test_compact_lead_is_cheaper(self):
+        self.assertLess(S.LEAD_COMPACT.blocks, S.LEAD_STANDARD.blocks)
+        self.assertLess(S.blocks_needed(32, S.LEAD_COMPACT),
+                        S.blocks_needed(32, S.LEAD_STANDARD))
+
+    def test_codewords_stay_lane_aligned(self):
+        # Each 8x8 block carries LANES bits, so a lead codeword that is not a
+        # whole number of lanes would desynchronise every following block.
+        for profile in S.LEAD_PROFILES.values():
+            self.assertEqual(profile.code_bytes * 8 % S.LANES, 0, profile)
+
+    def test_small_cover_picks_compact(self):
+        self.assertIs(S.lead_profile_for(S.blocks_total(128, 128), 32), S.LEAD_COMPACT)
+
+    def test_large_cover_picks_standard(self):
+        self.assertIs(S.lead_profile_for(S.blocks_total(2048, 2048), 32), S.LEAD_STANDARD)
+
+    def test_both_profiles_round_trip(self):
+        payload = bytes(range(32))
+        seen = set()
+        for side in (128, 2048):
+            stego, report = S.embed(self._cover(side), S.build_frame(payload), self.key)
+            seen.add(report["lead_profile"])
+            got, _ = S.extract(stego, self.key, step=report["step"])
+            self.assertEqual(got, payload, side)
+        self.assertEqual(seen, {p.index for p in S.LEAD_PROFILES.values()},
+                         "expected each profile to be exercised")
+
+    def test_explicit_profile_is_honoured(self):
+        payload = bytes(range(32))
+        for profile in S.LEAD_PROFILES.values():
+            frame = S.build_frame(payload, profile=profile)
+            self.assertEqual(S.parse_frame(frame), payload)
+            self.assertEqual(S.parse_frame(frame, profile=profile), payload)
+
+    def test_unrecognised_header_is_rejected(self):
+        with self.assertRaises(S.StegoError):
+            S.parse_frame(b"XXXX" + bytes(40))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
