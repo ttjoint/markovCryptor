@@ -50,16 +50,24 @@ def describe_all() -> list[dict]:
 
 
 def register_defaults(model_provider: Callable[[], object] | None = None) -> tuple[Channel, ...]:
-    """Register the built-in channels.
+    """Register the built-in channels, replacing whatever was there.
 
     The Chinese channel needs a *trained model*, which is user data rather than
     package data. It is therefore registered only when a provider is supplied --
     at CLI startup when a model is loaded, or never for a pure image workflow.
     That keeps ``import markovcryptor.channels`` free of any model IO.
+
+    Clearing first is deliberate: the registry is process-global, so without it
+    a ``chinese`` channel registered by an earlier engine would linger after its
+    model went away, and a caller would get "no such channel" from a channel that
+    ``all_channels`` still advertises. The registration order is part of the
+    contract (CLI listings, UI menus), so it is rebuilt explicitly rather than
+    merged.
     """
     from .gif import GifChannel
     from .image import ImageChannel
 
+    _REGISTRY.clear()
     register(ImageChannel())
     register(GifChannel())
 

@@ -1,8 +1,8 @@
 # 架构方案：从可行性原型到多信道隐写平台
 
-> 状态：**执行中**。阶段 0（安全网）、阶段 1（core 层）、阶段 2（Channel 抽象）
-> 已完成，下文相应章节标注 ✅；其余仍是目标架构与迁移路径。
-> 撰写依据：现有 26 个 Python 模块（6 071 行，阶段 2 后）、91 项测试、全库 15 488 张图的压测数据。
+> 状态：**执行中**。阶段 0（安全网）、阶段 1（core 层）、阶段 2（Channel 抽象）、
+> 阶段 3（Engine + CLI）已完成，下文相应章节标注 ✅；其余仍是目标架构与迁移路径。
+> 撰写依据：现有 28 个 Python 模块（6 329 行，阶段 3 后）、109 项测试、全库 15 488 张图的压测数据。
 
 ---
 
@@ -832,7 +832,7 @@ for ch in engine.channels():
 **未做**：`Carrier.media_type` 目前只用于展示，不做内容嗅探。真实文件类型以
 解码结果为准（PIL 已经会拒绝非图片），加一层魔数检测只会多一处真源。
 
-### 阶段 3：Engine + CLI 迁移（1.5 天）
+### 阶段 3：Engine + CLI 迁移（1.5 天）✅ 已完成
 
 - 实现 `Engine`、`ModelCache`
 - CLI 改为 Typer，所有子命令改调 `Engine`
@@ -842,6 +842,32 @@ for ch in engine.channels():
 
 **验收**：`encode`/`decode`/`train`/`models`/`identify`/`demo` 行为不变；
 新增 `channels`/`probe` 子命令。
+
+**实际结果**：新增 `markovcryptor/engine.py`（188 行）与 `tests/test_engine.py`
+（14 项）；`tests/test_cli.py` 7 → 11 项。总测试 **109 项全绿**。
+
+**没有换成 Typer。** 这是有意做的反向决策，理由三条：
+
+1. 现有 `argparse` 入口 187 行、零依赖。Typer 会拖进 click + typing_extensions，
+   而本项目靠 `pip install -e .` 即用，多一个依赖就是多一个安装失败点。
+2. 用户的实际需求是“子命令名与参数不变”——换库只会增加行为差异风险，
+   而新增的 `channels`/`probe` 两个子命令用 `argparse` 写只多了 12 行。
+3. 自动补全、彩色帮助这些收益，在本项目当前的交互重心（网页 UI）上属于
+   另一个面，不是 CLI。
+
+`Engine` 只做两件事，其余全是透传：
+
+- **模型缓存**（`ModelCache`）。按 `mtime_ns` 失效，所以改完 JSON 不用重启。
+  批处理 500 个文件不会重复加载 500 次模型。
+- **信道解析**。`chinese` 仅在真的加载到模型时注册；没模型就不出现，
+  而不是“出现、但第一次用就报错”。
+
+实施中发现的一个真实缺陷：**注册表是进程级全局，`register_defaults` 原先只
+追加不清理**——一个 engine 注册了 `chinese`，它的模型没了之后那个信道仍然
+留在列表里，`all_channels()` 还宣称它存在。改为先 `clear()` 再按固定顺序重建。
+
+**未做**：`Engine` 不包装 `Channel` 的错误。它们已经带 `code`/`http_status`
+与原文原因，再包一层正是这些信息丢失的方式。
 
 ### 阶段 4：Web API（2 天）
 

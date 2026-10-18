@@ -147,6 +147,37 @@ class CliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("round-trip ok", result.stdout + result.stderr)
 
+    def test_channels_lists_every_channel_with_its_options(self):
+        result = _run("channels")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        for cid in ("image", "gif"):
+            self.assertIn(cid, out)
+        # An option list is what lets a human (or a form generator) discover
+        # the knobs without reading source.
+        self.assertIn("step", out)
+
+    def test_probe_reports_capacity_without_embedding(self):
+        result = _run("probe", "--channel", "image",
+                      "--input", str(F.PHOTO), "--bytes", "32")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("可承载", result.stdout)
+
+    def test_probe_fails_with_the_real_cause_when_too_big(self):
+        result = _run("probe", "--channel", "image",
+                      "--input", str(F.PHOTO), "--bytes", "100000")
+        self.assertEqual(result.returncode, 1)
+        # The rule: never a generic "cannot carry", always the numbers.
+        self.assertIn("最多", result.stdout)
+        self.assertIn("需要", result.stdout)
+
+    def test_probe_rejects_an_unknown_channel_and_says_what_exists(self):
+        result = _run("probe", "--channel", "video",
+                      "--input", str(F.PHOTO), "--bytes", "32")
+        self.assertNotEqual(result.returncode, 0)
+        combined = result.stdout + result.stderr
+        self.assertIn("image", combined)
+
     def test_missing_corpus_exits_nonzero(self):
         result = _run("train", "--corpus", str(self.tmp / "nope.txt"),
                       "--model", str(self.tmp / "x"))

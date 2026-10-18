@@ -5,7 +5,9 @@ from pathlib import Path
 import sys
 import time
 
-from .codec import MarkovStegoCodec, decode_with_models, identify_model
+from .channels import Carrier, CarrierKind
+from .codec import MarkovStegoCodec
+from .engine import Config, Engine
 from .model import (
     MarkovModel,
     default_model_dir,
@@ -62,6 +64,14 @@ def build_parser() -> argparse.ArgumentParser:
     demo = sub.add_parser("demo", help="运行内置样例往返")
     demo.add_argument("--model", type=Path, required=True)
     demo.add_argument("--text", default="这是一个用于演示的中文隐写样例。")
+
+    sub.add_parser("channels", help="列出所有可用信道及其参数（供程序与界面调用）")
+
+    probe = sub.add_parser("probe", help="不下笔，先问某个信道能否装下载荷")
+    probe.add_argument("--channel", required=True, help="信道 id，见 channels 子命令")
+    probe.add_argument("--input", type=Path, required=True, help="载体文件")
+    probe.add_argument("--bytes", type=int, required=True, help="载荷字节数")
+    probe.add_argument("--model-dir", type=Path, default=default_model_dir())
     return parser
 
 
@@ -82,6 +92,28 @@ class _ConsoleProgress:
         print("\r" + " " * 70 + "\r", end="", file=sys.stderr, flush=True)
 
 
+_TEXT_SUFFIXES = {".txt", ".md", ".csv", ".json", ".log"}
+_ANIMATION_SUFFIXES = {".gif", ".webp", ".apng", ".webm"}
+
+
+def _carrier_from_file(path: Path) -> Carrier:
+    """Wrap a file as a lazy carrier, guessing its kind from the suffix.
+
+    The suffix only selects a *candidate* channel -- the channel itself still
+    validates the bytes and names the real problem if they do not match.
+    """
+    suffix = path.suffix.lower()
+    if suffix in _TEXT_SUFFIXES:
+        return Carrier(kind=CarrierKind.TEXT,
+                       load=lambda: read_text_file(path),
+                       size_hint=path.stat().st_size if path.exists() else None,
+                       media_type="text/plain", label=path.name)
+    kind = CarrierKind.ANIMATION if suffix in _ANIMATION_SUFFIXES else CarrierKind.IMAGE
+    return Carrier(kind=kind, load=path.read_bytes,
+                   size_hint=path.stat().st_size if path.exists() else None,
+                   label=path.name)
+
+
 def _load_all(inputs: list[Path]) -> tuple[list[Path], list[MarkovModel]]:
     paths = discover_model_paths(inputs)
     return paths, [MarkovModel.load(path) for path in paths]
@@ -94,6 +126,32 @@ def _describe(model: MarkovModel, path: Path) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     progress = _ConsoleProgress()
+
+    if args.command == "channels":
+        engine = Engine()
+        for data in engine.describe_channels():
+            print(f"{data['id']:<10} {data['display_name']}")
+            print(f"            {data['summary']}")
+            print(f"            mime_in={', '.join(data['mime_in'])} -> {data['mime_out']}")
+            schema = data["options_schema"] or {}
+            for name, spec in (schema.get("properties") or {}).items():
+                default = spec.get("default", "-")
+                print(f"            - {name}={default}: {spec.get('description', '')}")
+        return 0
+
+    if args.command == "probe":
+        engine = Engine(Config(model_dir=args.model_dir))
+        carrier = _carrier_from_file(args.input)
+        feas = engine.probe(args.channel, carrier, args.bytes)
+        print(feas)
+        for reason in feas.reasons:
+            print(f"  原因：{reason}")
+        for hint in feas.hints:
+            print(f"  建议：{hint}")
+        for key, value in feas.cost.items():
+            print(f"  {key}: {value}")
+        return 0 if feas.ok else 1
+
     if args.command == "train":
         files = discover_corpus_files(args.corpus)
         if args.split:
@@ -127,7 +185,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "decode":
         paths, models = _load_all(args.model)
-        payload, selected = decode_with_models(read_text_file(args.input), models, args.password, progress)
+        # Paths are resolved by ``_load_all`` above; injecting the models keeps
+        # the engine from re-reading the same files.
+        engine = Engine(models=models)
+        payload, selected = engine.decode_text(read_text_file(args.input), args.password, progress)
         progress.done()
         args.output.write_bytes(payload)
         print(f"decoded {len(payload)} bytes -> {args.output} using {_describe(selected, paths[models.index(selected)])}")
@@ -159,7 +220,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "identify":
         paths, models = _load_all(args.model)
-        selected = identify_model(read_text_file(args.input), models)
+        engine = Engine(models=models)
+        selected = engine.identify(read_text_file(args.input))
         if selected is None:
             print("no model matched")
             return 1

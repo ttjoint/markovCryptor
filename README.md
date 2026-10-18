@@ -118,6 +118,18 @@ fc.exe /b secret.txt recovered.txt
 - `--smoothing`（默认 1）：Witten-Bell 回退强度。调大会让文本更随机、容量略增；调小则文本更通顺。
 - 加 `--password` 启用 AES-256-GCM（PBKDF2-SHA256，31 万次迭代，每条消息独立随机盐）。
 
+### 探查信道（不下笔）
+
+新增两个子命令，用来在下笔之前就知道“能不能装下”以及“有哪些可用信道”：
+
+```powershell
+python -m markovcryptor.cli channels
+python -m markovcryptor.cli probe --channel image --input photo.png --bytes 512
+```
+
+`probe` 不可承载时退出码为 1，并打印真实原因与可操作建议，例如
+`容量不足：最多 162 字节，需要 99999 字节` + `放大到 3840×3840（24.0×）即可承载`。
+
 ### 图形界面（中文信道）
 
 ```powershell
@@ -154,6 +166,7 @@ python run_chat.py
 | `markovcryptor/gui.py` | 中文信道图形界面 |
 | `markovcryptor/core/` | 信道共享内核（见下） |
 | `markovcryptor/channels/` | 统一信道接口与三个适配器（见下） |
+| `markovcryptor/engine.py` | 引擎：模型缓存 + 信道调度 |
 | `docs/IMAGE_STEGO.md` | 图片/GIF 信道完整原理与容量文档 |
 | `docs/ARCHITECTURE.md` | 平台化架构方案与迁移进度 |
 
@@ -168,6 +181,24 @@ python run_chat.py
 | `channels/options.py` | 每信道的参数 schema，网页表单据此自动生成 |
 | `channels/image.py` / `gif.py` / `chinese.py` | 三个适配器，内部仍调原有内核 |
 | `channels/registry.py` | 显式注册表 |
+
+程序里用 `Engine` 即可，它负责加载模型并把调用分派给信道：
+
+```python
+from markovcryptor.channels import Carrier, CarrierKind
+from markovcryptor.engine import Engine
+
+engine = Engine()                                  # 自动发现 models/ 下的模型
+for channel in engine.channels():
+    feas = engine.probe(channel.id, carrier, len(payload))
+    if not feas.ok:
+        print(channel.id, "->", feas.reasons)      # 真实原因，不是"无法承载"
+        continue
+    env = engine.embed(channel.id, carrier, payload, key)
+    assert engine.extract(channel.id, env.as_carrier(), key) == payload
+```
+
+也可以不经引擎直接用信道：
 
 ```python
 from markovcryptor.channels import registry
@@ -201,7 +232,8 @@ for channel in registry.register_defaults():
 python -m unittest discover -s tests
 ```
 
-共 91 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项、统一信道接口 20 项、CLI 端到端 7 项。
+共 109 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项、统一信道接口 20 项、
+引擎与缓存 14 项、CLI 端到端 11 项。
 全部夹具随仓库分发，**不依赖 `data/`、`corpus/`、`models/`**，干净检出即可跑完，
 无跳过。若需重新生成夹具（例如某个测试要换形状）：
 

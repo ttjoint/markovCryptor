@@ -52,11 +52,7 @@ def _model() -> MarkovModel:
 
 
 class RegistryTest(unittest.TestCase):
-    def setUp(self):
-        registry._REGISTRY.clear()
-
-    def tearDown(self):
-        registry._REGISTRY.clear()
+    # ``register_defaults`` rebuilds the registry, so no manual reset is needed.
 
     def test_defaults_without_model_register_only_media_channels(self):
         ids = [c.id for c in registry.register_defaults()]
