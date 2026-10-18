@@ -105,7 +105,7 @@ def get_logger(suffix: str = "") -> logging.Logger:
     return logging.getLogger(f"{LOGGER_NAME}.{suffix}" if suffix else LOGGER_NAME)
 
 
-#: Set once an entry point calls :func:. Until then nothing is
+#: Set once an entry point calls :func:`configure`. Until then nothing is
 #: emitted: a library that writes to stderr on import makes every test run and
 #: every embedder's console noisy with lines nobody asked for. The CLI and the
 #: web server configure explicitly; a library user who wants logs calls it too.

@@ -17,6 +17,7 @@ payload ─→ 压缩 ─→ 加密 ─┼─ 图片信道 ─→ 一张 PNG 照
 | 写脚本批量处理 | 同上的 HTTP API（见 [docs/API.md](docs/API.md)） |
 | 不想离开终端 | `python -m markovcryptor.cli encode / decode`（见下方「快速开始」） |
 | 要给项目加一条新信道 | 实现三个方法，见 [docs/PLUGINS.md](docs/PLUGINS.md) |
+| 想要点到点安全聊天 | `python -m tools.terminal_demo`（见 [docs/TERMINAL.md](docs/TERMINAL.md)） |
 
 ## 文档
 
@@ -26,6 +27,7 @@ payload ─→ 压缩 ─→ 加密 ─┼─ 图片信道 ─→ 一张 PNG 照
 | [docs/IMAGE_STEGO.md](docs/IMAGE_STEGO.md) | 图片/GIF 信道完整原理（DCT-QIM、帧结构、压测数据） |
 | [docs/API.md](docs/API.md) | Web API 端点、错误码、安全边界、可观测性 |
 | [docs/PLUGINS.md](docs/PLUGINS.md) | 如何新增一条信道（附可运行的完整示例） |
+| [docs/TERMINAL.md](docs/TERMINAL.md) | 点到点通信终端：消息模型、握手状态机、隐写判定规则 |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 平台化架构与迁移进度 |
 
 ---

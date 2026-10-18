@@ -31,7 +31,7 @@ from PIL import Image
 import numpy as np
 
 from .core import ecc
-from .core.errors import StegoError
+from .core.errors import CapacityExceeded, CarrierDamaged, NoHiddenFrame, StegoError
 from .core.framing import (
     LANES,
     LEAD_COMPACT,
@@ -469,7 +469,14 @@ def embed(image: Image.Image, frame: bytes, key: bytes, *, step: float = DEFAULT
     payload = parse_frame(frame)
     usable, reason = check_cover(cover, len(payload))
     if not usable:
-        raise StegoError(f"底图不可用：{reason}")
+        # Overwhelmingly this is "cover too small", which callers handle by
+        # picking another cover -- so the class must say so. The original reason
+        # text is kept verbatim (it names the exact byte shortfall).
+        raise CapacityExceeded(
+            f"底图不可用：{reason}",
+            reasons=(reason,),
+            hints=("换一张更大的底图，或减少载荷字节数",),
+        )
     errors: list[str] = []
     for candidate_step in (step, *[s for s in STEP_CHOICES if s > step]):
         try:
@@ -612,12 +619,25 @@ def try_extract(image: Image.Image, key: bytes,
     ``DEFAULT_STEP`` is attempted first because covers only escalate on
     extreme inputs; this turns the common case into a single decode instead of
     one per candidate step (which matters: each attempt re-reads the image).
+
+    "No stego here" and "stego here but damaged" are *different answers* and the
+    caller acts on them differently (show the picture vs. log a warning), so the
+    original error class is preserved rather than collapsed into ``StegoError``.
+    ``NoHiddenFrame`` is reported only when no step found a frame at all; if any
+    step found a *damaged* frame, that is what gets raised.
     """
     ordered = sorted(steps, key=lambda value: abs(value - DEFAULT_STEP))
     errors: list[str] = []
+    damaged = False
     for step in ordered:
         try:
             return extract(image, key, step=step)
-        except StegoError as exc:
+        except NoHiddenFrame as exc:
             errors.append(f"step={step}: {exc}")
-    raise StegoError("；".join(errors[:2]) if errors else "没有可识别的隐写帧")
+        except StegoError as exc:
+            damaged = True
+            errors.append(f"step={step}: {exc}")
+    detail = "；".join(errors[:2]) if errors else "没有可识别的隐写帧"
+    if damaged:
+        raise CarrierDamaged(detail, reasons=tuple(errors[:2]))
+    raise NoHiddenFrame(detail, reasons=tuple(errors[:2]))

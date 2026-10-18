@@ -1088,7 +1088,8 @@ CLI 全局 `--log-level` / `--log-file`；新增 `docs/CHANNELS.md`、`docs/API.
 | `codec.py` / `model.py` / `punctuation.py` / `compression.py` | 1 599 | 中文信道的算法内核 |
 | `image_stego.py` | 612 | 图片信道 DCT-QIM 内核 |
 | `gif_stego.py` | 362 | GIF 动图信道 |
-| `handshake.py` | 97 | X25519 握手协议（纯逻辑，无 UI 依赖） |
+| `handshake.py` | 97 | 早期的 X25519 握手（纯逻辑）；**新代码用 `terminal/session.py`** |
+| `terminal/`（5 模块） | 993 | 点到点通信终端：PBX1 信封、会话状态机、传输抽象、终端 |
 | `interfaces/desktop/legacy/` | 1 346 | **冻结**的 Tk 界面，不再演进 |
 
 ### 与原规划稿的偏差
@@ -1111,4 +1112,6 @@ CLI 全局 `--log-level` / `--log-file`；新增 `docs/CHANNELS.md`、`docs/API.
   基于单一真源（`channel_bits`）计算 —— 曾有 3 个 bug 源于此，务必维持
 - 提取的「两阶段读」（先引导头后按需读块）
 - 载体采样的评分（`SCORE_SAMPLES`）—— 大图性能的关键
+- 「无法证明就不算我的」（`terminal/`）：隐写判定以 AES-GCM 认证标签为唯一依据，
+  绝不靠启发式，因此普通消息不可能误入隐密窗口
 - 测试原则：对随机敏感断言用「要么成功且正确，要么明确报错」

@@ -27,7 +27,8 @@ from .core.progress import Cancelled
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="markovcryptor",
-        description="语料压缩 + 一阶马尔可夫链算术编码的中文伪装隐写工具（数据只存于汉字，标点由语料统计后加）",
+        description="多信道隐写加解密平台：中文文本 / 图片 / GIF 三条信道，盲提取，"
+                    "提供 CLI、本机 Web API、网页界面与批处理",
     )
     # Global, before the subcommand: verbose logging is a property of the run,
     # not of any one subcommand, and putting it on each would multiply the flags.
