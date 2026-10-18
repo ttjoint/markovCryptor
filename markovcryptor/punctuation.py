@@ -28,7 +28,7 @@ import re
 import secrets
 from typing import Any, Mapping, Optional
 
-from .progress import REPORT_EVERY, ProgressFn, report
+from .core.progress import REPORT_EVERY, ProgressFn, report
 
 HANZI_PATTERN = re.compile(r"[㐀-䶿一-鿿豈-﫿]+")
 OPEN_TO_CLOSE = {"“": "”", "‘": "’", "（": "）", "《": "》", "〈": "〉", "【": "】", "「": "」", "『": "』"}

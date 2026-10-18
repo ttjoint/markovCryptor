@@ -32,12 +32,14 @@ from io import BytesIO
 
 from PIL import Image
 
+from .core.errors import StegoError
+from .core.framing import parse_frame
 from .image_stego import (
     DEFAULT_STEP,
-    StegoError,
     embed,
     extract,
     max_payload_bytes,
+    upscale_cover,
 )
 
 #: Steps tried when embedding into a palettised frame, coarsest last.
@@ -165,8 +167,6 @@ def embed_gif(source: Image.Image, frame: bytes, key: bytes,
     Returns ``(gif_bytes, report)``.  The report records the step that worked
     and how much of the image had to change, mirroring ``image_stego.embed``.
     """
-    from .image_stego import parse_frame, upscale_cover
-
     expected = parse_frame(frame)
     count = getattr(source, "n_frames", 1)
     targets = [i for i in frames_to_use if 0 <= i < count]

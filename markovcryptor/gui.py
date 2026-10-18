@@ -18,7 +18,7 @@ from .model import (
     read_text_file,
     unique_model_path,
 )
-from .progress import Cancelled, ProgressFn, stage
+from .core.progress import Cancelled, ProgressFn, stage
 from .punctuation import OPEN_TO_CLOSE
 
 _POLL_MS = 100

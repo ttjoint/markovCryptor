@@ -3,61 +3,30 @@ from __future__ import annotations
 from bisect import bisect_right
 from dataclasses import dataclass
 import hashlib
-import os
 import random
 import secrets
 from typing import Iterable, Optional
 
-from .arith import ArithmeticDecoder, ArithmeticEncoder, BitReader
+from .core import crypto
+from .core.arith import ArithmeticDecoder, ArithmeticEncoder, BitReader
 from .compression import METHOD_NAMES, compress, decompress, read_varint, write_varint
 from .model import MarkovModel
-from .progress import REPORT_EVERY, ProgressFn, report, stage
+from .core.progress import REPORT_EVERY, ProgressFn, report, stage
 from .punctuation import extract_hanzi
 
 PROTOCOL_VERSION = 5
 NONCE_BYTES = 3
 CHECK_BYTES = 4
 DIGEST_BYTES = 4
-SALT_BYTES = 12
-TAG_BYTES = 16
+SALT_BYTES = crypto.SALT_BYTES
+TAG_BYTES = crypto.TAG_BYTES
 FLAG_AES_GCM = 0x01
 METHOD_SHIFT = 1
 METHOD_MASK = 0x0E
-PBKDF2_ITERATIONS = 310_000
+PBKDF2_ITERATIONS = crypto.PBKDF2_ITERATIONS
 _PERSON = b"mkc%d" % PROTOCOL_VERSION
-_GCM_NONCE = bytes(12)  # every message derives a fresh key from its own random salt
 # A header is at most flags + 10-byte varint + check; identification never reads further.
 _MAX_HEADER = NONCE_BYTES + 1 + 10 + CHECK_BYTES
-
-
-def _aesgcm():
-    try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    except ImportError as exc:
-        raise RuntimeError("AES-GCM requires cryptography; run: pip install cryptography") from exc
-    return AESGCM
-
-
-def _derive_key(password: str | bytes, salt: bytes) -> bytes:
-    raw = password if isinstance(password, bytes) else password.encode("utf-8")
-    if not raw:
-        raise ValueError("AES password cannot be empty")
-    return hashlib.pbkdf2_hmac("sha256", raw, salt, PBKDF2_ITERATIONS, dklen=32)
-
-
-def _aes_encrypt(data: bytes, password: str | bytes, aad: bytes) -> bytes:
-    salt = os.urandom(SALT_BYTES)
-    return salt + _aesgcm()(_derive_key(password, salt)).encrypt(_GCM_NONCE, data, aad)
-
-
-def _aes_decrypt(body: bytes, password: str | bytes, aad: bytes) -> bytes:
-    if len(body) < SALT_BYTES + TAG_BYTES:
-        raise ValueError("AES-GCM body is truncated")
-    salt, ciphertext = body[:SALT_BYTES], body[SALT_BYTES:]
-    try:
-        return _aesgcm()(_derive_key(password, salt)).decrypt(_GCM_NONCE, ciphertext, aad)
-    except Exception as exc:
-        raise ValueError("AES-GCM authentication failed (wrong password?)") from exc
 
 
 def _xor(data: bytes, mask: bytes) -> bytes:
@@ -223,7 +192,7 @@ class MarkovStegoCodec:
         flags = method << METHOD_SHIFT
         if password is not None:
             flags |= FLAG_AES_GCM
-            body = _aes_encrypt(data, password, bytes([PROTOCOL_VERSION, flags]))
+            body = crypto.encrypt_with_password(data, password, bytes([PROTOCOL_VERSION, flags]))
         else:
             body = data + self._digest(payload)
         stream = self._frame(flags, body)
@@ -294,7 +263,7 @@ class MarkovStegoCodec:
         if flags & FLAG_AES_GCM:
             if password is None:
                 raise ValueError("this text requires an AES password")
-            data = _aes_decrypt(body, password, bytes([PROTOCOL_VERSION, flags]))
+            data = crypto.decrypt_with_password(body, password, bytes([PROTOCOL_VERSION, flags]))
         else:
             if len(body) < DIGEST_BYTES:
                 raise ValueError("hidden body is truncated")

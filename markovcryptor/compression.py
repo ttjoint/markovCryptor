@@ -26,8 +26,8 @@ import lzma
 from typing import Any, Iterable, Mapping, Optional
 import zlib
 
-from .arith import MAX_TOTAL, ArithmeticDecoder, ArithmeticEncoder, BitReader
-from .progress import REPORT_EVERY, ProgressFn, report, stage
+from .core.arith import MAX_TOTAL, ArithmeticDecoder, ArithmeticEncoder, BitReader
+from .core.progress import REPORT_EVERY, ProgressFn, report, stage
 
 STORE, TEXT, DEFLATE, BZ2, LZMA = range(5)
 METHOD_NAMES = {STORE: "不压缩", TEXT: "语料文本模型", DEFLATE: "Deflate", BZ2: "BZip2", LZMA: "LZMA"}

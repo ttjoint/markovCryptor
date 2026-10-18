@@ -12,7 +12,7 @@ from .model import (
     read_text_file,
     unique_model_path,
 )
-from .progress import Cancelled
+from .core.progress import Cancelled
 from .punctuation import PunctuationModel, extract_hanzi
 
 __all__ = [

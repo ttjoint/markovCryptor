@@ -147,12 +147,26 @@ python run_chat.py
 |---|---|
 | `markovcryptor/codec.py` | 中文信道：马尔可夫模型 + 算术编码 |
 | `markovcryptor/model.py` | 一阶马尔可夫模型训练与存取 |
-| `markovcryptor/image_stego.py` | 图片信道：DCT-QIM（静图） |
+| `markovcryptor/image_stego.py` | 图片信道：DCT-QIM 内核（静图） |
 | `markovcryptor/gif_stego.py` | GIF 动图信道（调色板适配） |
 | `markovcryptor/handshake.py` | X25519 隐写握手 + HKDF + AES-GCM |
 | `markovcryptor/chat_gui.py` | 双窗口聊天演示 |
 | `markovcryptor/gui.py` | 中文信道图形界面 |
+| `markovcryptor/core/` | 信道共享内核（见下） |
 | `docs/IMAGE_STEGO.md` | 图片/GIF 信道完整原理与容量文档 |
+| `docs/ARCHITECTURE.md` | 平台化架构方案与迁移进度 |
+
+`markovcryptor/core/` 是不依赖任何信道的共享层，新增信道直接复用它：
+
+| 模块 | 内容 |
+|---|---|
+| `core/errors.py` | 错误体系（`code` + `http_status`，供将来的 Web API 直接映射） |
+| `core/framing.py` | MKX1 帧布局、CRC16、白化、双规格 lead、RS 分块规划 |
+| `core/ecc.py` | Reed-Solomon 编解码（lead 单独成码字） |
+| `core/keys.py` | 口令规范化、域分离、确定性 RNG |
+| `core/crypto.py` | PBKDF2+AES-GCM、X25519、HKDF 会话链 |
+| `core/arith.py` | 算术编码器/解码器与比特流 |
+| `core/progress.py` | 进度回调与 `Cancelled` |
 
 ---
 

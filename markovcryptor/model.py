@@ -12,9 +12,9 @@ import re
 import time
 from typing import Any, Iterable, Optional
 
-from .arith import MAX_TOTAL
+from .core.arith import MAX_TOTAL
 from .compression import TextModel
-from .progress import ProgressFn, report, stage
+from .core.progress import ProgressFn, report, stage
 from .punctuation import PunctuationModel, filter_vocabulary, segment_corpus
 
 MODEL_FORMAT = "markovcryptor-model-v3"

@@ -17,36 +17,47 @@ How it works
 * Reed-Solomon (pure Python ``reedsolo``) protects the whole frame: a damaged
   block costs at most 4 consecutive bits, well inside the correction budget.
 
-Frame layout (whitened with a keystream derived from magic + nonce)::
-
-    magic[4] | version[1] | nonce[8] | payload[32] | crc16[2]   = 55 bytes
-
-All parameters are determined by ``(key, cover width)``, so the receiver
-recovers everything from the received image alone.
+The frame format (two lead profiles, RS layout) and the key derivation live in
+:mod:`markovcryptor.core` because the GIF channel reuses them unchanged; this
+module owns only the pixel-level carrier: block geometry, DCT lanes, channel
+scoring and the embed/extract loop.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
-import secrets
 import struct
-from typing import NamedTuple
 
 from PIL import Image
 import numpy as np
 
-try:
-    import reedsolo
-except ImportError:  # pragma: no cover - reported when used
-    reedsolo = None  # type: ignore[assignment]
+from .core import ecc
+from .core.errors import StegoError
+from .core.framing import (
+    LANES,
+    LEAD_COMPACT,
+    LEAD_PROFILES,
+    LEAD_STANDARD,
+    MAGIC,
+    MAX_FRAME_BITS,
+    MAX_RS_BLOCKS,
+    NBLOCK_BYTES,
+    RS_BLOCK_DATA,
+    RS_BLOCK_NSYM,
+    LeadProfile,
+    build_frame,
+    lead_profile_for,
+    parse_frame,
+    rs_plan,
+)
+# ``normalise_key``/``derive`` stay re-exported: callers reach for them via
+# ``image_stego.normalise_key`` and the GIF/handshake layers use the same ones.
+from .core.keys import derive, normalise_key, rng
 
 BLOCK = 8
-LANES = 4
-MAGIC = b"MKX1"
-NONCE_BYTES = 8                 # nonce size of the roomy (standard) lead
+#: Size of a handshake's public key, and the default payload size everywhere
+#: (``check_cover``, ``plan``, ``upscale_cover``).
 PUBLIC_KEY_BYTES = 32
-CRC_BYTES = 2
 
 # (value, sign) coefficient pair per lane inside one 8x8 block.
 # Value slots sit on a fixed mid-frequency ring; sign slots on a higher ring so
@@ -54,43 +65,16 @@ CRC_BYTES = 2
 LANE_VALUE: tuple[tuple[int, int], ...] = ((2, 2), (2, 3), (3, 2), (3, 3))
 LANE_SIGN: tuple[tuple[int, int], ...] = ((1, 5), (5, 1), (4, 4), (0, 6))
 
+#: Below this, a cover is rejected outright rather than enlarged.
 MIN_SIDE = 40
+#: QIM step that trades robustness for capacity; tried first on extraction.
 DEFAULT_STEP = 10.0
-# Payloads are split over RS(223,207) blocks (the largest standard codeword),
-# so a big cover can carry far more than one 32-byte handshake key.
-RS_BLOCK_DATA = 207
-RS_BLOCK_NSYM = 16      # corrects 8 symbol errors per block
-# Smallest short side accepted without upscaling; below this we enlarge.
-# 120px is the first size that can carry a 56-byte frame (a handshake needs
-# 32 payload bytes + 22 bytes of lead/CRC + RS parity), so anything smaller is
-# guaranteed to need enlargement anyway.
+#: Smallest short side accepted without upscaling.  112 px is the first size
+#: that can carry a handshake-sized payload under the compact lead, so anything
+#: smaller would be enlarged regardless.
 SMALLEST_SIDE = 120
 MAX_UPSCALE = 64
-MAX_RS_BLOCKS = 512
 STEP_CHOICES = (8.0, 9.0, 10.0, 11.0, 12.0, 14.0)
-
-
-class StegoError(Exception):
-    """Raised when an image carries no readable MKX1 frame."""
-
-
-# --------------------------------------------------------------- key material
-
-
-def normalise_key(key: str | bytes) -> bytes:
-    raw = key.encode("utf-8") if isinstance(key, str) else key
-    if not raw:
-        raise ValueError("共享密钥不能为空")
-    return hashlib.sha256(b"mkx1-key\x00" + raw).digest()
-
-
-def derive(key: bytes, label: str, length: int = 32) -> bytes:
-    return hashlib.shake_256(b"mkx1-dom\x00" + label.encode() + b"\x00" + key).digest(length)
-
-
-def _rng(*parts: bytes) -> np.random.Generator:
-    seed = int.from_bytes(hashlib.sha256(b"".join(parts)).digest(), "big")
-    return np.random.Generator(np.random.PCG64(seed))
 
 
 # ------------------------------------------------------------------- planning
@@ -103,21 +87,6 @@ def blocks_per_row(width: int) -> int:
 def blocks_total(width: int, height: int) -> int:
     """Every 8x8 block in the image (all rows, ignoring the right/bottom offcuts)."""
     return (width // BLOCK) * (height // BLOCK)
-
-
-def rs_plan(payload_bytes: int, profile: LeadProfile | None = None) -> tuple[int, int]:
-    """Split the payload into RS blocks -> ``(total_data_bytes, total_codeword_bytes)``.
-
-    Only the *body* is planned here; the lead is its own short codeword, added
-    by :func:`channel_bits`.  RS works on whole codewords, so the payload is
-    padded up to an even per-block chunk.
-    """
-    raw = payload_bytes
-    blocks = max(1, -(-raw // RS_BLOCK_DATA))
-    per_block = -(-raw // blocks)            # balanced split, whole bytes
-    total_data = blocks * per_block
-    total_code = blocks * (per_block + RS_BLOCK_NSYM)
-    return total_data, total_code
 
 
 def blocks_needed(payload_bytes: int, profile: LeadProfile | None = None) -> int:
@@ -288,184 +257,14 @@ def _scatter_blocks(plane3: np.ndarray, channel: int, blocks: np.ndarray,
 def _block_partner(width: int, height: int, key: bytes, step: float) -> np.ndarray:
     """All blocks of the image in key-derived order (used as the carrier pool)."""
     count = blocks_total(width, height)
-    rng = _rng(derive(key, "blocks"), struct.pack(">HH", width, height), struct.pack(">d", float(step)))
+    generator = rng(derive(key, "blocks"),
+                    struct.pack(">HH", width, height),
+                    struct.pack(">d", float(step)))
     order = np.arange(count)
-    rng.shuffle(order)
+    generator.shuffle(order)
     return order
 
 
-# ------------------------------------------------------------------- framing
-
-
-def crc16(data: bytes) -> int:
-    value = 0xFFFF
-    for byte in data:
-        value ^= byte << 8
-        for _ in range(8):
-            value = ((value << 1) ^ 0x1021) & 0xFFFF if value & 0x8000 else (value << 1) & 0xFFFF
-    return value
-
-
-def _whiten(data: bytes, nonce: bytes, skip: int = 0) -> bytes:
-    """XOR ``data`` with a SHAKE keystream; the first ``skip`` bytes stay clear.
-
-    The nonce itself sits inside the frame unwhitened so the receiver can find
-    the keystream; everything after it is masked.
-    """
-    stream = hashlib.shake_256(b"mkx1-whiten\x00" + nonce).digest(len(data))
-    out = bytearray(data)
-    for i in range(skip, len(data)):
-        out[i] ^= stream[i]
-    return bytes(out)
-
-
-NBLOCK_BYTES = 2
-
-
-class LeadProfile(NamedTuple):
-    """One lead-header shape: how many bytes of metadata and how much parity.
-
-    The lead is the *only* fixed cost every cover pays, and it is charged in
-    8x8 blocks, not in proportion.  A 40-byte lead eats 80 blocks, which is 45%
-    of a 120x120 cover but 0.03% of a 4096x4096 one.  Small covers therefore
-    use a compact lead whose parity is right-sized for the payload, and large
-    ones keep the roomy lead where its cost is invisible.
-    """
-
-    index: int          # value stored in the header so readers can tell them apart
-    nonce_bytes: int
-    nsym: int           # RS parity bytes over the lead
-
-    @property
-    def meta_bytes(self) -> int:
-        return len(MAGIC) + 1 + self.nonce_bytes + NBLOCK_BYTES + 2
-
-    @property
-    def lead_bytes(self) -> int:
-        """Metadata plus CRC, rounded up to a whole 4-bit lane pair (8 bytes)."""
-        raw = self.meta_bytes + CRC_BYTES
-        return -(-raw // 8) * 8
-
-    @property
-    def code_bytes(self) -> int:
-        return self.lead_bytes + self.nsym
-
-    @property
-    def blocks(self) -> int:
-        return self.code_bytes * 8 // LANES
-
-
-#: Compact lead: 4-byte nonce, RS(16,10) parity.  Cheapest header we still trust
-#: for handshake-sized payloads -- it corrects 5 lead-symbol errors, and the
-#: lead is the one thing whose failure is unrecoverable.
-LEAD_COMPACT = LeadProfile(index=2, nonce_bytes=4, nsym=6)
-#: Roomier lead used by covers big enough that 80 blocks are noise.  A longer
-#: nonce widens the whitening keystream and RS(20,20) corrects 10 errors.
-LEAD_STANDARD = LeadProfile(index=1, nonce_bytes=NONCE_BYTES, nsym=20)
-
-LEAD_PROFILES: dict[int, LeadProfile] = {p.index: p for p in (LEAD_STANDARD, LEAD_COMPACT)}
-
-#: Upper bound on how much of a cover may be read: the largest possible lead
-#: plus the largest body we ever emit.  Guards against absurd block scans.
-MAX_FRAME_BITS = (max(p.code_bytes for p in LEAD_PROFILES.values())
-                  + MAX_RS_BLOCKS * (RS_BLOCK_DATA + RS_BLOCK_NSYM)) * 8
-
-#: Below this header share of the block budget we spend the extra bytes on a
-#: roomier lead; above it every saved block goes to payload instead.
-LEAD_ROOMY_SHARE = 0.02
-
-
-def lead_profile_for(blocks_available: int, payload_bytes: int) -> LeadProfile:
-    """Choose the lead header for this cover and payload.
-
-    The lead is a *fixed* cost in blocks, so its relative weight collapses as
-    the cover grows.  Spend blocks on a roomier header only when it costs under
-    :data:`LEAD_ROOMY_SHARE` of the budget -- otherwise the compact header is
-    worth more as payload.
-    """
-    if blocks_available <= 0:
-        return LEAD_COMPACT
-    if LEAD_STANDARD.blocks / blocks_available > LEAD_ROOMY_SHARE:
-        return LEAD_COMPACT
-    body_bits = rs_plan(payload_bytes)[1] * 8
-    if LEAD_STANDARD.blocks + -(-body_bits // LANES) <= blocks_available:
-        return LEAD_STANDARD
-    return LEAD_COMPACT
-
-
-def build_frame(payload: bytes, nonce: bytes | None = None,
-                *, profile: LeadProfile | None = None) -> bytes:
-    """Wrap ``payload`` into ``lead + body`` -- both whitened and CRC-checked.
-
-    The lead is dispatched as one short RS codeword that a blind reader can
-    decode on its own, so it advertises payload length and block count with no
-    guessing.  ``profile`` fixes the header size; by default the compact one is
-    used and :func:`embed` re-wraps with a roomier header when the cover can
-    afford it.
-    """
-    profile = profile or LEAD_COMPACT
-    if not 0 < len(payload) <= 0xFFFF:
-        raise ValueError("载荷长度必须在 1..65535 字节之间")
-    nonce = nonce if nonce is not None else secrets.token_bytes(profile.nonce_bytes)
-    if len(nonce) != profile.nonce_bytes:
-        raise ValueError(f"nonce 必须是 {profile.nonce_bytes} 字节")
-    meta = (MAGIC + bytes([profile.index]) + nonce
-            + struct.pack(">H", rs_block_count(len(payload)))
-            + struct.pack(">H", len(payload)))
-    lead = meta + struct.pack(">H", crc16(meta))
-    lead += bytes(profile.lead_bytes - len(lead))
-    # The nonce stays in the clear so a blind reader can find the keystream.
-    lead = _whiten(lead, nonce, skip=profile.meta_bytes)
-    return lead + _whiten(payload, nonce, skip=0)
-
-
-def _header_profile(head: bytes) -> LeadProfile | None:
-    """Profile named by the first bytes of a frame, or ``None`` if unrecognised."""
-    if len(head) <= len(MAGIC) or head[: len(MAGIC)] != MAGIC:
-        return None
-    return LEAD_PROFILES.get(head[len(MAGIC)])
-
-
-def parse_frame(frame: bytes, *, profile: LeadProfile | None = None) -> bytes:
-    """Recover the payload given ``lead + body`` (as produced by :func:`build_frame`).
-
-    ``profile`` is only needed for the header length; pass it when the caller
-    already decoded the lead through RS.  Otherwise it is read from the frame.
-    """
-    profile = profile or _header_profile(frame)
-    if profile is None:
-        raise StegoError("帧标记不匹配")
-    if len(frame) < profile.lead_bytes:
-        raise StegoError(f"帧长度 {len(frame)} 过短")
-    nonce_at = len(MAGIC) + 1
-    nonce = bytes(frame[nonce_at : nonce_at + profile.nonce_bytes])
-    lead = _whiten(frame[: profile.lead_bytes], nonce, skip=profile.meta_bytes)
-    meta = lead[: profile.meta_bytes]
-    crc = struct.unpack(">H", lead[profile.meta_bytes : profile.meta_bytes + CRC_BYTES])[0]
-    if crc16(meta) != crc:
-        raise StegoError("帧头 CRC 校验失败")
-    if meta[: len(MAGIC)] != MAGIC or meta[len(MAGIC)] != profile.index:
-        raise StegoError("帧标记不匹配")
-    # Length and block count sit at fixed offsets from the end of the metadata.
-    length = struct.unpack(">H", meta[profile.meta_bytes - 2 : profile.meta_bytes])[0]
-    body = frame[profile.lead_bytes : profile.lead_bytes + length]
-    if len(body) != length:
-        raise StegoError(f"帧内长度字段 {length} 与实际载荷 {len(body)} 不符")
-    return _whiten(body, nonce, skip=0)
-
-
-def frame_overhead(profile: LeadProfile | None = None) -> int:
-    """Fixed bytes a frame spends on its lead plus CRC."""
-    profile = profile or LEAD_STANDARD
-    return profile.lead_bytes + CRC_BYTES
-
-
-def rs_block_count(payload_bytes: int) -> int:
-    """How many RS codewords the payload will be split over."""
-    return max(1, -(-payload_bytes // RS_BLOCK_DATA))
-
-
-# ----------------------------------------------------------------- embedding
 
 
 def _bits_lsb(data: bytes) -> np.ndarray:
@@ -521,12 +320,12 @@ def _carriers(width: int, key: bytes, step: float) -> tuple[tuple[int, ...], tup
     """Key-derived channel order and per-channel QIM step."""
     # The domain separator is salted with the cover width so a channel choice
     # cannot be reused across differently sized covers.
-    rng = _rng(derive(key, "carriers"), struct.pack(">H", width),
-               struct.pack(">d", float(step)))
-    order = tuple(int(v) for v in rng.permutation(len(CARRIER_ORDER)))
+    generator = rng(derive(key, "carriers"), struct.pack(">H", width),
+                    struct.pack(">d", float(step)))
+    order = tuple(int(v) for v in generator.permutation(len(CARRIER_ORDER)))
     # ``steps`` is indexed by *plane number* (0=Y, 1=Cb, 2=Cr) so that writers
     # and readers agree regardless of the shuffled ``order``.
-    drawn = rng.uniform(0.9, 1.1, len(CARRIER_ORDER)) * step
+    drawn = generator.uniform(0.9, 1.1, len(CARRIER_ORDER)) * step
     steps = [0.0] * len(CARRIER_ORDER)
     for slot, plane in enumerate(order):
         steps[plane] = float(drawn[slot])
@@ -589,51 +388,7 @@ def _pick_carrier(ycbcr: np.ndarray, channels: tuple[int, ...]) -> tuple[int, fl
     return best, scores[best]
 
 
-def _encode_rs(frame: bytes, profile: LeadProfile = LEAD_STANDARD) -> tuple[bytes, int]:
-    """RS-encode a frame into ``lead codeword + body codewords``.
-
-    The lead is always exactly one codeword of the frame's profile, so a reader
-    can decode it before knowing anything about the payload.
-    """
-    lead_len = profile.lead_bytes
-    lead, body = frame[:lead_len], frame[lead_len:]
-    lead_code = reedsolo.RSCodec(profile.nsym, nsize=profile.code_bytes).encode(lead)
-    nblocks = max(1, -(-len(body) // RS_BLOCK_DATA))
-    per_block = -(-len(body) // nblocks)
-    padded = body + bytes(nblocks * per_block - len(body))
-    codec = reedsolo.RSCodec(RS_BLOCK_NSYM, nsize=per_block + RS_BLOCK_NSYM)
-    out = bytearray(lead_code)
-    for i in range(nblocks):
-        out += codec.encode(padded[i * per_block : (i + 1) * per_block])
-    return bytes(out), nblocks + 1
-
-
-def _decode_lead(codeword: bytes, profile: LeadProfile = LEAD_STANDARD) -> bytes:
-    """Decode the lead codeword that starts every embedded frame."""
-    if len(codeword) < profile.code_bytes:
-        raise StegoError("码字过短，缺少引导头")
-    chunk = bytearray(codeword[: profile.code_bytes])
-    try:
-        return bytes(reedsolo.RSCodec(profile.nsym, nsize=profile.code_bytes).decode(chunk)[0])
-    except Exception as exc:
-        raise StegoError(f"引导头解码失败（密钥错误或图像被改动）：{exc}") from exc
-
-
-def _decode_body(codeword: bytes, nblocks: int, size: int) -> bytes:
-    """Decode ``nblocks`` equal body codewords of ``size`` bytes each."""
-    if nblocks * size > len(codeword):
-        raise StegoError("码字长度不足")
-    codec = reedsolo.RSCodec(RS_BLOCK_NSYM, nsize=size)
-    data = bytearray()
-    for i in range(nblocks):
-        chunk = bytearray(codeword[i * size : (i + 1) * size])
-        try:
-            data += bytes(codec.decode(chunk)[0])
-        except Exception as exc:
-            raise StegoError(f"Reed-Solomon 解码失败（密钥错误或图像被改动）：{exc}") from exc
-    return bytes(data)
-
-
+# ----------------------------------------------------------------- embedding
 def _embed_at_step(cover: Image.Image, frame: bytes, payload: bytes, key: bytes,
                    step: float) -> tuple[Image.Image, dict]:
     """One embedding attempt at a fixed QIM step, with channel fallback."""
@@ -642,7 +397,7 @@ def _embed_at_step(cover: Image.Image, frame: bytes, payload: bytes, key: bytes,
     if profile is not LEAD_COMPACT:
         # Re-wrap so the lead's nonce length matches the profile actually used.
         frame = build_frame(payload, profile=profile)
-    codeword, nblocks = _encode_rs(frame, profile)
+    codeword, nblocks = ecc.encode(frame, profile)
     bits = _bits_lsb(codeword)
     order = _block_partner(width, height, key, step)
     needed = -(-len(bits) // LANES)
@@ -709,8 +464,8 @@ def embed(image: Image.Image, frame: bytes, key: bytes, *, step: float = DEFAULT
     step trades invisibility for robustness; callers that care can pass a fixed
     ``step`` through ``steps=(step,)``.
     """
-    if reedsolo is None:
-        raise RuntimeError("需要 reedsolo：pip install reedsolo")
+    if not ecc.available():
+        raise ecc.ChannelUnavailable("需要 reedsolo：pip install reedsolo")
     cover = image.convert("RGB")
     payload = parse_frame(frame)
     usable, reason = check_cover(cover, len(payload))
@@ -792,7 +547,7 @@ def _read_with_profile(blocks: np.ndarray, order: np.ndarray, limit: int,
     # Stage 1: just enough blocks for the lead, then decode it.
     lead_positions = min(limit, -(-lead_bits // LANES))
     all_bytes = read_upto(lead_positions)
-    lead_plain = _decode_lead(all_bytes, profile)
+    lead_plain = ecc.decode_lead(all_bytes, profile)
     blocks_at = len(MAGIC) + 1 + profile.nonce_bytes
     length_at = blocks_at + NBLOCK_BYTES
     nblocks = struct.unpack(">H", lead_plain[blocks_at:length_at])[0]
@@ -810,7 +565,7 @@ def _read_with_profile(blocks: np.ndarray, order: np.ndarray, limit: int,
     all_bytes = read_upto(needed_positions)
 
     body_code = all_bytes[profile.code_bytes:]
-    body = _decode_body(body_code, nblocks, size)[:length]
+    body = ecc.decode_body(body_code, nblocks, size)[:length]
     payload = parse_frame(lead_plain + body, profile=profile)
     return payload, {
         "width": width,
@@ -827,8 +582,8 @@ def _read_with_profile(blocks: np.ndarray, order: np.ndarray, limit: int,
 
 def extract(image: Image.Image, key: bytes, *, step: float = DEFAULT_STEP) -> tuple[bytes, dict]:
     """Blindly recover the payload, trying each carrier channel in turn."""
-    if reedsolo is None:
-        raise RuntimeError("需要 reedsolo：pip install reedsolo")
+    if not ecc.available():
+        raise ecc.ChannelUnavailable("需要 reedsolo：pip install reedsolo")
     img = image.convert("RGB")
     width, height = img.size
     if min(width, height) < MIN_SIDE // 2 or blocks_per_row(width) == 0:

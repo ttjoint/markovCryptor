@@ -14,7 +14,7 @@ from .model import (
     read_text_file,
     unique_model_path,
 )
-from .progress import Cancelled
+from .core.progress import Cancelled
 
 
 def build_parser() -> argparse.ArgumentParser:

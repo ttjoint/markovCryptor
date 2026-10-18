@@ -18,9 +18,9 @@ from markovcryptor import (
     identify_model,
     unique_model_path,
 )
-from markovcryptor.arith import ArithmeticDecoder, ArithmeticEncoder, BitReader
+from markovcryptor.core.arith import ArithmeticDecoder, ArithmeticEncoder, BitReader
 from markovcryptor.compression import METHOD_NAMES, TEXT, TextModel, compress, decompress
-from markovcryptor.progress import Cancelled
+from markovcryptor.core.progress import Cancelled
 from markovcryptor.punctuation import CLOSE_TO_OPEN, OPEN_TO_CLOSE, TERMINAL_MARKS, is_hanzi
 
 CORPUS = (Path(__file__).resolve().parent / "sample_corpus.txt").read_text(encoding="utf-8")

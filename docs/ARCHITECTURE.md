@@ -1,7 +1,8 @@
 # 架构方案：从可行性原型到多信道隐写平台
 
-> 状态：**提案（v1）**。本文只描述目标架构与迁移路径，不包含已完成的实现。
-> 撰写依据：现有 19 个 Python 模块（4 764 行）、64 项测试、全库 15 488 张图的压测数据。
+> 状态：**执行中**。阶段 0（安全网）与阶段 1（core 层）已完成，下文相应
+> 章节标注 ✅；其余仍是目标架构与迁移路径。
+> 撰写依据：现有 19 个 Python 模块（5 100 行，阶段 1 后）、71 项测试、全库 15 488 张图的压测数据。
 
 ---
 
@@ -29,7 +30,7 @@ image_stego ──┬─ gif_stego ── chat_gui
   视频转码）在 Web 后端需要的形态，不用重造。
 - **算法内核与 IO 已经分离**：`image_stego.embed` 收 `Image` 返 `Image`，
   `codec.encode` 收 `bytes` 返 `str`。没有一个内核函数知道文件路径或 HTTP。
-- **测试是可用的行为基线**：64 项测试覆盖了三信道的往返、容量判定一致性、
+- **测试是可用的行为基线**：71 项测试覆盖了三信道的往返、容量判定一致性、
   鲁棒性、错误拒绝。重构时可以拿它当安全网。
 
 ### 1.2 阻碍平台化的具体问题
@@ -125,7 +126,7 @@ image_stego ──┬─ gif_stego ── chat_gui
    文件、网络、数据库在边缘层。
 3. **一个引擎实例，三种界面**。CLI / Web / GUI 共用同一套应用服务层，
    界面只负责「收集输入、展示输出、转发进度」。
-4. **渐进迁移，不推倒重来**。现有 64 项测试是安全网；
+4. **渐进迁移，不推倒重来**。现有 71 项测试是安全网；
    每一步重构都必须让它保持绿色。
 5. **能力可探测（capability discovery）**。新信道注册后，界面自动出现它，
    不需要改 UI 代码。
@@ -368,7 +369,7 @@ markovCryptor/                        # 仓库根
 │           ├── metrics.py            # 计数/耗时
 │           └── storage.py            # 模型/语料/临时文件路径
 ├── tests/
-│   ├── unit/                         # 内核单元测试（现 64 项迁入）
+│   ├── unit/                         # 内核单元测试（现 71 项迁入）
 │   ├── integration/                  # 跨层：Engine → 文件系统
 │   ├── e2e/                          # Web API / CLI 端到端
 │   └── fixtures/                     # 小图、小 GIF、迷你语料
@@ -699,7 +700,7 @@ Tk 需要 Python + 图形栈；浏览器只需一个 URL。对本地其它系统
 2. 值对象只用 `core` 里的类型，**不 import 任何 interface**
 3. 在 `channels/__init__.py` 注册
 4. 加 `tests/unit/channels/test_<id>.py`：往返、容量一致性、
-   错误拒绝（复用现有 64 项测试的写法）
+   错误拒绝（复用现有 71 项测试的写法）
 5. 在 `docs/CHANNELS.md` 补原理与容量表
 6. **不改任何 interface 代码** —— 这是验收条件
 
@@ -742,7 +743,7 @@ Tk 需要 Python + 图形栈；浏览器只需一个 URL。对本地其它系统
 > 注：`tests/` 不设 `__init__.py`，唯一入口是 `discover -s tests`。
 > 设为包会让该命令要求改用相对导入，两种调用方式互相排斥。
 
-### 阶段 1：抽 core 层（1 天）
+### 阶段 1：抽 core 层（1 天）✅ 已完成
 
 无行为变化，纯搬运 + 改 import：
 
@@ -752,7 +753,31 @@ Tk 需要 Python + 图形栈；浏览器只需一个 URL。对本地其它系统
 - 从 `codec.py`/`handshake.py` 抽出 `crypto`
 - 新建 `core/errors.py`，让现有异常继承它（保留原名）
 
-**验收**：64 项全绿；`image_stego` 变成纯粹的 DCT-QIM 内核（约 400 行）。
+**验收**：71 项全绿；`image_stego` 变成纯粹的 DCT-QIM 内核。
+
+**实际结果**：
+
+| 文件 | 前 | 后 | 说明 |
+|---|---|---|---|
+| `image_stego.py` | 869 | 622 | 只剩 DCT-QIM 内核 + 载体评分 + 容量规划 |
+| `core/framing.py` | — | 222 | 帧布局、CRC、白化、lead 双 profile、RS 分块规划 |
+| `core/errors.py` | — | 113 | 8 个错误类，带 `code`/`http_status` |
+| `core/crypto.py` | — | 180 | PBKDF2+AES-GCM、X25519、HKDF 会话链 |
+| `core/ecc.py` | — | 88 | Reed-Solomon，依赖缺失时抛 `ChannelUnavailable` |
+| `core/keys.py` | — | 53 | 口令规范化、域分离、确定性 RNG |
+
+实施中的两项判断（已写入代码）：
+
+1. **`InvalidInput`/`BadKey` 同时继承 `ValueError`。** 老代码（CLI、中文 codec）
+   靠 `except ValueError` 输出错误信息；新分层又需要按类别区分。双基类让两边
+   都成立，且语义上“参数错了”本来就是 `ValueError`。
+2. **`core/crypto.py` 依赖 `cryptography` 但不把它变成硬依赖。** AES-GCM 与
+   X25519 分别在自己的入口处捕获 `ImportError` 并抛 `ChannelUnavailable`，
+   中文信道在没有 `cryptography` 的机器上仍可只用算术编码。
+
+**发现的真实 bug**：`framing.parse_frame` 原本抛 `ValueError`，而提取路径靠
+`except StegoError` 兜底——两者毫无关系，只是因为没人构造过损坏帧才没暴露。
+迁移后统一抛 `NoHiddenFrame`/`CarrierDamaged`，错误才真正可被分类。
 
 ### 阶段 2：Channel 抽象 + 三个适配器（2 天）
 
