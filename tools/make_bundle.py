@@ -46,9 +46,11 @@ REQUIREMENTS = [
     "websockets>=12.0",
 ]
 
-#: 要覆盖的 Python 版本。本库要求 ``>=3.11``，但 guest 装哪个版本我们
-#: 控制不了 —— 只放 cp311 的 wheel，装到 3.12 上会 ``No matching distribution``。
-PYTHON_TARGETS = ["3.11", "3.12", "3.13"]
+#: 要覆盖的 Python 版本 × 架构。用户机器上装的是哪个我们控制不了 ——
+#: 32 位 Python 在 64 位 Windows 上很常见，而它的 wheel 名字是 win32。
+#: 组合不多，全下一遍，pip 自己挑。
+PYTHON_TARGETS = ["3.11", "3.12", "3.13", "3.14", "3.15"]
+PLATFORMS = ["win_amd64", "win32"]
 
 #: guest 只需要这些文件就能跑 SnowLuma（其余是 WebUI 前端、日志、可选原生模块）。
 SNOWLUMA_FILES = [
@@ -75,22 +77,40 @@ def _md5(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _download(target: Path, version: str, platform: str,
+              requirements: list[str]) -> bool:
+    """下一组 wheel。成功（或已有完整缓存）返回 True。"""
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "download", "--only-binary=:all:",
+         "--platform", platform, "--python-version", version,
+         "--implementation", "cp", "--dest", str(target), *requirements],
+        capture_output=True, text=True)
+    if result.returncode == 0:
+        return True
+    tail = (result.stderr.strip().splitlines() or ["?"])[-1]
+    print(f"    cp{version}-{platform} 失败：{tail[:80]}")
+    return False
+
+
 def _build_wheels(target: Path) -> None:
     print("  构建本库 wheel…")
     subprocess.run(
         [sys.executable, "-m", "pip", "wheel", "--no-deps", "-w", str(target), str(ROOT)],
         check=True, capture_output=True)
     for version in PYTHON_TARGETS:
-        print(f"  下载依赖 wheel（cp{version.replace('.', '')}）…")
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "download", "--only-binary=:all:",
-             "--platform", "win_amd64", "--python-version", version,
-             "--implementation", "cp", "--dest", str(target), *REQUIREMENTS],
-            capture_output=True, text=True)
-        if result.returncode != 0:
-            # 旧版本没发布某个依赖时不要静默跳过，但也不该让整个包失败。
-            tail = result.stderr.strip().splitlines()[-1:] or ["?"]
-            print(f"    cp{version} 部分缺包（该版本可能已 EOL）：{tail[0]}")
+        for platform in PLATFORMS:
+            print(f"  下载依赖 wheel（cp{version.replace('.', '')}-{platform}）…")
+            if _download(target, version, platform, REQUIREMENTS):
+                continue
+            # uvicorn[standard] 会拖进 httptools / watchfiles 这些 C 扩展，
+            # 新版本 Python 上常常还没编好。退一步用纯 Python 的 uvicorn：
+            # 功能照常，只是慢一点，对连通性测试完全够。
+            plain = [r for r in REQUIREMENTS if not r.startswith("uvicorn")]
+            plain.append("uvicorn>=0.27")
+            if _download(target, version, platform, plain):
+                print(f"    cp{version}-{platform} 用纯 Python uvicorn（无 [standard]）")
+            else:
+                print(f"    cp{version}-{platform} 完全下不了，跳过")
 
 
 def _copy_snowluma(source: Path, target: Path) -> None:
@@ -190,11 +210,35 @@ if (-not $py) {
 }
 Write-Host ("Python: " + (& $py --version))
 
+# 先说清楚位数和版本 —— 装不上时绝大多数是这个原因，别让人去猜。
+$info = & $py -c "import sys,platform,struct; print('%d.%d|%d|%s' % (sys.version_info[0], sys.version_info[1], struct.calcsize('P')*8, platform.machine()))"
+$parts = $info -split '\|'
+$ver = $parts[0]
+$bits = $parts[1]
+Write-Host ("        版本 {0} / {1} 位 / {2}" -f $ver, $bits, $parts[2])
+
+$major, $minor = $ver -split '\.'
+if ([int]$major -lt 3 -or ([int]$major -eq 3 -and [int]$minor -lt 11)) {
+  Write-Host "`nPython 版本太低：本库要 3.11+，现在是 $ver。" -ForegroundColor Red
+  Write-Host "包里带了 cp311–cp315 的 wheel（含 32 位），重装一个 3.11+ 的 Python 即可。"
+  exit 2
+}
+
 Write-Host "`n[1/3] 离线安装依赖…" -ForegroundColor Yellow
-# [web] 是可选依赖，光装 markovcryptor 不会有 fastapi/uvicorn；
-# websockets 供 OneBot 客户端用，也不在基础依赖里。
-& $py -m pip install --no-index --find-links "$here\wheels" --upgrade "markovcryptor[web]"
-if ($LASTEXITCODE -ne 0) { Write-Host "依赖安装失败" -ForegroundColor Red; exit 1 }
+# 逐项显式安装，而不是靠 "markovcryptor[web]" 的依赖解析：
+# 那样会强制要求 uvicorn[standard]，而它的 C 扩展在很新的 Python 上
+# 可能还没编好，整个安装就会失败。这里 uvicorn 只用纯 Python 版。
+& $py -m pip install --no-index --find-links "$here\wheels" --upgrade `
+  numpy pillow reedsolo cryptography `
+  fastapi uvicorn python-multipart websockets markovcryptor
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "`n依赖安装失败。" -ForegroundColor Red
+  Write-Host "本机 Python 是 $ver / $bits 位。包里有哪些 wheel：" -ForegroundColor Yellow
+  Get-ChildItem (Join-Path $here "wheels") -Filter "numpy-*.whl" |
+    ForEach-Object { "  " + $_.Name }
+  Write-Host "如果你的组合不在上面，换一个 Python（建议 3.12 64 位）重试。"
+  exit 1
+}
 
 Write-Host "`n[2/3] 检查能否启动…" -ForegroundColor Yellow
 & $py -c "import markovcryptor, fastapi, uvicorn, websockets, numpy, PIL, reedsolo, cryptography, pathlib; ui = pathlib.Path(markovcryptor.__file__).parent / 'webui' / 'index.html'; assert ui.is_file(), 'WebUI 缺失'; print('imports ok, webui', ui.stat().st_size, 'bytes')"

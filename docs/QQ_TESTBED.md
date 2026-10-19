@@ -236,8 +236,15 @@ python tools/make_bundle.py --with-snowluma D:/Projects/SnowLuma-v1.14.22-win-x6
 
 打包行为：
 
-- 依赖按 **cp311 / cp312 / cp313 各下一份**。只打 cp311 的话，装到
-  Python 3.12 的虚拟机上会 `No matching distribution found for numpy`。
+- 依赖按 **cp311–cp315 × win_amd64/win32 全部下一遍**（10 个组合）。装机时
+  pip 自己挑。三种情况都实际踩过：
+  - 只打 cp311，装到 3.12 上 → `No matching distribution found for numpy`
+  - 只打 `win_amd64`，装到 32 位 Python 上 → 同样报错（32 位的 wheel
+    名字是 `win32`，很多人在 64 位 Windows 上装了 32 位 Python）
+  - Python 3.14/3.15 上 `uvicorn[standard]` 的 C 扩展还没编好，会
+    `ResolutionImpossible` 带崩整条依赖链 → 自动退回纯 Python 的 uvicorn
+- `install.ps1` 装之前先打印 Python 版本/位数，版本低于 3.11 直接说清楚；
+  装失败时列出包里实际有哪些 `numpy-*.whl`，不用人猜。
 - 装的是 `markovcryptor[web]` 而不是 `markovcryptor`，否则 guest 上没有
   `fastapi` / `uvicorn`。
 - 包内**不含 Python 与 Node 本体** —— 这两样 guest 要自己装。
@@ -267,7 +274,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 **（二）`.ps1` 必须带 UTF-8 BOM**
 
 PS 5.1 读无 BOM 的 `.ps1` 时按系统 ANSI（中文机是 GBK）解码。脚本里的
-中文注释会被解错，`号` 的尾字节 `` 与行尾 `` 结合成一个汉字，
+中文注释会被解错，`号` 的尾字节 `` 与行尾 `
+` 结合成一个汉字，
 **吃掉 CRLF**，把 `param(` 并进上一行注释，于是报：
 
 ```

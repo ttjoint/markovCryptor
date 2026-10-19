@@ -216,6 +216,46 @@ class PackagingTest(unittest.TestCase):
         for version in ("3.11", "3.12", "3.13"):
             self.assertIn(f'"{version}"', source)
 
+    def test_bundle_covers_32bit(self) -> None:
+        """32 位 Python 在 64 位 Windows 上很常见，它的 wheel 叫 win32。
+
+        只打 win_amd64 的话，32 位解释器报 numpy 找不到 —— 实际踩过。
+        """
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        self.assertIn("PLATFORMS", source)
+        self.assertIn('"win32"', source)
+        self.assertIn('"win_amd64"', source)
+
+    def test_install_falls_back_without_uvicorn_standard(self) -> None:
+        """uvicorn[standard] 的 C 扩展在很新的 Python 上常常还没编好。
+
+        它一旦解析失败会带崩整条依赖链，所以要用纯 Python 的 uvicorn。
+        """
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        self.assertIn("plain", source)
+        self.assertIn('"uvicorn>=0.27"', source)
+
+    def test_generated_wheels_cover_declared_targets(self) -> None:
+        """真打一个包（不含 SnowLuma），检查每个组合都有 numpy 和 pillow。"""
+        import re
+
+        targets = re.findall(r'"3\.\d+"',
+                            (TOOLS / "make_bundle.py").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            subprocess.run(
+                [sys.executable, str(TOOLS / "make_bundle.py"), "--out", str(out)],
+                cwd=str(ROOT), check=True, capture_output=True)
+            wheels = [p.name for p in (out.glob("qqtest-*") if False else out.rglob("*.whl"))]
+            self.assertTrue(wheels, "没下到任何 wheel")
+            for version in set(targets):
+                tag = "cp" + version.strip('"').replace(".", "")
+                for arch in ("win_amd64", "win32"):
+                    for pkg in ("numpy", "pillow"):
+                        hit = [w for w in wheels
+                               if w.startswith(pkg) and f"-{tag}-{tag}-{arch}" in w]
+                        self.assertTrue(hit, f"{pkg} 缺 {tag}-{arch}")
+
     def test_ps1_need_bom_and_crlf(self) -> None:
         """Win10 自带的 PowerShell 5.1 按 ANSI 代码页读无 BOM 的 .ps1。
 
