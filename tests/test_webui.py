@@ -141,5 +141,124 @@ class SchemaShapeTest(unittest.TestCase):
         self.assertEqual(branch["minimum"], 8.0)
 
 
+class TerminalContractTest(unittest.TestCase):
+    """The terminal tab and the /terminal/* endpoints must agree.
+
+    These cover the pieces a typo breaks silently: an endpoint the page calls
+    but the server doesn't expose, and the UI elements the JS wires to (a
+    renamed id leaves the tab dead with no error anywhere).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        model = MarkovModel.train(fixtures.corpus_text(), vocabulary_size=512)
+        cls.app = create_app(engine=Engine(model=model))
+        cls.client = AsyncClient(transport=ASGITransport(app=cls.app),
+                                 base_url="http://test")
+        cls.html = INDEX.read_text(encoding="utf-8")
+
+    def setUp(self):
+        # 会话状态活在 app 上，用例之间会互相污染（握手过一次就一直“已建立”）。
+        self.app.state.terminal_hub.reset()
+
+    def test_terminal_endpoints_served(self):
+        paths = set(_run(self.client.get("/openapi.json")).json()["paths"])
+        for expected in ("/terminal/state", "/terminal/inbox/{name}",
+                         "/terminal/media/{name}/{index}",
+                         "/terminal/{name}/send"):
+            self.assertIn(expected, paths)
+
+    def test_page_terminal_ids_all_exist(self):
+        """Every $("t-") target in the JS must exist as an id in the HTML."""
+        used = set(re.findall(r'\$\("(t-[a-z-]+)"\)', self.html))
+        self.assertTrue(used, "终端 JS 没有找到任何元素引用，可能被重写")
+        defined = set(re.findall(r'id="(t-[a-z-]+)"', self.html))
+        missing = used - defined
+        self.assertEqual(missing, set(), f"JS 引用了不存在的元素 id：{sorted(missing)}")
+
+    def test_queue_has_checkbox_delete_and_sent_list(self):
+        """The queue rows are built in JS, so assert on the code that builds them."""
+        html = self.html
+        self.assertIn("t-queue", html)
+        self.assertIn("t-sent", html)
+        self.assertIn("已发送", html, "缺少已发送列表")
+        # 预览项内部：勾选框 + 删除按钮。
+        self.assertIn('check.type = "checkbox"', html,
+                      "待发送预览项缺少勾选框")
+        self.assertIn("从队列删除", html, "待发送预览项缺少删除按钮")
+        self.assertIn("function tArchiveChecked", html,
+                      "缺少“发送后归档到已发送”的逻辑")
+
+    def test_terminal_flow_end_to_end(self):
+        """The full conversation: plain, handshake, covert, then read both windows."""
+        import io
+
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (256, 256), (120, 130, 140)).save(buffer, "PNG")
+        # 纯色底图会被图片信道拒绝；用噪声。
+        import numpy as np
+
+        array = np.random.default_rng(3).integers(64, 192, (256, 256, 3), dtype="uint8")
+        buffer = io.BytesIO()
+        Image.fromarray(array, "RGB").save(buffer, "PNG")
+        png = buffer.getvalue()
+        files = [("files", ("c.png", png, "image/png"))]
+
+        response = _run(self.client.post("/terminal/alice/send",
+                                         data={"text": "普通消息", "mode": "plain"},
+                                         files=files))
+        self.assertEqual(response.status_code, 200)
+
+        response = _run(self.client.post("/terminal/alice/send",
+                                         data={"mode": "handshake"}))
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["state_label"].startswith("已建立"))
+
+        response = _run(self.client.post("/terminal/alice/send",
+                                         data={"text": "机密", "mode": "covert"},
+                                         files=files))
+        self.assertEqual(response.status_code, 200)
+
+        inbox = _run(self.client.get("/terminal/inbox/bob")).json()
+        chat = [m for m in inbox["messages"] if m["chat_text"]]
+        covert = [s for m in inbox["messages"] for s in m["covert"]]
+        self.assertEqual(chat[-1]["chat_text"], "普通消息")
+        self.assertEqual(covert, ["机密"])
+
+    def test_covert_requires_session(self):
+        # bob 未握手就发密文 → 422，错误体带可操作建议。
+        import io
+        import numpy as np
+        from PIL import Image
+
+        array = np.random.default_rng(4).integers(64, 192, (256, 256, 3), dtype="uint8")
+        buffer = io.BytesIO()
+        Image.fromarray(array, "RGB").save(buffer, "PNG")
+        response = _run(self.client.post("/terminal/bob/send",
+                                         data={"text": "x", "mode": "covert"},
+                                         files=[("files", ("c.png", buffer.getvalue(), "image/png"))]))
+        self.assertEqual(response.status_code, 422)
+        body = response.json()
+        self.assertIn("hints", body)
+
+    def test_media_serves_received_image(self):
+        import io
+        import numpy as np
+        from PIL import Image
+
+        array = np.random.default_rng(5).integers(64, 192, (200, 200, 3), dtype="uint8")
+        buffer = io.BytesIO()
+        Image.fromarray(array, "RGB").save(buffer, "PNG")
+        _run(self.client.post("/terminal/alice/send",
+                              data={"text": "图", "mode": "plain"},
+                              files=[("files", ("c.png", buffer.getvalue(), "image/png"))]))
+        response = _run(self.client.get("/terminal/media/bob/0"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "image/png")
+        self.assertEqual(response.content[:4], b"\x89PNG")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,7 @@ from ..core.errors import (
     UnsupportedCarrier,
 )
 from ..observability import event
+from .covers import CoverLibrary
 from .protocol import (
     HEADER_BYTES,
     Kind,
@@ -105,7 +106,8 @@ class Terminal:
     """A named endpoint. Owns one session and one outbox of pending handshakes."""
 
     def __init__(self, terminal_id: str, network: Network, *,
-                 psk: str = "pbx1", on_inbound: Callable[[Inbound], None] | None = None):
+                 psk: str = "pbx1", on_inbound: Callable[[Inbound], None] | None = None,
+                 covers: CoverLibrary | None = None):
         self.id = terminal_id
         self.network = network
         #: Pre-shared key for the *image stego layer* (the MKX1 key), not the
@@ -114,11 +116,20 @@ class Terminal:
         self.psk = image_stego.normalise_key(psk)
         self.session = Session()
         self._on_inbound = on_inbound
+        #: Called with (sender, raw_packet) before inspection, exactly once per
+        #: deliver(). Together with ``inbox.append`` (also once per deliver) that
+        #: gives history lists a stable 1:1 index correspondence, which the web
+        #: layer relies on to find media bytes. UI code should prefer
+        #: ``on_inbound`` (decoded), not this.
+        self.on_packet: Callable[[str, bytes], None] | None = None
         self.inbox: list[Inbound] = []
         #: After a successful exchange, remember who to reply to.
         self.peer_id: str | None = None
         #: Optional text carrier (Chinese channel). See :meth:`use_text_channel`.
         self.text_channel = None
+        #: Where handshake-response covers come from. Every image we send must
+        #: be based on a real picture; see ``terminal/covers.py``.
+        self.covers = covers or CoverLibrary()
 
     # ------------------------------------------------------------------ config
 
@@ -285,6 +296,8 @@ class Terminal:
         and is remembered so an automatic handshake response goes back the right
         way.
         """
+        if self.on_packet is not None:
+            self.on_packet(sender, packet)
         self.peer_id = sender
         text, raws = _decode_packet(packet)
         covert: list[str] = []
@@ -419,8 +432,11 @@ class Terminal:
             return
         public, mode = self.session.answer()
         envelope = build_handshake(public, mode)
-        cover = _synthetic_cover(256)
-        stego = self._embed_bytes(envelope, _png_bytes(cover))
+        # The response must ride in a real picture, same as any other image we
+        # send -- a noise cover would announce itself. cover_for() fails loudly
+        # if the library cannot hold the envelope, naming the shortfall.
+        cover = self.covers.cover_for(len(envelope))
+        stego = self._embed_bytes(envelope, cover)
         event("terminal", "handshake_auto_response", id=self.id, peer=target)
         self.network.send(self.id, target, _encode_packet(Packet(images=(stego,))))
 
@@ -467,19 +483,6 @@ def _png_bytes(image: Image.Image) -> bytes:
     buffer = io.BytesIO()
     image.save(buffer, "PNG")
     return buffer.getvalue()
-
-
-def _synthetic_cover(size: int = 256) -> Image.Image:
-    """A cover for our own handshake responses.
-
-    Deliberately textured: a flat colour has no stable mid-frequency coefficients
-    and the image channel rejects it. Deterministic, so a test can assert on it.
-    """
-    import numpy as np
-
-    rng = np.random.default_rng(0xB0B)
-    base = rng.integers(64, 192, (size, size, 3), dtype=np.uint8)
-    return Image.fromarray(base, "RGB")
 
 
 def _unhex_or_none(text: str) -> bytes | None:

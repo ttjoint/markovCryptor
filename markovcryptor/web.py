@@ -106,6 +106,15 @@ def create_app(config: ApiConfig | None = None, *, engine: Engine | None = None)
 
     app.state.jobs = {}
 
+    # One terminal pair per process: the conversation feature is a demonstration
+    # of the protocol, not a multiuser chat server. Cover directory follows the
+    # model directory's lead -- user data stays out of version control.
+    from .web_terminal import TerminalHub, wire_terminal_routes
+
+    app.state.terminal_hub = TerminalHub(cover_dir=settings.model_dir or None)
+    wire_terminal_routes(app, app.state.terminal_hub,
+                         max_upload_bytes=settings.max_upload_bytes)
+
     @app.exception_handler(StegoError)
     async def _handle_stego_error(request: Request, exc: StegoError) -> JSONResponse:
         # Every failed request is counted under its stable code, so "what is

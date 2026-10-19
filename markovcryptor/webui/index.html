@@ -74,6 +74,49 @@
   th { color: var(--dim); font-weight: 500; font-size: 12px; }
   td.mono { font-family: Consolas, monospace; font-size: 12px; word-break: break-all; }
   progress { width: 100%; height: 12px; }
+
+  /* --- terminal --- */
+  .term-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 900px) { .term-grid { grid-template-columns: 1fr; } }
+  .queue-head {
+    display: flex; justify-content: space-between; align-items: center;
+    margin: 12px 0 6px; font-size: 12px; color: var(--dim);
+  }
+  .queue {
+    display: flex; flex-wrap: wrap; gap: 8px; min-height: 64px;
+    border: 1px dashed var(--line); border-radius: 6px; padding: 8px;
+  }
+  .queue:empty::before { content: "（空）"; color: var(--dim); font-size: 12px; }
+  .qitem {
+    position: relative; width: 96px; border: 1px solid var(--line);
+    border-radius: 6px; overflow: hidden; background: var(--panel);
+  }
+  .qitem.checked { border-color: var(--ok); box-shadow: 0 0 0 1px var(--ok); }
+  .qitem img { display: block; width: 100%; height: 72px; object-fit: cover; }
+  .qitem .bar {
+    display: flex; align-items: center; gap: 4px; padding: 3px 4px; font-size: 11px;
+  }
+  .qitem .bar input { margin: 0; }
+  .qitem .bar .del {
+    margin-inline-start: auto; background: none; border: none; color: var(--err);
+    cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px;
+  }
+  .qitem .tag {
+    position: absolute; top: 2px; inset-inline-start: 2px; background: var(--panel);
+    border-radius: 4px; font-size: 10px; padding: 1px 4px; color: var(--dim);
+  }
+  .windows { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .chat {
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px;
+    min-height: 180px; max-height: 320px; overflow: auto; font-size: 13px;
+    background: var(--panel);
+  }
+  .chat.covert { border-style: dashed; }
+  .chat .msg { margin: 0 0 8px; }
+  .chat .msg .who { color: var(--dim); font-size: 11px; }
+  .chat img.thumb { max-width: 100%; border-radius: 4px; display: block; margin: 4px 0; }
+  .chat .note { color: var(--warn); font-size: 12px; }
+  .chat .secret { color: var(--ok); }
 </style>
 </head>
 <body>
@@ -85,6 +128,7 @@
 
 <nav id="tabs">
   <button data-tab="codec" aria-selected="true">编解码</button>
+  <button data-tab="terminal" aria-selected="false">终端</button>
   <button data-tab="batch" aria-selected="false">批处理</button>
   <button data-tab="channels" aria-selected="false">信道</button>
 </nav>
@@ -117,6 +161,61 @@
       <button class="action" id="run">执行</button>
       <pre class="out" id="result" hidden></pre>
     </fieldset>
+  </section>
+
+  <!-- ------------------------------------------------------------ terminal -->
+  <section id="tab-terminal" hidden>
+    <p class="hint" id="t-state">会话未建立</p>
+    <div class="term-grid">
+      <!-- 发送侧 -->
+      <fieldset>
+        <legend id="t-compose-title">alice · 发送</legend>
+        <label><span>明文文本（对端聊天窗可见）</span>
+          <input type="text" id="t-text" placeholder="普通消息…"></label>
+        <div class="row">
+          <label><span>新增图片（可多选）</span>
+            <input type="file" id="t-files" accept="image/*" multiple></label>
+          <label class="dim" id="t-lib-hint">会自动从底图库补图</label>
+        </div>
+
+        <!-- 待发送队列：预览 + 勾选 + 删除 -->
+        <div class="queue-head">
+          <span>待发送（勾选的才会发出）</span>
+          <span>
+            <button class="ghost" id="t-queue-clear">清空</button>
+          </span>
+        </div>
+        <div class="queue" id="t-queue"><p class="dim">尚无图片。上方新增，或发送时留空由底图库自动补。</p></div>
+
+        <div class="row">
+          <button class="action" id="t-send-plain">明文发送</button>
+          <button class="action" id="t-send-covert" disabled>密文发送（藏进勾选图片）</button>
+        </div>
+        <div class="row">
+          <button class="ghost" id="t-handshake">发起密钥交换</button>
+          <label class="dim">密钥交换也会带一张底图</label>
+        </div>
+      </fieldset>
+
+      <!-- 对方视角：聊天窗 + 隐密窗 -->
+      <fieldset>
+        <legend id="t-inbox-title">bob · 接收</legend>
+        <div class="windows">
+          <div>
+            <h3>聊天窗</h3>
+            <div class="chat" id="t-chat"><p class="dim">（空）</p></div>
+          </div>
+          <div>
+            <h3>隐密窗</h3>
+            <div class="chat covert" id="t-covert"><p class="dim">（空）</p></div>
+          </div>
+        </div>
+        <div class="queue-head"><span>已发送</span>
+          <span><button class="ghost" id="t-sent-clear">清空列表</button></span>
+        </div>
+        <div class="queue" id="t-sent"><p class="dim">（无）</p></div>
+      </fieldset>
+    </div>
   </section>
 
   <!-- ------------------------------------------------------------ batch -->
@@ -554,6 +653,223 @@ $("channel").onchange = syncChannel;
 $("mode").onchange = syncChannel;
 $("run").onclick = runCodec;
 $("b-run").onclick = submitBatch;
+
+// ------------------------------------------------------------------ terminal
+
+const t = {
+  who: "alice",          // 发送方；接收方固定是另一个
+  nextInbox: 0,
+  queue: [],             // {id, name, dataUrl, checked}
+  sent: [],              // {id, name, dataUrl}
+  seq: 0,
+};
+
+function tPeer() { return t.who === "alice" ? "bob" : "alice"; }
+
+function tRetitle() {
+  $("t-compose-title").textContent = `${t.who} · 发送`;
+  $("t-inbox-title").textContent = `${tPeer()} · 接收`;
+}
+
+function tSwitch() {
+  t.who = t.who === "alice" ? "bob" : "alice";
+  t.nextInbox = 0;
+  $("t-chat").innerHTML = "<p class='dim'>（空）</p>";
+  $("t-covert").innerHTML = "<p class='dim'>（空）</p>";
+  tRetitle();
+  tState();
+}
+
+// 双击图例切换发送方（避免顶部再摆一排控件）
+$("t-compose-title").ondblclick = tSwitch;
+$("t-inbox-title").ondblclick = tSwitch;
+
+async function tState() {
+  const data = await api("/terminal/state");
+  const me = data.terminals[t.who];
+  const box = $("t-state");
+  box.textContent = `底图：${data.covers}　|　${t.who} 会话：${me.state_label}`
+    + (me.established ? "　（可发密文）" : "　（密文已禁用，先密钥交换）");
+  box.className = "hint" + (me.established ? " ok" : "");
+  $("t-send-covert").disabled = !me.established;
+  $("t-lib-hint").textContent = data.covers;
+}
+
+// --- 待发送队列 ---
+
+function tRenderQueue() {
+  const box = $("t-queue");
+  box.innerHTML = "";
+  if (!t.queue.length) {
+    box.innerHTML = "<p class='dim'>尚无图片。上方新增，或发送时留空由底图库自动补。</p>";
+    return;
+  }
+  for (const item of t.queue) {
+    const div = document.createElement("div");
+    div.className = "qitem" + (item.checked ? " checked" : "");
+    const img = document.createElement("img");
+    img.src = item.dataUrl; img.alt = item.name; img.title = item.name;
+    const bar = document.createElement("div"); bar.className = "bar";
+    const check = document.createElement("input");
+    check.type = "checkbox"; check.checked = item.checked;
+    check.onchange = () => { item.checked = check.checked; tRenderQueue(); };
+    const del = document.createElement("button");
+    del.className = "del"; del.textContent = "×"; del.title = "从队列删除";
+    del.onclick = () => { t.queue = t.queue.filter(x => x !== item); tRenderQueue(); };
+    bar.append(check, del);
+    div.append(img, bar);
+    box.append(div);
+  }
+}
+
+function tAddFiles(fileList) {
+  for (const file of fileList) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      t.queue.push({ id: ++t.seq, name: file.name, dataUrl: reader.result, checked: true });
+      tRenderQueue();
+    };
+    reader.readAsDataURL(file);
+  }
+}
+
+$("t-files").onchange = (event) => {
+  tAddFiles(event.target.files);
+  event.target.value = "";
+};
+$("t-queue-clear").onclick = () => { t.queue = []; tRenderQueue(); };
+
+// 发送后：把勾选项移到“已发送”，未勾选留在队列。
+// 这是“可打勾、可删、可移到已发送”的落点：发送即归档，不重发。
+function tArchiveChecked() {
+  const keep = [], done = [];
+  for (const item of t.queue) (item.checked ? done : keep).push(item);
+  t.queue = keep;
+  t.sent.push(...done.map(x => ({ ...x, checked: false })));
+  tRenderQueue();
+  tRenderSent();
+}
+
+function tRenderSent() {
+  const box = $("t-sent");
+  box.innerHTML = "";
+  if (!t.sent.length) { box.innerHTML = "<p class='dim'>（无）</p>"; return; }
+  for (const item of [...t.sent].reverse()) {
+    const div = document.createElement("div");
+    div.className = "qitem";
+    const tag = document.createElement("span");
+    tag.className = "tag"; tag.textContent = "已发送";
+    const img = document.createElement("img");
+    img.src = item.dataUrl; img.alt = item.name; img.title = item.name;
+    const bar = document.createElement("div"); bar.className = "bar";
+    const del = document.createElement("button");
+    del.className = "del"; del.textContent = "↩"; del.title = "放回待发送队列";
+    // “删去”的另一层含义：放回待发送队列，方便重发或改密文。
+    del.onclick = () => {
+      t.sent = t.sent.filter(x => x !== item);
+      t.queue.push({ ...item, checked: true });
+      tRenderQueue(); tRenderSent();
+    };
+    bar.append(del);
+    div.append(tag, img, bar);
+    box.append(div);
+  }
+}
+
+$("t-sent-clear").onclick = () => { t.sent = []; tRenderSent(); };
+
+// --- 发送 ---
+
+async function tSend(mode) {
+  const text = $("t-text").value.trim();
+  const checked = t.queue.filter(x => x.checked);
+  const form = new FormData();
+  form.append("text", text);
+  form.append("mode", mode);
+  for (const item of checked) {
+    const blob = await (await fetch(item.dataUrl)).blob();
+    form.append("files", blob, item.name);
+  }
+  try {
+    await api(`/terminal/${t.who}/send`, { method: "POST", body: form });
+    tArchiveChecked();
+    $("t-text").value = "";
+    await tState();
+    await tPoll();
+  } catch (error) { /* api() 已把 reasons/hints 展示出来 */ }
+}
+
+$("t-send-plain").onclick = () => tSend("plain");
+$("t-send-covert").onclick = () => tSend("covert");
+$("t-handshake").onclick = () => tSend("handshake");
+
+// --- 接收 ---
+
+function tRenderMessage(box, message) {
+  const wrap = document.createElement("div"); wrap.className = "msg";
+  const who = document.createElement("div"); who.className = "who";
+  who.textContent = `来自 ${message.sender}`;
+  wrap.append(who);
+  if (message.chat_text) {
+    const p = document.createElement("p"); p.textContent = message.chat_text;
+    wrap.append(p);
+  }
+  for (let i = 0; i < message.chat_image_count; i++) {
+    const img = document.createElement("img");
+    img.className = "thumb"; img.alt = "收到的图片";
+    img.src = `/terminal/media/${tPeer()}/${message.packet_index}?image=${i}`;
+    wrap.append(img);
+  }
+  for (const note of message.notes) {
+    const p = document.createElement("p"); p.className = "note"; p.textContent = note;
+    wrap.append(p);
+  }
+  if (message.handshake) {
+    const p = document.createElement("p"); p.className = "note"; p.textContent = message.handshake;
+    wrap.append(p);
+  }
+  box.append(wrap);
+}
+
+async function tPoll() {
+  const data = await api(`/terminal/inbox/${tPeer()}?after=${t.nextInbox}`);
+  t.nextInbox = data.next;
+  if (!data.messages.length) return;
+  const chat = $("t-chat"), covert = $("t-covert");
+  if (chat.querySelector("p.dim")) chat.innerHTML = "";
+  if (covert.querySelector("p.dim")) covert.innerHTML = "";
+  for (const message of data.messages) {
+    tRenderMessage(chat, message);
+    for (const secret of message.covert) {
+      const p = document.createElement("p");
+      p.className = "secret"; p.textContent = `✦ ${secret}`;
+      covert.append(p);
+    }
+  }
+  chat.scrollTop = chat.scrollHeight;
+  covert.scrollTop = covert.scrollHeight;
+}
+
+// 终端页第一次打开才启动，避免每个页面加载都轮询。
+let terminalBooted = false;
+function bootTerminal() {
+  if (terminalBooted) return;
+  terminalBooted = true;
+  tRetitle();
+  tState();
+  tPoll();
+  setInterval(() => { if (!$("tab-terminal").hidden) tPoll(); }, 2000);
+}
+
+for (const tab of document.querySelectorAll("#tabs button")) {
+  tab.onclick = () => {
+    for (const other of document.querySelectorAll("#tabs button")) {
+      other.setAttribute("aria-selected", String(other === tab));
+      $(`tab-${other.dataset.tab}`).hidden = other !== tab;
+    }
+    if (tab.dataset.tab === "terminal") bootTerminal();
+  };
+}
 
 boot();
 </script>

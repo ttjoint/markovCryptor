@@ -9,12 +9,14 @@ traffic never leaks into the covert window.
 import io
 import unittest
 
+import numpy as np
 from PIL import Image
 
 import fixtures  # noqa: F401  (path setup for shared fixtures)
 from markovcryptor import image_stego
 from markovcryptor.core.errors import BadKey, CapacityExceeded, InvalidInput, NoHiddenFrame
 from markovcryptor.terminal import LoopbackNetwork, Packet, Session, State, Terminal
+from markovcryptor.terminal.covers import CoverLibrary
 from markovcryptor.terminal.protocol import (
     Kind,
     Mode,
@@ -25,7 +27,22 @@ from markovcryptor.terminal.protocol import (
     seal_body,
     wrap,
 )
-from markovcryptor.terminal.terminal import _encode_packet, _png_bytes, _synthetic_cover
+from markovcryptor.terminal.terminal import _encode_packet
+
+
+def _png_bytes(image):
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+def _synthetic_cover(size=256):
+    """A deterministic test cover. Deliberately simple: tests only need a
+    decodable image, and the realistic-cover guarantee is covered in
+    CoverLibraryTest below."""
+    import numpy as np
+    rng = np.random.default_rng(42)
+    return Image.fromarray(rng.integers(64, 192, (size, size, 3), dtype=np.uint8), "RGB")
 
 
 def _cover(size=256):
@@ -291,6 +308,65 @@ class HostileInputTest(unittest.TestCase):
         bob.deliver("alice", _encode_packet(Packet(text="deadbeef")))
         self.assertIsNone(bob.inbox[-1].covert or None)
         self.assertEqual(bob.inbox[-1].chat_text, "deadbeef")
+
+
+class CoverLibraryTest(unittest.TestCase):
+    """The rule: every image we send is based on a real-looking picture."""
+
+    def test_empty_library_serves_realistic_fallback(self):
+        lib = CoverLibrary(None)
+        self.assertTrue(lib.is_fallback)
+        data = lib.next_cover()
+        image = Image.open(io.BytesIO(data))
+        # 大到能装下握手报文，且编码无损。
+        self.assertGreaterEqual(min(image.size), 256)
+        self.assertEqual(image.format, "PNG")
+
+    def test_fallback_is_not_noise(self):
+        # 随机噪声一眼假；兑底图必须有大尺度结构（相邻像素接近）。
+        # 噪声图的相邻像素差会远大于这张合成图。
+        import numpy as np
+
+        image = np.asarray(Image.open(io.BytesIO(CoverLibrary(None).next_cover())),
+                           dtype=float)
+        neighbour = np.abs(np.diff(image, axis=1)).mean()
+        self.assertLess(neighbour, 12.0, "兑底图像素过于粗糙，看起来像噪声")
+
+    def test_directory_covers_are_used_and_rotate(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # 三张可区分的纹理图（纯平图会被图片信道拒绝，测试里无所谓，
+            # 但保持与真实用法一致）。
+            for i in range(3):
+                arr = np.random.default_rng(i).integers(64, 192, (160, 160, 3), dtype="uint8")
+                Image.fromarray(arr, "RGB").save(Path(tmp) / f"c{i}.png")
+            lib = CoverLibrary(tmp)
+            self.assertFalse(lib.is_fallback)
+            self.assertIn("3 张底图", lib.describe())
+            for _ in range(6):
+                data = lib.next_cover()
+                image = Image.open(io.BytesIO(data))
+                self.assertEqual(image.size, (160, 160))  # 来自目录，非兑底
+
+    def test_cover_for_rejects_impossible_payload(self):
+        lib = CoverLibrary(None)
+        from markovcryptor.core.errors import CapacityExceeded
+        with self.assertRaises(CapacityExceeded) as caught:
+            lib.cover_for(1_000_000)
+        self.assertTrue(caught.exception.hints)
+
+    def test_normalises_jpeg_to_png(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.jpg"
+            _synthetic_cover(180).convert("RGB").save(path, "JPEG")
+            lib = CoverLibrary(tmp)
+            data = lib.next_cover()
+            self.assertEqual(Image.open(io.BytesIO(data)).format, "PNG")
 
 
 class LoopbackNetworkTest(unittest.TestCase):

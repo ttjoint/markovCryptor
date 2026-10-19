@@ -146,6 +146,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--show", dest="headless", action="store_false",
                         help="显示浏览器窗口")
     parser.add_argument("--keep", action="store_true", help="结束后不关闭浏览器")
+    parser.add_argument("--screenshot", metavar="PATH",
+                        help="把终端页截一张 PNG 存到指定路径，用于人工看布局")
     args = parser.parse_args(argv)
 
     browser = find_browser()
@@ -268,6 +270,64 @@ def main(argv: list[str] | None = None) -> int:
             detail = client.eval("document.querySelector('#channel-detail').textContent")
             check("DCT" in detail or "隐写" in detail,
                   "信道详情页有内容", failures)
+
+            # --- 终端页：两个窗口 + 待发送队列 ---
+            client.eval("document.querySelector('[data-tab=terminal]').click()")
+            check(client.eval("!document.querySelector('#tab-terminal').hidden"),
+                  "终端页签可切换", failures)
+            check(client.eval(
+                "document.querySelector('#t-chat') !== null && "
+                "document.querySelector('#t-covert') !== null"),
+                "聊天窗与隐密窗都存在", failures)
+
+            # 向队列推一张图（不经真实文件选择框），确认预览项生成。
+            client.eval(f"""(() => {{
+                const bin = atob('{cover_b64}');
+                const bytes = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                const file = new File([bytes], 'queued.png', {{type: 'image/png'}});
+                const input = document.querySelector('#t-files');
+                const dt = new DataTransfer(); dt.items.add(file);
+                input.files = dt.files;
+                input.dispatchEvent(new Event('change'));
+            }})()""")
+            time.sleep(0.5)
+            count = client.eval(
+                "document.querySelectorAll('#t-queue .qitem').length")
+            check(count == 1, f"待发送预览项已生成（实际 {count} 项）", failures)
+            check(client.eval(
+                "!!document.querySelector('#t-queue .qitem input[type=checkbox]')"),
+                "预览项有勾选框", failures)
+
+            # 取消勾选后发送：图片应留在队列、不归档。
+            client.eval("document.querySelector('#t-queue input[type=checkbox]').click()")
+            client.eval("document.querySelector('#t-send-plain').click()")
+            time.sleep(1.5)
+            left = client.eval("document.querySelectorAll('#t-queue .qitem').length")
+            check(left == 1, f"未勾选的图留在待发送队列（实际 {left} 项）", failures)
+
+            # 勾选后发送：应移到“已发送”。
+            client.eval("document.querySelector('#t-queue input[type=checkbox]').click()")
+            client.eval("document.querySelector('#t-send-plain').click()")
+            time.sleep(2.0)
+            check(client.eval("document.querySelectorAll('#t-queue .qitem').length") == 0,
+                  "已发送的图离开待发送队列", failures)
+            check(client.eval("document.querySelectorAll('#t-sent .qitem').length") == 1,
+                  "已发送列表新增一条", failures)
+            check(client.eval("document.querySelector('#t-chat').textContent.length") > 0,
+                  "聊天窗有内容", failures)
+
+            # 握手 → 会话建立 → 密文按钮解锁。
+            client.eval("document.querySelector('#t-handshake').click()")
+            time.sleep(3.0)
+            check(client.eval("!document.querySelector('#t-send-covert').disabled"),
+                  "握手后密文发送按钮解锁", failures)
+
+            if args.screenshot:
+                shot = client.call("Page.captureScreenshot", format="png")
+                Path(args.screenshot).write_bytes(
+                    base64.b64decode(shot["data"]))
+                print(f"  截图已保存：{args.screenshot}")
         finally:
             client.close()
     finally:
