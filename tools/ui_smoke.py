@@ -350,8 +350,10 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(4.0)
             check(client.eval("document.querySelectorAll('#a-queue .qitem').length") == 1,
                   "握手从 alice 队首取走一张", failures)
-            check(client.eval("document.querySelectorAll('#b-queue .qitem').length") == 1,
-                  "握手不动 bob 的队列", failures)
+            # 回包由服务端自动发，用 bob 自己队列的头一张：浏览器这边也跟着
+            # 少一张，说明用的是他的图，不是 alice 发来的那张。
+            check(client.eval("document.querySelectorAll('#b-queue .qitem').length") == 0,
+                  "回包消耗了 bob 自己的队首图", failures)
             check(not client.eval("document.querySelector('#a-covert-text').disabled"),
                   "alice 握手后密文输入框解锁", failures)
             check(not client.eval("document.querySelector('#b-covert-text').disabled"),
@@ -448,6 +450,11 @@ def main(argv: list[str] | None = None) -> int:
                   .find("图片机密") >= 0, "接收方收到图片密文", failures)
             check(client.eval("document.querySelectorAll('#a-sent .qitem').length") == 2,
                   "alice 已发送栏归档 2 张（握手 + 密文）", failures)
+
+            # 等待提示元素在，默认收起：只有真在等图时才展开。
+            check(client.eval("!!document.querySelector('#b-await')")
+                  and client.eval("document.querySelector('#b-await').hidden"),
+                  "等待回包提示默认收起", failures)
 
             if args.screenshot:
                 # 大屏用户的实际窗口很宽，截图前把视口拉到终端页需要的尺寸。

@@ -84,11 +84,32 @@ class TerminalHub:
         self.outgoing: dict[str, list[tuple[bytes, ...]]] = {
             name: [] for name in self.terminals
         }
+        #: 每个终端"手头现成可用的图"的队首。浏览器队列在前端，服务端看不见；
+        #: 前端在用户加图时把它推上来，自动握手回包就从这里取头一张。
+        self.cover_queue: dict[str, list[bytes]] = {name: [] for name in self.terminals}
         for name, terminal in self.terminals.items():
+            terminal.take_cover = (lambda n=name: self._take_cover(n))
             terminal.on_packet = (
                 lambda sender, packet, n=name: self.raw_history[n].append((sender, packet))
             )
             terminal.subscribe(self._collector(name))
+
+    def _take_cover(self, name: str) -> bytes | None:
+        """Hand out this side's first queued picture, or None if it has none."""
+        queue = self.cover_queue[name]
+        return queue.pop(0) if queue else None
+
+    def set_covers(self, name: str, images: list[bytes]) -> bool:
+        """Replace what this side has on hand, then answer any held handshake.
+
+        Called when the user queues pictures. Returning whether a held
+        handshake was answered lets the UI say "sent the reply just now".
+        """
+        self.cover_queue[name] = list(images)
+        released = self.terminals[name].retry_pending()
+        if released:
+            self.pump()
+        return released
 
     def _collector(self, name: str):
         def sink(inbound: Inbound) -> None:
@@ -178,6 +199,8 @@ class TerminalHub:
             self.raw_history[name].clear()
             self.transcript[name].clear()
             self.outgoing[name].clear()
+            self.cover_queue[name].clear()
+            terminal.pending_request = None
         self.network.history.clear()
 
 
@@ -218,9 +241,39 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
                     "state_label": terminal.state.label,
                     "established": terminal.established,
                     "peer": terminal.peer_id,
+                    # 对端在等我们回包、而我们手头没图：前端要显示"等待本端
+                    # 上传图片"，直到用户真的加图才自动回出去。
+                    "awaiting_cover": terminal.pending_request is not None,
+                    "covers": len(hub.cover_queue[name]),
                 }
                 for name, terminal in hub.terminals.items()
             },
+        })
+
+    @app.post("/terminal/{name}/covers")
+    async def set_covers(name: str, files: FileList = File(default=[])):
+        """Tell the server which pictures this side has on hand.
+
+        The queue lives in the browser, but an automatic handshake reply has to
+        be sent by the server -- so the front end pushes the queued pictures up
+        here. If a handshake request is held waiting for a picture, this is what
+        releases it.
+        """
+        terminal = _terminal(hub, name)
+        raws, _names = await _images(files)
+        released = hub.set_covers(name, raws)
+        delivery = 0
+        if released:
+            delivery = 1
+            METRICS.incr("terminal_handshake_released", sender=name)
+        return JSONResponse({
+            "ok": True,
+            "covers": len(hub.cover_queue[name]),
+            # 用户加图顺手把压着的握手回包发出去了，前端要说一声。
+            "released": released,
+            "delivered": delivery,
+            "state": terminal.state.value,
+            "state_label": terminal.state.label,
         })
 
     @app.get("/terminal/inbox/{name}")

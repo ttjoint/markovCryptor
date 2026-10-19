@@ -52,6 +52,14 @@
   }
   input[type="file"] { color: var(--dim); font-size: 13px; }
   .hint { font-size: 12px; color: var(--dim); margin: 2px 0 10px; }
+  /* 等本端传图才能回包：提示要显眼一点，但别当错误（不是故障）。 */
+  .await {
+    margin: 0 0 10px; padding: 7px 10px; border-radius: 6px;
+    font-size: 12px; line-height: 1.5;
+    color: #f0d9a8; background: rgba(190, 140, 40, .16);
+    border: 1px solid rgba(190, 140, 40, .45);
+  }
+  .await[hidden] { display: none; }
   .row { display: flex; gap: 10px; flex-wrap: wrap; }
   .row > * { flex: 1 1 180px; }
   button.action {
@@ -324,6 +332,7 @@
             <button class="ghost" id="a-handshake">发起密钥交换</button>
             <span class="hint" id="a-handshake-hint">握手也要附一张图</span>
           </div>
+          <p class="await" id="a-await" hidden></p>
 
           <div class="queue-head">
             <span>待发送图片 <b id="a-q-count">0</b> 张</span>
@@ -392,6 +401,7 @@
             <button class="ghost" id="b-handshake">发起密钥交换</button>
             <span class="hint" id="b-handshake-hint">握手也要附一张图</span>
           </div>
+          <p class="await" id="b-await" hidden></p>
 
           <div class="queue-head">
             <span>待发送图片 <b id="b-q-count">0</b> 张</span>
@@ -920,11 +930,26 @@ async function refreshState(me) {
   c.established = info.established;
   c.stateLabel = info.state_label;
   c.textReady = data.text_channel_ready;
+  c.awaitingCover = info.awaiting_cover;
+  // 自动回包是服务端替我们发的，它从队列头取走了一张；浏览器这边并不知道，
+  // 所以按服务端报的数量对齐，免得同一张图被当成"还在队列里"再发一次。
+  if (typeof info.covers === "number" && info.covers < c.queue.length) {
+    const taken = c.queue.slice(0, c.queue.length - info.covers);
+    c.queue = c.queue.slice(c.queue.length - info.covers);
+    c.sent.push(...taken);
+    renderQueue(me);
+    renderSent(me);
+  }
   const box = el(me, "state");
-  box.textContent = info.established
-    ? info.state_label
-    : info.state_label;
+  box.textContent = info.state_label;
   box.className = "hint" + (info.established ? " ok" : "");
+  // 对端在等我们回包，而我们还没传图：明说在等什么，别让人以为卡住了。
+  const awaitBox = el(me, "await");
+  awaitBox.hidden = !info.awaiting_cover;
+  awaitBox.textContent = info.awaiting_cover
+    ? "对端已发起密钥交换，正在等本端上传图片：加一张图到下面的"
+      + "待发送队列，会自动回包。"
+    : "";
   el(me, "plain-peer").textContent = "↔ " + peerOf(me);
   el(me, "covert-peer").textContent = "↔ " + peerOf(me);
   applyAvailability(me);
@@ -949,6 +974,7 @@ function renderQueue(me) {
     del.onclick = () => {
       c.queue = c.queue.filter(x => x !== item);
       renderQueue(me);
+      syncCovers(me);
     };
     bar.append(order, del);
     div.append(img, bar);
@@ -977,13 +1003,15 @@ function renderSent(me) {
 }
 
 // 队首抽取 n 张：顺序即发送顺序，抽走的进"已发送"。
-function consume(me, count) {
+async function consume(me, count) {
   const c = clients[me];
   const used = c.queue.slice(0, count);
   c.queue = c.queue.slice(count);
   c.sent.push(...used);
   renderQueue(me);
   renderSent(me);
+  // 服务端手上那份"现成可用图"要跟着减少，否则它会拿已经发掉的图回包。
+  await syncCovers(me);
   return used;
 }
 
@@ -996,6 +1024,25 @@ async function addFiles(me, fileList) {
   }));
   c.queue.push(...await Promise.all(reads));
   renderQueue(me);
+  await syncCovers(me);
+}
+
+// 队列在浏览器里，但自动回包得由服务端发出去：把当前队列推给服务端，
+// 如果那边正压着一个等图的握手请求，这一次就顺手发掉了。
+async function syncCovers(me) {
+  const c = clients[me];
+  const form = new FormData();
+  for (const item of c.queue) {
+    const blob = await (await fetch(item.dataUrl)).blob();
+    form.append("files", blob, item.name || "cover.png");
+  }
+  const res = await fetch("/terminal/" + me + "/covers", { method: "POST", body: form });
+  if (!res.ok) return;
+  const data = await res.json();
+  if (data.released) {
+    handshakeNotice(me);
+    el(me, "await").hidden = true;
+  }
 }
 
 // 明文附件：发送前预览，可逐个移除。
@@ -1123,7 +1170,7 @@ async function sendCovertImage(me) {
     const result = await post(me, "covert-image", text, items);
     const used = result.images_used ?? 1;
     flashWire(me, used);
-    consume(me, used);
+    await consume(me, used);
     el(me, "covert-text").value = "";
     await poll(me);
   } catch (error) { alert(describeError(error)); }
@@ -1136,7 +1183,7 @@ async function handshake(me) {
   try {
     await post(me, "handshake", "", items);
     flashWire(me, 1);
-    consume(me, 1);
+    await consume(me, 1);
     await refreshState(me);
     await refreshState(peerOf(me));
     await poll(me);
@@ -1300,7 +1347,11 @@ function bootTerminal() {
       e.target.value = "";
       addFiles(me, files);
     };
-    el(me, "queue-clear").onclick = () => { clients[me].queue = []; renderQueue(me); };
+    el(me, "queue-clear").onclick = () => {
+      clients[me].queue = [];
+      renderQueue(me);
+      syncCovers(me);
+    };
     el(me, "sent-clear").onclick = () => { clients[me].sent = []; renderSent(me); };
     el(me, "send-text").onclick = () => sendCovertText(me);
     el(me, "send-image").onclick = () => sendCovertImage(me);

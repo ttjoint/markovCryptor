@@ -35,22 +35,41 @@ def _png_bytes(image):
     return buffer.getvalue()
 
 
-def _synthetic_cover(size=256):
-    """A deterministic test cover: tests only need a decodable image."""
+def _synthetic_cover(size=256, seed=42):
+    """A deterministic test cover: tests only need a decodable image.
+
+    ``seed`` lets a test tell two covers apart, which matters when checking that
+    a handshake reply used *our* picture and not the peer's.
+    """
     import numpy as np
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(seed)
     return Image.fromarray(rng.integers(64, 192, (size, size, 3), dtype=np.uint8), "RGB")
 
 
-def _cover(size=256):
-    return _png_bytes(_synthetic_cover(size))
+def _cover(size=256, seed=42):
+    return _png_bytes(_synthetic_cover(size, seed))
 
 
 def _pair(**kwargs):
+    """Two terminals, each with its own one-picture queue.
+
+    A handshake reply must travel in a picture the responder owns, so both sides
+    are given a queue here. Tests that want "no picture yet" set
+    ``bob.take_cover = None`` (or empty his queue) to check the held path.
+    """
     net = LoopbackNetwork()
     alice = Terminal("alice", net, **kwargs).attach()
     bob = Terminal("bob", net, **kwargs).attach()
+    for terminal in (alice, bob):
+        _give_queue(terminal)
     return net, alice, bob
+
+
+def _give_queue(terminal, count=1):
+    """Stand-in for a client's picture queue; the web layer injects the real one."""
+    queue = [_cover(seed=index + 1) for index in range(count)]
+    terminal.take_cover = lambda: queue.pop(0) if queue else None
+    return queue
 
 
 def _handshake(net, alice, bob):
@@ -358,11 +377,7 @@ class SendRulesTest(unittest.TestCase):
 
     def test_order_is_preserved(self):
         """Picture i must carry slice i; swapping them would break decryption."""
-        sent = []
-
-        net = LoopbackNetwork()
-        alice = Terminal("alice", net).attach()
-        bob = Terminal("bob", net).attach()
+        net, alice, bob = _pair()
         _handshake(net, alice, bob)
         alice.send_covert_in_images("bob", "顺序", (_cover(256), _cover(320),
                                                     _cover(200)))
@@ -421,17 +436,72 @@ class SendRulesTest(unittest.TestCase):
         self.assertEqual(inbound.covert, (), "分片不齐时不应拼出半截密文")
         self.assertTrue(any("分片不齐" in note for note in inbound.notes))
 
-    def test_handshake_response_reuses_the_request_image(self):
-        """No picture is invented for the automatic response."""
+    def test_handshake_reply_uses_our_own_picture_not_theirs(self):
+        """回包用本端队列的头一张图，不拿对端发来的图。
+
+        拿对端的图回写有两个问题：一是等于替对方发了他自己的图（聊天记录里
+        会出现两条一样的图），二是"本端只发自己选的图"这条规矩就破了。
+        """
         net, alice, bob = _pair()
-        alice.send_handshake("bob", (_cover(),))
+        theirs = _cover(seed=7)          # alice 的图
+        ours = _cover(seed=99)           # bob 队列里的唯一一张
+        bob.take_cover = lambda: ours
+        alice.send_handshake("bob", (theirs,))
         net.pump()
-        # 三条报文：请求、自动回发。（回发是 bob 发出的唯一一条）
+
         bob_packets = [pkt for sender, _target, pkt in net.history if sender == "bob"]
         self.assertEqual(len(bob_packets), 1)
         _text, raws = _decode_packet(bob_packets[0])
         self.assertEqual(len(raws), 1)
+        # 嵌了载荷再编码，字节会变；要比的是图像内容是谁的。
+        sent_pic = Image.open(io.BytesIO(raws[0])).convert("RGB")
+        ours_pic = Image.open(io.BytesIO(ours)).convert("RGB")
+        theirs_pic = Image.open(io.BytesIO(theirs)).convert("RGB")
+        self.assertLess(_mean_diff(sent_pic, ours_pic), 3.0, "回包没用本端队列的图")
+        self.assertGreater(_mean_diff(sent_pic, theirs_pic), 3.0, "回包用的是对端的图")
         self.assertTrue(bob.established and alice.established)
+
+    def test_reply_waits_when_this_side_has_no_picture(self):
+        """没图就先等着：保持 WAITING，等到有图再自动回，绝不丢请求。"""
+        net, alice, bob = _pair()
+        held = _give_queue(bob, count=0)
+        alice.send_handshake("bob", (_cover(),))
+        net.pump()
+
+        # 对端还没收到回包，双方都不该声称建立。
+        self.assertFalse(bob.established)
+        self.assertFalse(alice.established)
+        self.assertIsNotNone(bob.pending_request)
+        self.assertEqual(bob.state.label, "等待对端回复")
+        self.assertEqual(
+            [p for s, _t, p in net.history if s == "bob"], [],
+            "没图的时候不该发出任何报文")
+
+        # 用户补上图片，回包才出去，然后双方同时可用。
+        held.append(_cover())
+        self.assertTrue(bob.retry_pending())
+        net.pump()
+        self.assertTrue(bob.established)
+        self.assertTrue(alice.established)
+        self.assertEqual(len([p for s, _t, p in net.history if s == "bob"]), 1)
+        # 再调一次不会重复回包。
+        self.assertFalse(bob.retry_pending())
+
+    def test_pending_reply_is_held_until_a_capable_picture_arrives(self):
+        """图太小照样算"没有可用图"：留着请求，等更大的图。"""
+        net, alice, bob = _pair()
+        too_small = _png_bytes(_synthetic_cover(48))
+        queue = _give_queue(bob, count=0)
+        queue.append(too_small)
+        alice.send_handshake("bob", (_cover(),))
+        net.pump()
+        self.assertFalse(alice.established)
+        self.assertIsNotNone(bob.pending_request)
+
+        queue.append(_cover())
+        self.assertTrue(bob.retry_pending())
+        net.pump()
+        self.assertTrue(alice.established)
 
 
 class LoopbackNetworkTest(unittest.TestCase):
@@ -449,6 +519,16 @@ class LoopbackNetworkTest(unittest.TestCase):
         net.send("y", "x", b"two")
         self.assertEqual(net.pump(), 2)
         self.assertEqual(got, [("y", b"one"), ("y", b"two")])
+
+
+def _mean_diff(left, right):
+    """Average per-channel difference; stego shifts pixels only slightly."""
+    import numpy as np
+    a = np.asarray(left, dtype=np.int16)
+    b = np.asarray(right, dtype=np.int16)
+    if a.shape != b.shape:
+        return float("inf")
+    return float(np.abs(a - b).mean())
 
 
 def stego_bytes(image):

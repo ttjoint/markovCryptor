@@ -132,6 +132,13 @@ class Terminal:
         self.peer_id: str | None = None
         #: Optional text carrier (Chinese channel). See :meth:`use_text_channel`.
         self.text_channel = None
+        #: How to get a cover for an automatic handshake reply. Injected by the
+        #: caller (the web layer takes it from that client's own picture queue).
+        #: Returns ``None`` when this side has no usable picture -- then the
+        #: reply is held until :meth:`retry_pending` is called.
+        self.take_cover: Callable[[], bytes | None] | None = None
+        #: A REQUEST that arrived while this side had no picture to answer with.
+        self.pending_request: bytes | None = None
 
     # ------------------------------------------------------------------ config
 
@@ -518,7 +525,7 @@ class Terminal:
             # 出现在窗口里。之前把 host 图照常显示，于是"我发的请求图"和
             # "对方用同一张图回发的响应"在聊天记录里成了两条一样的图，
             # 看起来像重复发送。这里返回 display=None，只留一行系统提示。
-            return self._on_handshake(payload, raw), None
+            return self._on_handshake(payload), None
         if kind is Kind.BODY_TEXT:
             # A text body inside an image means the sender's carrier choice was
             # inconsistent. Not fatal, but worth saying rather than guessing.
@@ -561,7 +568,7 @@ class Terminal:
                 return envelope
         return _unhex_or_none(text)
 
-    def _on_handshake(self, payload: bytes, raw: bytes) -> _Inspected:
+    def _on_handshake(self, payload: bytes) -> _Inspected:
         peer_public, mode = parse_handshake(payload)
         was = self.session.state
         completed = self.session.absorb(peer_public, mode)
@@ -570,39 +577,75 @@ class Terminal:
               state=self.session.state.value)
 
         if mode is Mode.REQUEST:
-            # Requirement: a request must be answered automatically, with an
-            # image, without the user doing anything. Reusing ``raw`` is what
-            # keeps that promise without inventing a cover.
-            self._auto_respond(peer_public, raw)
-            return _Inspected(handshake=summary + "，已自动回发")
+            # Answer automatically -- but only with a picture this side owns.
+            # If there is none yet, the request is held and the state stays
+            # WAITING; the UI says so and retries when the user queues a picture.
+            self._auto_respond(peer_public)
+            if self.pending_request is None:
+                return _Inspected(handshake=summary + "，已自动回发")
+            return _Inspected(
+                handshake=summary + "，等待本端上传图片后自动回复"
+            )
         if completed:
             return _Inspected(handshake=summary + "，会话可用")
         return _Inspected(handshake=summary)
 
-    def _auto_respond(self, peer_public: bytes, raw: bytes) -> None:
-        """Reply with our own key, hidden in **the image the request arrived in**.
+    def _auto_respond(self, peer_public: bytes) -> None:
+        """Reply with our own key, hidden in **our own** picture.
 
-        The response picture is therefore one the *peer* chose and already sent
-        us; we write over its frame. There is no picture invented on this side,
-        which is the requirement: every image leaving this terminal is either
-        selected by the user or already on the wire.
+        The reply must travel in an image this side supplies -- the first one in
+        its own queue. Reusing the picture the request arrived in would mean the
+        reply is built on *their* cover, and both sides would then show the same
+        picture twice; more importantly, a client should only ever send pictures
+        it chose itself.
+
+        With no picture available the reply cannot be sent yet. Rather than
+        inventing a cover or failing silently, remember the request and let the
+        caller retry once the user has queued a picture
+        (:meth:`retry_pending`). Until then this side stays ``WAITING``, which
+        is the truth: the peer has our key but we have not answered.
         """
         target = self.peer_id
         if target is None:
             event("terminal", "handshake_no_peer", level=logging.WARNING, id=self.id)
             return
+        cover = self.take_cover() if self.take_cover is not None else None
+        if cover is None:
+            self.pending_request = peer_public
+            event("terminal", "handshake_held", level=logging.INFO,
+                  id=self.id, peer=target, reason="no cover picture queued")
+            return
         public, mode = self.session.answer()
         envelope = build_handshake(public, mode)
         try:
-            stego = self._embed_bytes(envelope, raw)
+            stego = self._embed_bytes(envelope, cover)
         except StegoError as exc:
-            # The peer's own request picture could carry a 38-byte request but
-            # somehow not a response; do not substitute a cover, just say so.
-            event("terminal", "handshake_response_failed", level=logging.WARNING,
+            # Our own picture is too small for a 38-byte handshake. Keep the
+            # request pending so a bigger one can be used later.
+            self.pending_request = peer_public
+            event("terminal", "handshake_cover_failed", level=logging.WARNING,
                   id=self.id, peer=target, error=exc)
             return
+        self.pending_request = None
         event("terminal", "handshake_auto_response", id=self.id, peer=target)
         self.network.send(self.id, target, _encode_packet(Packet(images=(stego,))))
+
+    def retry_pending(self) -> bool:
+        """Answer a held handshake request now that a cover may be available.
+
+        Returns ``True`` if a reply went out. Safe to call at any time: it does
+        nothing when there is no pending request.
+        """
+        if self.pending_request is None:
+            return False
+        public = self.pending_request
+        before = self.session.state
+        self._auto_respond(public)
+        sent = self.pending_request is None
+        if sent:
+            event("terminal", "handshake_held_released", id=self.id,
+                  state_before=before.value, state_after=self.session.state.value)
+        return sent
 
     def _decrypt(self, kind: Kind, payload: bytes) -> str | None:
         try:

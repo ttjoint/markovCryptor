@@ -40,14 +40,14 @@ def _run(coro):
     return anyio.run(_await)
 
 
-def _noise_png(size: int) -> bytes:
+def _noise_png(size: int, seed: int = 11) -> bytes:
     """A cover the image channel accepts: flat colour is rejected as too smooth."""
     import io
 
     import numpy as np
     from PIL import Image
 
-    array = np.random.default_rng(11).integers(64, 192, (size, size, 3), dtype="uint8")
+    array = np.random.default_rng(seed).integers(64, 192, (size, size, 3), dtype="uint8")
     buffer = io.BytesIO()
     Image.fromarray(array, "RGB").save(buffer, "PNG")
     return buffer.getvalue()
@@ -264,9 +264,8 @@ class TerminalContractTest(unittest.TestCase):
                                          files=files))
         self.assertEqual(response.status_code, 200)
 
-        # 握手也要图：从队列里拿一张。
-        response = _run(self.client.post("/terminal/alice/send",
-                                         data={"mode": "handshake"}, files=files))
+        # 握手也要图：alice 从队列里拿一张，bob 用自己那张回包。
+        response = self._establish()
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["state_label"].startswith("已建立"))
 
@@ -316,11 +315,19 @@ class TerminalContractTest(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertIn("hints", response.json())
 
-    def _establish(self):
-        png = _noise_png(256)
+    def _establish(self, *, bob_covers=True):
+        """Let alice start a handshake; bob answers with a picture of his own.
+
+        The reply must travel in a picture bob supplies, so his side has to have
+        one queued. ``bob_covers=False`` leaves him empty to exercise the
+        "waiting for the other side to upload" path.
+        """
+        if bob_covers:
+            _run(self.client.post("/terminal/bob/covers", files=[
+                ("files", ("bob.png", _noise_png(256, seed=5), "image/png"))]))
         return _run(self.client.post(
             "/terminal/alice/send", data={"mode": "handshake"},
-            files=[("files", ("c.png", png, "image/png"))]))
+            files=[("files", ("c.png", _noise_png(256), "image/png"))]))
 
     def test_covert_image_uses_only_as_many_covers_as_needed(self):
         """短密文只消耗够用的张数，剩下的留在队列里。
@@ -390,6 +397,39 @@ class TerminalContractTest(unittest.TestCase):
         sent = [m for m in body["messages"] if m["covert"]]
         self.assertTrue(sent)
         self.assertIsNone(sent[-1]["chat_text"])
+
+    def test_reply_waits_for_this_side_to_upload_a_picture(self):
+        """本端没图就等着，状态明说在等，用户补图后自动回包。
+
+        之前是拿对端发来的图回写响应：等于替对端发了他自己的图，聊天里会
+        出现两条一样的图。现在改为用本端队列的头一张，没有就等。
+        """
+        _run(self.client.post("/terminal/alice/send", data={"mode": "handshake"},
+                              files=[("files", ("c.png", _noise_png(256),
+                                                "image/png"))]))
+        # bob 手上没图：谁都没建立，bob 明确显示在等图。
+        self.assertFalse(_run(self.client.get("/terminal/state"))
+                         .json()["terminals"]["bob"]["established"])
+        bob = _run(self.client.get("/terminal/state")).json()["terminals"]["bob"]
+        self.assertTrue(bob["awaiting_cover"])
+        self.assertEqual(bob["state"], "waiting")
+
+        # 用户给 bob 补了一张图：回包出去，两端同时可用。
+        response = _run(self.client.post("/terminal/bob/covers", files=[
+            ("files", ("bob.png", _noise_png(256, seed=5), "image/png"))]))
+        self.assertTrue(response.json()["released"])
+        for name in ("alice", "bob"):
+            info = _run(self.client.get("/terminal/state")).json()["terminals"][name]
+            self.assertTrue(info["established"], f"{name} 还没建立")
+            self.assertFalse(info["awaiting_cover"])
+
+        # 之后正常发密文。
+        response = _run(self.client.post(
+            "/terminal/alice/send", data={"text": "机密", "mode": "covert-image"},
+            files=[("files", ("c.png", _noise_png(256), "image/png"))]))
+        self.assertEqual(response.status_code, 200)
+        body = _run(self.client.get("/terminal/inbox/bob")).json()
+        self.assertIn("机密", [c for m in body["messages"] for c in m["covert"]])
 
     def test_handshake_images_never_show_up_as_chat_pictures(self):
         """握手图是控制报文的载体，不该当成"我发了张图"。
