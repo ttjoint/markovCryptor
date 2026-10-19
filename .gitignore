@@ -18,6 +18,9 @@ corpus/
 models/
 data/
 
+# 外部工具（SnowLuma 等），用 tools/fetch_snowluma.py 现拉
+vendor/
+
 # Editor / OS
 .vscode/
 .idea/

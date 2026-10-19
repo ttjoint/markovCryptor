@@ -30,6 +30,7 @@ payload ─→ 压缩 ─→ 加密 ─┼─ 图片信道 ─→ 一张 PNG 照
 | [docs/TERMINAL.md](docs/TERMINAL.md) | 点到点通信终端：消息模型、握手状态机、隐写判定规则 |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 平台化架构与迁移进度 |
 | [docs/QQ_TRANSPORT.md](docs/QQ_TRANSPORT.md) | 接 QQ / SnowLuma 做真实信道：可行性、改动点、风险 |
+| [docs/QQ_TESTBED.md](docs/QQ_TESTBED.md) | QQ 双端测试环境：一份 SnowLuma 挂两个 QQ、P0 实测、工具用法 |
 
 ---
 
