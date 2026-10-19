@@ -391,6 +391,29 @@ class TerminalContractTest(unittest.TestCase):
         self.assertTrue(sent)
         self.assertIsNone(sent[-1]["chat_text"])
 
+    def test_handshake_images_never_show_up_as_chat_pictures(self):
+        """握手图是控制报文的载体，不该当成"我发了张图"。
+
+        握手会用**同一张图**来回一趟（对方拿请求原图回写响应），如果照常
+        渲染，聊天记录里就冒出两条几乎一样的图，看着像重复发送。这里断言
+        握手那几条的 ``chat_image_count`` 都是 0，只有真正的图片消息才带图。
+        """
+        self._establish()
+        png = _noise_png(256)
+        _run(self.client.post(
+            "/terminal/alice/send", data={"text": "正文", "mode": "covert-image"},
+            files=[("files", ("c.png", png, "image/png"))]))
+
+        for name in ("alice", "bob"):
+            body = _run(self.client.get(f"/terminal/inbox/{name}")).json()
+            for message in body["messages"]:
+                if message["mode"] == "handshake" or message["handshake"]:
+                    self.assertEqual(message["chat_image_count"], 0,
+                                     f"{name} 的握手记到了聊天图片")
+            # 正好一条真正带图的密文消息，不多不少。
+            with_images = [m for m in body["messages"] if m["chat_image_count"]]
+            self.assertEqual(len(with_images), 1, f"{name} 的图片消息不止一条")
+
     def test_every_message_carries_a_timestamp(self):
         """每条消息都要有时刻：没有时间的聊天记录没法对账。"""
         self._establish()

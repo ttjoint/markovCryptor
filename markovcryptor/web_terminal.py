@@ -271,6 +271,9 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
             covert = text
         elif mode == "handshake":
             terminal.send_handshake(peer, tuple(raws))
+            # 握手图是控制报文的载体，不是"我发了张图"：记 0 张，
+            # 免得聊天记录里冒出一条跟对方响应长得一样的图。
+            raws = ()
         else:
             terminal.send_packet(peer, Packet(text=text or None, images=tuple(raws)))
         # 本地对话线记一笔"我发的"：聊天软件两边都要显示自己说过的话。

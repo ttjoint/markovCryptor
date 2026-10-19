@@ -514,7 +514,11 @@ class Terminal:
             return _Inspected(note=f"载荷不是 PBX1 信封——{exc}"), display
 
         if kind is Kind.HANDSHAKE:
-            return self._on_handshake(payload, raw), display
+            # 握手包是协议控制报文，不是用户内容：它的图不该作为"聊天图片"
+            # 出现在窗口里。之前把 host 图照常显示，于是"我发的请求图"和
+            # "对方用同一张图回发的响应"在聊天记录里成了两条一样的图，
+            # 看起来像重复发送。这里返回 display=None，只留一行系统提示。
+            return self._on_handshake(payload, raw), None
         if kind is Kind.BODY_TEXT:
             # A text body inside an image means the sender's carrier choice was
             # inconsistent. Not fatal, but worth saying rather than guessing.
