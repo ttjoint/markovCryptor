@@ -38,14 +38,19 @@ UIN 各自 `login detected` + `pipe connected`）。原先设想"复制两份、
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from markovcryptor.onebot_config import (      # noqa: E402
+    OneBotSettings,
+    discover,
+    write_config,
+)
 
 #: 每个账号一套端口。区间留宽，方便手动加第三个号。
 DEFAULT_PORTS = {
@@ -55,53 +60,8 @@ DEFAULT_PORTS = {
 WEBUI_PORT = 5099
 
 
-def _onebot_config(uin: str, ws_port: int, http_port: int) -> dict:
-    """一个账号的 OneBot 配置。
-
-    两个字段是一开始就要对的：
-
-    - ``messageFormat: "array"``：消息段用数组，图片才能带结构。
-    - ``reportSelfMessage: false``：自己发的消息不推回来。隐写终端只关心
-      对端发来的包，自己的回显会让"收到一条"和"我发了一条"分不清。
-    """
-    token = f"mkx-{uin}"
-    return {
-        "mode": "snapshot",
-        "networks": {
-            "httpServers": [{
-                "name": "http-default", "accessToken": token,
-                "messageFormat": "array", "reportSelfMessage": False,
-                "host": "127.0.0.1", "port": http_port, "path": "/",
-                "enableWebSocket": False,
-            }],
-            "httpClients": [],
-            "wsServers": [{
-                "name": "ws-default", "accessToken": token,
-                "messageFormat": "array", "reportSelfMessage": False,
-                "host": "127.0.0.1", "port": ws_port, "path": "/",
-                "role": "Universal",
-            }],
-            "wsClients": [],
-        },
-        "statusCommand": {"enabled": False, "swallow": False,
-                          "cooldownSeconds": 5, "trigger": "#sl"},
-        "historySync": {"enabled": False},
-        "notifications": {"channelIds": []},
-    }
-
-
-def _find_config_dir(snowluma: Path) -> Path:
-    config = snowluma / "config"
-    if not config.is_dir():
-        raise SystemExit(
-            f"{snowluma} 下没有 config/ 目录。--snowluma 要指向**已解压的 release**，"
-            "不是压缩包。")
-    return config
-
-
 def cmd_init(args: argparse.Namespace) -> int:
     snowluma = Path(args.snowluma).resolve()
-    config = _find_config_dir(snowluma)
 
     if not (snowluma / "index.mjs").is_file():
         raise SystemExit(f"{snowluma} 下没有 index.mjs，这不像 SnowLuma 的 release 目录")
@@ -111,18 +71,19 @@ def cmd_init(args: argparse.Namespace) -> int:
         if not uin:
             continue
         ports = DEFAULT_PORTS[side]
-        path = config / f"onebot_{uin}.json"
-        if not args.force and path.exists():
+        settings = OneBotSettings(uin=str(uin), ws_port=ports["ws"],
+                                  http_port=ports["http"])
+        try:
+            path, wrote = write_config(snowluma, settings, force=args.force)
+        except FileNotFoundError as error:
+            raise SystemExit(str(error)) from error
+        if wrote:
+            print(f"  写入 {path.name}: WS {ports['ws']} / HTTP {ports['http']}  "
+                  f"token={settings.token}")
+        else:
             # 已有配置就别覆盖：里面可能已经被 SnowLuma 补过字段。
             print(f"  保留 {path.name}（已存在；要重写加 --force）")
-            written.append((uin, ports))
-            continue
-        path.write_text(
-            json.dumps(_onebot_config(uin, ports["ws"], ports["http"]),
-                       indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8")
         written.append((uin, ports))
-        print(f"  写入 {path.name}: WS {ports['ws']} / HTTP {ports['http']}  token=mkx-{uin}")
 
     if not written:
         raise SystemExit("至少给一个 --a-uin 或 --b-uin")
@@ -203,48 +164,34 @@ def cmd_down(args: argparse.Namespace) -> int:
 def cmd_probe(args: argparse.Namespace) -> int:
     """转给 qq_probe：从已写好的配置里推出地址和 token。"""
     snowluma = Path(args.snowluma).resolve()
-    config = _find_config_dir(snowluma)
-    found: dict[str, dict] = {}
-    for path in config.glob("onebot_*.json"):
-        uin = path.stem.removeprefix("onebot_")
-        data = json.loads(path.read_text(encoding="utf-8"))
-        servers = data.get("networks", {}).get("wsServers") or []
-        if not servers:
-            continue
-        found[uin] = {"ws": f"ws://127.0.0.1:{servers[0]['port']}/",
-                      "token": servers[0].get("accessToken", "")}
+    found = discover(snowluma)
     if len(found) < 2:
         raise SystemExit(
             f"需要两个账号的配置，现在只有 {sorted(found)}。先跑 qq_setup.py init")
 
     (a_uin, a), (b_uin, b) = sorted(found.items())[:2]
     command = [sys.executable, str(Path(__file__).with_name("qq_probe.py")),
-               "--a-uin", a_uin, "--a-ws", a["ws"], "--a-token", a["token"],
-               "--b-uin", b_uin, "--b-ws", b["ws"], "--b-token", b["token"]]
+               "--a-uin", a_uin, "--a-ws", a.ws_url, "--a-token", a.token,
+               "--b-uin", b_uin, "--b-ws", b.ws_url, "--b-token", b.token]
     if args.only:
         command += ["--only", args.only]
-    print(f"探测：{a_uin} → {b_uin}")
+    print(f"探测：{a_uin} -> {b_uin}")
     return subprocess.call(command)
 
 
 def cmd_status(args: argparse.Namespace) -> int:
     snowluma = Path(args.snowluma).resolve()
-    config = _find_config_dir(snowluma)
-    rows = []
-    for path in sorted(config.glob("onebot_*.json")):
-        uin = path.stem.removeprefix("onebot_")
-        data = json.loads(path.read_text(encoding="utf-8"))
-        servers = data.get("networks", {}).get("wsServers") or []
-        if not servers:
-            continue
-        port = servers[0]["port"]
-        rows.append((uin, port, _port_open(port), _port_open(WEBUI_PORT)))
-    if not rows:
+    found = discover(snowluma)
+    if not found:
         print("没有 onebot_<uin>.json 配置，先跑 init")
         return 1
-    for uin, port, ws_up, web_up in rows:
-        print(f"  QQ {uin}  OneBot :{port} {'✓' if ws_up else '✗'}  "
-              f"WebUI :{WEBUI_PORT} {'✓' if web_up else '✗'}")
+    web_up = _port_open(WEBUI_PORT)
+    rows = []
+    for uin, settings in found.items():
+        rows.append((uin, settings.ws_port, _port_open(settings.ws_port)))
+    for uin, port, ws_up in rows:
+        print(f"  QQ {uin}  OneBot :{port} {'ok' if ws_up else '--'}  "
+              f"WebUI :{WEBUI_PORT} {'ok' if web_up else '--'}")
     return 0 if all(row[2] for row in rows) else 1
 
 

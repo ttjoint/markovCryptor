@@ -22,11 +22,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Web API + Web UI landing in the next refactor phases (docs/ARCHITECTURE.md §6).
+# Web API + Web UI (docs/ARCHITECTURE.md §6). ``websockets`` is used by the
+# OneBot client that connects the terminal to QQ.
 web = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
     "python-multipart>=0.0.9",
+    "websockets>=12.0",
 ]
 # Video / stream channels are out of scope for now (ARCHITECTURE.md decision 3).
 # Listed so the eventual work does not have to rediscover the choice.
@@ -43,6 +45,11 @@ markovcryptor = "markovcryptor.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["markovcryptor*"]
+
+# The Web UI is a single static file served by ``webui.py``; without this it is
+# left out of the wheel and every installed copy returns 404 on ``/``.
+[tool.setuptools.package-data]
+markovcryptor = ["webui/*.html"]
 
 # The suite is stdlib unittest, so configure nothing for pytest beyond the path:
 # it is optional (see [project.optional-dependencies].dev) for anyone who wants it.

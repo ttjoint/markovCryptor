@@ -21,8 +21,10 @@ ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
 
 sys.path.insert(0, str(TOOLS))
+sys.path.insert(0, str(ROOT))
 
 import qq_setup  # noqa: E402
+from markovcryptor import onebot_config  # noqa: E402
 
 
 def _fake_snowluma(root: Path) -> Path:
@@ -98,6 +100,17 @@ class SetupTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as caught:
             with redirect_stdout(io.StringIO()):
                 qq_setup.main(["init", "--snowluma", str(empty), "--a-uin", "111"])
+        message = str(caught.exception.code)
+        self.assertTrue("index.mjs" in message or "config" in message, message)
+
+    def test_refuses_when_config_dir_is_missing(self) -> None:
+        """有 index.mjs 但没有 config/ 时要报 config，不能默默写失败。"""
+        bare = Path(self._tmp.name) / "bare"
+        bare.mkdir()
+        (bare / "index.mjs").write_text("// stub\n", encoding="utf-8")
+        with self.assertRaises(SystemExit) as caught:
+            with redirect_stdout(io.StringIO()):
+                qq_setup.main(["init", "--snowluma", str(bare), "--a-uin", "111"])
         self.assertIn("config", str(caught.exception.code))
 
 
@@ -118,6 +131,156 @@ class CommandLineTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as caught:
                 qq_setup.main(["probe", "--snowluma", str(root)])
             self.assertIn("两个账号", str(caught.exception.code))
+
+
+class OneBotConfigTest(unittest.TestCase):
+    """``markovcryptor.onebot_config`` 是 CLI 与 tools 的共同真源。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = _fake_snowluma(Path(self._tmp.name) / "sl")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_default_token_is_derived_from_uin(self) -> None:
+        settings = onebot_config.OneBotSettings(uin="123")
+        self.assertEqual(settings.token, "mkx-123")
+        self.assertEqual(settings.ws_url, "ws://127.0.0.1:9711/")
+
+    def test_round_trip_through_file(self) -> None:
+        """写进去再读回来要一致 —— tools 靠这个推 probe 的连接参数。"""
+        settings = onebot_config.OneBotSettings(uin="123", ws_port=9721,
+                                                http_port=9722, host="0.0.0.0")
+        path, wrote = onebot_config.write_config(self.root, settings)
+        self.assertTrue(wrote)
+        self.assertEqual(onebot_config.read_settings(path), settings)
+
+    def test_discover_sorts_by_uin(self) -> None:
+        for uin in ("222", "111"):
+            onebot_config.write_config(
+                self.root, onebot_config.OneBotSettings(uin=uin))
+        self.assertEqual(list(onebot_config.discover(self.root)), ["111", "222"])
+
+    def test_read_settings_tolerates_garbage(self) -> None:
+        path = self.root / "config" / "onebot_bad.json"
+        path.write_text("not json", encoding="utf-8")
+        self.assertIsNone(onebot_config.read_settings(path))
+
+    def test_cli_queue_init_writes_config(self) -> None:
+        """装机后没有 tools/ 目录，所以 qq-init 必须在 CLI 里。"""
+        result = subprocess.run(
+            [sys.executable, "-m", "markovcryptor.cli", "qq-init",
+             "--snowluma", str(self.root), "--uin", "777",
+             "--ws-port", "9731", "--http-port", "9732"],
+            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        settings = onebot_config.read_settings(
+            self.root / "config" / "onebot_777.json")
+        self.assertEqual(settings.ws_port, 9731)
+        self.assertEqual(settings.http_port, 9732)
+
+    def test_cli_queue_init_reports_bad_directory(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-m", "markovcryptor.cli", "qq-init",
+             "--snowluma", str(self.root / "nope"), "--uin", "1"],
+            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue(result.stderr.strip())
+
+
+class PackagingTest(unittest.TestCase):
+    """打包时踩过的坑，锁住免得重新出现。"""
+
+    def test_web_ui_ships_with_the_package(self) -> None:
+        """``webui/index.html`` 必须进 wheel，否则装完打开 ``/`` 是 404。
+
+        这条曾真实发生过：没配 ``package-data`` 时 wheel 里没有这个文件。
+        """
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn("[tool.setuptools.package-data]", pyproject)
+        self.assertIn("webui/*.html", pyproject)
+
+    def test_web_extra_includes_websockets(self) -> None:
+        """OneBot 客户端要 websockets，它必须跟 [web] 一起装。"""
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        # 不能按 "[" 切：uvicorn[standard] 自己就带一层方括号。
+        section = pyproject.split("\nweb = [", 1)[1]
+        web_extra = section.split("\n]", 1)[0]
+        self.assertIn("websockets", web_extra)
+
+    def test_bundle_covers_multiple_python_versions(self) -> None:
+        """只打 cp311 的 wheel 装到 3.12 上会 No matching distribution。"""
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        self.assertIn("PYTHON_TARGETS", source)
+        for version in ("3.11", "3.12", "3.13"):
+            self.assertIn(f'"{version}"', source)
+
+    def test_bundle_installs_web_extra(self) -> None:
+        """install.ps1 若只装 markovcryptor，guest 上会没有 fastapi。"""
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        self.assertIn('markovcryptor[web]', source)
+
+
+class OneBotWebSocketTest(unittest.TestCase):
+    """``websockets`` 14 起删了 legacy 实现，参数名也改了。
+
+    项目原来直接用 ``extra_headers``，装上新版 websockets 就会
+    ``TypeError: create_connection() got an unexpected keyword argument``。
+    """
+
+    def test_picks_the_parameter_name_the_installed_version_accepts(self) -> None:
+        import inspect
+
+        import websockets
+
+        from markovcryptor.onebot_ws import _header_kwarg
+
+        name = _header_kwarg()
+        params = inspect.signature(websockets.connect).parameters
+        self.assertIn(name, params)
+        self.assertIn(name, ("extra_headers", "additional_headers"))
+
+    def test_auth_header_omits_empty_token(self) -> None:
+        from markovcryptor.onebot_ws import auth_header
+
+        self.assertEqual(auth_header(""), {})
+        self.assertEqual(auth_header("mkx-1"), {"Authorization": "Bearer mkx-1"})
+
+    def test_connect_without_token_passes_no_header(self) -> None:
+        """没 token 时不应把空的 Authorization 发出去。"""
+        from markovcryptor import onebot_ws
+
+        captured = {}
+
+        class Fake:
+            @staticmethod
+            def connect(url, **kwargs):
+                captured.update(kwargs)
+                return object()
+
+        real = sys.modules.get("websockets")
+        sys.modules["websockets"] = Fake
+        try:
+            onebot_ws.connect("ws://127.0.0.1:1/", "")
+            self.assertEqual(captured, {})
+            onebot_ws.connect("ws://127.0.0.1:1/", "mkx-7")
+            self.assertIn("Authorization", str(captured))
+        finally:
+            if real is None:
+                sys.modules.pop("websockets", None)
+            else:
+                sys.modules["websockets"] = real
+
+    def test_no_module_uses_raw_extra_headers(self) -> None:
+        """再有人手写 extra_headers，就会在新版 websockets 上崩掉。"""
+        for path in (ROOT / "tools").glob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            if "websockets" not in text:
+                continue
+            self.assertNotIn(
+                "extra_headers=", text,
+                f"{path.name} 应该用 markovcryptor.onebot_ws.connect")
 
 
 class DocsTest(unittest.TestCase):

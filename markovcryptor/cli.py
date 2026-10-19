@@ -13,6 +13,7 @@ from .core.errors import StegoError
 from .engine import Config, Engine
 from .jobs import ANIMATION_SUFFIXES, TEXT_SUFFIXES
 from .web import DEFAULT_HOST, DEFAULT_PORT
+from .onebot_config import DEFAULT_HTTP_PORT, DEFAULT_WS_PORT
 from .model import (
     MarkovModel,
     default_model_dir,
@@ -92,6 +93,20 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=DEFAULT_PORT,
                        help=f"端口，默认 {DEFAULT_PORT}（也可用环境变量 MKX1_PORT）")
     serve.add_argument("--model-dir", type=Path, default=default_model_dir())
+
+    qq_init = sub.add_parser(
+        "qq-init", help="给 SnowLuma 写一个 QQ 号的 OneBot 配置")
+    qq_init.add_argument("--snowluma", type=Path, required=True,
+                         help="已解压的 SnowLuma 目录（里面有 config/ 和 index.mjs）")
+    qq_init.add_argument("--uin", required=True, help="这个 SnowLuma 要挂的 QQ 号")
+    qq_init.add_argument("--ws-port", type=int, default=DEFAULT_WS_PORT,
+                         help=f"OneBot WebSocket 端口，默认 {DEFAULT_WS_PORT}")
+    qq_init.add_argument("--http-port", type=int, default=DEFAULT_HTTP_PORT,
+                         help=f"OneBot HTTP 端口，默认 {DEFAULT_HTTP_PORT}")
+    qq_init.add_argument("--host", default="127.0.0.1",
+                         help="监听地址；只有要从别的机器连进来才改成 0.0.0.0")
+    qq_init.add_argument("--token", default="", help="accessToken；默认 mkx-<uin>")
+    qq_init.add_argument("--force", action="store_true", help="覆盖已有配置")
 
     batch = sub.add_parser("batch", help="对一整个文件夹批量嵌入或提取")
     batch.add_argument("--channel", required=True, help="信道 id，见 channels 子命令")
@@ -284,6 +299,27 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             for hint in exc.hints:
                 print(f"  建议：{hint}", file=sys.stderr)
             return 2
+        return 0
+
+    if args.command == "qq-init":
+        from .onebot_config import OneBotSettings, write_config
+
+        settings = OneBotSettings(uin=str(args.uin), ws_port=args.ws_port,
+                                  http_port=args.http_port, host=args.host,
+                                  access_token=args.token)
+        try:
+            path, written = write_config(args.snowluma, settings, force=args.force)
+        except FileNotFoundError as error:
+            print(error, file=sys.stderr)
+            return 2
+        if written:
+            print(f"写入 {path.name}：WS {settings.ws_port} / HTTP {settings.http_port}"
+                  f"  token={settings.token}")
+        else:
+            print(f"保留 {path.name}（已存在；要重写加 --force）")
+        if settings.host == "0.0.0.0":
+            print("注意：监听 0.0.0.0 会把这个 OneBot 暴露到局域网，仅跨机测试时这么用。")
+        print(f"下一步：启动 SnowLuma，连 {settings.ws_url}")
         return 0
 
     if args.command == "train":

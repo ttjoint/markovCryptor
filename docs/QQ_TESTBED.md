@@ -203,7 +203,85 @@ python tools/qq_setup.py up      --snowluma vendor/snowluma
 python tools/qq_setup.py status  --snowluma vendor/snowluma
 python tools/qq_setup.py probe   --snowluma vendor/snowluma [--only single|multi|big]
 python tools/qq_setup.py down                              # 只结束 SnowLuma，不动 QQ
+python tools/make_bundle.py --with-snowluma <snowluma目录>  # 打跨机测试包
 ```
 
 `down` 按命令行特征（`node … index.mjs`）精确结束，**不会**碰用户的 QQ
 进程，也不会按进程名批量杀。
+
+---
+
+## 7. 跨机测试（本机 + 虚拟机）
+
+单机两个号只证明了「同一台机器上能通」。真实场景里两端在不同机器上，
+中间多了网卡、NAT、防火墙，所以**必须另测一遍**。
+
+### 7.1 打一个能拷进虚拟机的包
+
+```bash
+python tools/make_bundle.py --with-snowluma D:/Projects/SnowLuma-v1.14.22-win-x64-lite
+```
+
+产物 `dist/qqtest-<版本>-<时间>.zip`（约 75 MB），解压后：
+
+| 文件 | 用途 |
+|---|---|
+| `wheels/` | 本库 + 依赖的 wheel，`--no-index` 离线装 |
+| `snowluma/` | 运行所需的 SnowLuma 文件（含空的 `config/`） |
+| `install.ps1` | guest 端装依赖并自检 |
+| `run-snowluma.ps1` | 起 SnowLuma，等 OneBot 端口，识别 EULA 卡住 |
+| `probe.ps1` | 发一张图，验 OneBot 通不通 |
+| `CHECKLIST.md` | 手工步骤、端口表、排错表 |
+| `manifest.json` | 版本、md5、端口分配 |
+
+打包行为：
+
+- 依赖按 **cp311 / cp312 / cp313 各下一份**。只打 cp311 的话，装到
+  Python 3.12 的虚拟机上会 `No matching distribution found for numpy`。
+- 装的是 `markovcryptor[web]` 而不是 `markovcryptor`，否则 guest 上没有
+  `fastapi` / `uvicorn`。
+- 包内**不含 Python 与 Node 本体** —— 这两样 guest 要自己装。
+
+### 7.2 两个容易卡住的地方
+
+**（一）首次启动会停在 EULA**
+
+干净的 SnowLuma 没有 `config/consent.json` 时日志停在
+`awaiting EULA/PRIVACY consent`，此时 **QQ hook 和 OneBot 端口都不会起**。
+需要先启一次，从日志里拿随机初始密码（`initial credentials: user=admin
+password=…`），登录 `http://127.0.0.1:5099/` 同意，之后就不问了。
+`run-snowluma.ps1` 会识别这个状态并直接说明，不会让人去查网络。
+
+**（二）跨机要改监听地址**
+
+`onebot_<UIN>.json` 的 `wsServers[0].host` 默认 `127.0.0.1`，只能本机连。
+要跨机：
+
+```bash
+python -m markovcryptor.cli qq-init --snowluma <dir> --uin <UIN> \
+  --ws-port 9721 --http-port 9722 --host 0.0.0.0 --force
+```
+
+虚拟机网络用**桥接**最省事；用 NAT 的话要在虚拟网络编辑器里加端口转发。
+只在本机测时**不要**用 `0.0.0.0`。
+
+### 7.3 跨机之后必须重跑 P0
+
+单机测得的「图片逐字节原样往返」是在同一条回环路径上得到的。跨机之后
+中间多了虚拟机网络，所以第 5 节的三层验证要按顺序重做，特别是第 3 层：
+
+```bash
+python tools/qq_probe.py \
+  --a-uin A --a-ws ws://127.0.0.1:9711/  --a-token mkx-A \
+  --b-uin B --b-ws ws://<guest IP>:9721/ --b-token mkx-B
+```
+
+如果这里变成「被改动」，说明中间有环节重编码了图片，像素域隐写不可用，
+得退回中文信道。
+
+### 7.4 websockets 版本
+
+`websockets` 14 起删掉了 `legacy` 实现，鉴权头参数从 `extra_headers`
+改名为 `additional_headers`。项目里所有连 OneBot 的地方统一走
+`markovcryptor.onebot_ws.connect()`，它会按装着的版本挑参数名。
+有测试（`OneBotWebSocketTest`）盯着，禁止再手写 `extra_headers=`。

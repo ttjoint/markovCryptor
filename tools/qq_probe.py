@@ -82,19 +82,20 @@ async def _round_trip(args, specs: list[tuple[str, int]]) -> bool:
     """发 ``specs`` 若干张图，逐个比对取回的字节。返回是否全部一致。"""
     import websockets
 
+    from markovcryptor.onebot_ws import connect
+
     sent = [(name, _png(size, index + 1), size) for index, (name, size) in enumerate(specs)]
     print(f"\n=== 往返测试：{len(sent)} 张 ===")
     for name, blob, size in sent:
         print(f"  发出 {name:6s} {size:4d}² {len(blob):7d}B md5={hashlib.md5(blob).hexdigest()[:12]}")
 
-    listener = websockets.connect(
-        args.b_ws, extra_headers={"Authorization": f"Bearer {args.b_token}"})
+    listener = connect(
+        args.b_ws, args.b_token)
     async with listener as b:
         await asyncio.sleep(1.5)          # 让对端先订阅上，免得推送漏在连接建立前
         collect = asyncio.create_task(_collect_images(b, len(sent), timeout=args.timeout))
 
-        async with websockets.connect(
-                args.a_ws, extra_headers={"Authorization": f"Bearer {args.a_token}"}) as a:
+        async with connect(args.a_ws, args.a_token) as a:
             message = [{"type": "image",
                         "data": {"file": "base64://" + base64.b64encode(blob).decode()}}
                        for _name, blob, _size in sent]
