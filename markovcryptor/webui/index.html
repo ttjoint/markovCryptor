@@ -36,7 +36,8 @@
     color: var(--dim); padding: 10px 14px; cursor: pointer; font: inherit;
   }
   nav button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
-  main { padding: 20px; max-width: 900px; }
+  /* 终端页要四窗并排，所以主区不再是固定 900px 的窄栏。 */
+  main { padding: 20px; max-width: 1800px; margin: 0 auto; }
   section[hidden] { display: none; }
   fieldset {
     border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px;
@@ -75,88 +76,163 @@
   td.mono { font-family: Consolas, monospace; font-size: 12px; word-break: break-all; }
   progress { width: 100%; height: 12px; }
 
-  /* --- terminal --- */
-  .term-switch {
-    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-    margin: 0 0 10px;
-  }
-  .term-switch button[aria-selected="true"] {
-    border-color: var(--accent); color: var(--accent);
-  }
-  .term-pair {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+  /* --- terminal: 两台客户端 + 中间网络连线 --- */
+  /* 宽屏并排、窄屏上下；两边各自是一个独立"客户端"。 */
+  .net-stage {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 72px minmax(0, 1fr);
+    gap: 0;
     align-items: start;
+    width: 100%;
   }
-  @media (max-width: 1000px) { .term-pair { grid-template-columns: 1fr; } }
-  .pane {
-    border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px;
-    background: var(--panel); display: flex; flex-direction: column;
+  @media (max-width: 1180px) {
+    .net-stage {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto auto auto;
+    }
+    .wire { min-height: 56px; }
+    .wire-line { width: 2px; height: 100%; top: 0; left: 50%; transform: none; }
+  }
+  .client {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 12px;
     min-width: 0;
+  }
+  @media (max-width: 720px) {
+    .client { grid-template-columns: minmax(0, 1fr); }
+  }
+  .client-head {
+    grid-column: 1 / -1;
+    display: flex; align-items: baseline; gap: 10px;
+    padding-bottom: 6px; border-bottom: 1px solid var(--line);
+  }
+  .client-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  /* 连线：一包数据通过时 flash 一下 */
+  .wire { position: relative; min-height: 120px; }
+  .wire-line {
+    position: absolute; top: 50%; left: 0; width: 100%; height: 2px;
+    background: repeating-linear-gradient(90deg, var(--line) 0 6px, transparent 6px 12px);
+    transition: background .2s, box-shadow .2s;
+  }
+  .wire.active .wire-line {
+    background: var(--accent); box-shadow: 0 0 10px var(--accent);
+  }
+  .wire-label {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-size: 10px; color: var(--dim); background: var(--bg); padding: 2px 6px;
+    border-radius: 3px; white-space: nowrap;
+  }
+  .packets { position: absolute; inset: 0; overflow: hidden; }
+  .pkt {
+    position: absolute; top: calc(50% - 4px); left: 0;
+    width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    animation: pkt-run 900ms linear forwards;
+  }
+  .pkt.left { animation-name: pkt-run-left; }
+  @keyframes pkt-run {
+    from { transform: translateX(0); opacity: 1; }
+    to   { transform: translateX(72px); opacity: .2; }
+  }
+  @keyframes pkt-run-left {
+    from { transform: translateX(72px); opacity: 1; }
+    to   { transform: translateX(0); opacity: .2; }
+  }
+  .pane {
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+    background: var(--panel); display: flex; flex-direction: column; min-width: 0;
   }
   .covert-pane { border-style: dashed; }
   .pane-head {
     display: flex; align-items: baseline; justify-content: space-between;
-    gap: 10px; margin-bottom: 8px;
+    gap: 8px; margin-bottom: 6px;
   }
-  .pane-head h2 { font-size: 14px; margin: 0; font-weight: 600; }
-  .composer { display: flex; gap: 8px; margin-top: 8px; align-items: stretch; }
-  .composer input[type="text"] { flex: 1 1 auto; min-width: 0; }
-  .composer button { flex: 0 0 auto; padding: 8px 12px; }
+  .pane-head h3 { font-size: 13px; margin: 0; font-weight: 600; }
+  .composer { display: flex; gap: 6px; margin-top: 6px; align-items: stretch; }
+  .composer input[type="text"] {
+    flex: 1 1 auto; min-width: 0; padding: 6px 8px; font-size: 13px;
+  }
+  .composer button { flex: 0 0 auto; padding: 6px 10px; font-size: 12px; }
   .composer input:disabled { opacity: .5; }
   .attach {
     display: inline-flex; align-items: center; cursor: pointer;
-    border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px;
-    font-size: 13px; color: var(--text); margin: 0; flex: 0 0 auto;
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;
+    font-size: 12px; color: var(--text); margin: 0; flex: 0 0 auto;
   }
   .attach:hover { border-color: var(--accent); color: var(--accent); }
+  /* 明文附件预览：发送前就能看见图 */
+  .attach-preview { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .attach-preview:empty { display: none; }
+  .attach-preview .thumb2 {
+    position: relative; width: 56px; height: 56px; border-radius: 4px;
+    overflow: hidden; border: 1px solid var(--line);
+  }
+  .attach-preview .thumb2 img { width: 100%; height: 100%; object-fit: cover; }
+  .attach-preview .thumb2 button {
+    position: absolute; top: 0; right: 0; background: var(--bg); border: none;
+    color: var(--err); cursor: pointer; font-size: 12px; line-height: 1; padding: 0 3px;
+  }
   .queue-head {
     display: flex; justify-content: space-between; align-items: center;
-    margin: 12px 0 6px; font-size: 12px; color: var(--dim);
+    margin: 8px 0 4px; font-size: 11px; color: var(--dim);
   }
   .queue-head b { color: var(--text); font-weight: 600; }
   .queue {
-    display: flex; gap: 6px; min-height: 62px; overflow-x: auto;
-    border: 1px dashed var(--line); border-radius: 6px; padding: 8px;
+    display: flex; gap: 5px; min-height: 48px; overflow-x: auto;
+    border: 1px dashed var(--line); border-radius: 6px; padding: 5px;
     align-items: center;
   }
-  .queue:empty::before { content: "（空）"; color: var(--dim); font-size: 12px; }
-  /* 火车序列：每张是一个车厢，靠一条细线串起来表示先后。 */
+  .queue:empty::before { content: "（空）"; color: var(--dim); font-size: 11px; }
   .qitem {
-    position: relative; width: 84px; flex: 0 0 auto;
-    border: 1px solid var(--line); border-radius: 6px;
+    position: relative; width: 64px; flex: 0 0 auto;
+    border: 1px solid var(--line); border-radius: 5px;
     overflow: hidden; background: var(--bg);
   }
   .queue.train .qitem + .qitem::before {
-    content: ""; position: absolute; inset-inline-start: -7px; top: 50%;
-    width: 6px; height: 2px; background: var(--line);
+    content: ""; position: absolute; inset-inline-start: -6px; top: 50%;
+    width: 5px; height: 2px; background: var(--line);
   }
-  .qitem img { display: block; width: 100%; height: 60px; object-fit: cover; }
+  .qitem img { display: block; width: 100%; height: 46px; object-fit: cover; }
   .qitem .bar {
-    display: flex; align-items: center; gap: 4px; padding: 2px 4px; font-size: 10px;
+    display: flex; align-items: center; gap: 3px; padding: 1px 3px; font-size: 9px;
   }
   .qitem .bar .idx { color: var(--dim); }
   .qitem .bar .del {
     margin-inline-start: auto; background: none; border: none; color: var(--err);
-    cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px;
+    cursor: pointer; font-size: 11px; line-height: 1; padding: 0 1px;
   }
   .queue.sent .qitem { opacity: .6; }
   .qitem .tag {
-    position: absolute; top: 2px; inset-inline-start: 2px; background: var(--panel);
-    border-radius: 4px; font-size: 10px; padding: 0 4px; color: var(--dim);
+    position: absolute; top: 1px; inset-inline-start: 1px; background: var(--panel);
+    border-radius: 3px; font-size: 9px; padding: 0 3px; color: var(--dim);
   }
   .chat {
     border: 1px solid var(--line); border-radius: 6px; padding: 8px;
-    min-height: 220px; max-height: 340px; overflow: auto; font-size: 13px;
+    min-height: 200px; max-height: 300px; overflow: auto; font-size: 12px;
     background: var(--bg);
   }
   .chat.covert { border-style: dashed; }
-  .chat .msg { margin: 0 0 10px; }
-  .chat .msg .who { color: var(--dim); font-size: 11px; }
+  .chat .msg { margin: 0 0 8px; }
+  .chat .msg .who { color: var(--dim); font-size: 10px; margin-bottom: 2px; }
   .chat .msg p { margin: 2px 0; }
-  .chat img.thumb { max-width: 100%; max-height: 160px; border-radius: 4px;
-    display: block; margin: 4px 0; }
-  .chat .note { color: var(--warn); font-size: 12px; }
+  /* 自己发的靠右、对方发的靠左，像普通聊天软件那样分得开 */
+  .chat .msg.out { text-align: right; }
+  .chat .msg.out .bubble {
+    display: inline-block; text-align: left; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px 8px 2px 8px;
+    padding: 4px 8px; max-width: 85%;
+  }
+  .chat .msg.in .bubble {
+    display: inline-block; background: transparent; border: 1px solid var(--line);
+    border-radius: 8px 8px 8px 2px; padding: 4px 8px; max-width: 85%;
+  }
+  .chat img.thumb { max-width: 100%; max-height: 110px; border-radius: 4px;
+    display: block; margin: 3px 0; }
+  .chat .note { color: var(--warn); font-size: 11px; }
   .chat .secret { color: var(--ok); }
+  .chat .sys {
+    text-align: center; color: var(--accent); font-size: 11px; margin: 6px 0;
+  }
 </style>
 </head>
 <body>
@@ -204,70 +280,138 @@
   </section>
 
   <section id="tab-terminal" hidden>
-    <div class="term-switch">
-      <span class="dim">当前身份</span>
-      <button class="ghost" id="t-who-alice" data-who="alice">alice</button>
-      <button class="ghost" id="t-who-bob" data-who="bob">bob</button>
-      <span class="hint" id="t-state"></span>
-    </div>
-
-    <div class="term-pair">
-      <!-- ================================ 左：明文窗口 ================================ -->
-      <section class="pane">
-        <header class="pane-head">
-          <h2>明文窗口</h2>
-          <span class="dim" id="plain-peer"></span>
+    <!-- 两台并排的"客户端"，中间一条网络连线。宽屏并排、窄屏上下。 -->
+    <div class="net-stage">
+      <div class="client" data-side="alice">
+        <header class="client-head">
+          <h2>alice</h2>
+          <span class="hint" id="a-state">未建立</span>
         </header>
-        <div class="chat" id="p-chat"><p class="dim">（双方来往的普通消息）</p></div>
-        <div class="composer">
-          <input type="text" id="p-text" placeholder="普通消息，随时可发…">
-          <label class="attach" title="附带图片（明文，不隐写）">
-            <input type="file" id="p-files" accept="image/*" multiple hidden>
-            <span>＋图</span>
-          </label>
-          <button class="action" id="p-send">发送</button>
-        </div>
-        <p class="hint" id="p-attach-hint"></p>
-      </section>
 
-      <!-- ================================ 右：密文窗口 ================================ -->
-      <section class="pane covert-pane">
-        <header class="pane-head">
-          <h2>密文窗口</h2>
-          <span class="dim" id="covert-peer"></span>
+        <!-- 左：明文 -->
+        <section class="pane">
+          <header class="pane-head">
+            <h3>明文窗口</h3>
+            <span class="dim" id="a-plain-peer"></span>
+          </header>
+          <div class="chat" id="a-plain"></div>
+          <div class="composer">
+            <input type="text" id="a-plain-text" placeholder="普通消息，随时可发…">
+            <label class="attach" title="附带图片（明文，不隐写）">
+              <input type="file" id="a-plain-files" accept="image/*" multiple hidden>
+              <span>＋图</span>
+            </label>
+            <button class="action" id="a-plain-send">发送</button>
+          </div>
+          <div class="attach-preview" id="a-plain-preview"></div>
+        </section>
+
+        <!-- 右：密文 + 图片队列 -->
+        <section class="pane covert-pane">
+          <header class="pane-head">
+            <h3>密文窗口</h3>
+            <span class="dim" id="a-covert-peer"></span>
+          </header>
+          <div class="chat covert" id="a-covert">
+            <p class="dim">密钥交换完成后才能收发密文。</p>
+          </div>
+          <div class="composer">
+            <input type="text" id="a-covert-text" placeholder="未握手，无法输入" disabled>
+            <button class="action" id="a-send-text" disabled title="中文隐写：不消耗图片">文本混淆</button>
+            <button class="action" id="a-send-image" disabled title="把密文藏进图片：消耗队列里的图片">图片混淆</button>
+          </div>
+          <div class="row">
+            <button class="ghost" id="a-handshake">发起密钥交换</button>
+            <span class="hint" id="a-handshake-hint">握手也要附一张图</span>
+          </div>
+
+          <div class="queue-head">
+            <span>待发送图片 <b id="a-q-count">0</b> 张</span>
+            <span class="dim" id="a-q-status"></span>
+          </div>
+          <div class="queue train" id="a-queue"></div>
+          <div class="row">
+            <label class="attach" title="一次选好十几张用于后续隐写">
+              <input type="file" id="a-files" accept="image/*" multiple hidden>
+              <span>＋加入队列</span>
+            </label>
+            <button class="ghost" id="a-queue-clear">清空</button>
+          </div>
+
+          <div class="queue-head"><span>已发送 <b id="a-s-count">0</b> 张</span>
+            <span><button class="ghost" id="a-sent-clear">清空</button></span>
+          </div>
+          <div class="queue train sent" id="a-sent"></div>
+        </section>
+      </div>
+
+      <!-- 网络：一包数据过线时亮一下 -->
+      <div class="wire" id="wire">
+        <div class="wire-line"></div>
+        <div class="wire-label" id="wire-label">网络</div>
+        <div class="packets" id="wire-packets"></div>
+      </div>
+
+      <div class="client" data-side="bob">
+        <header class="client-head">
+          <h2>bob</h2>
+          <span class="hint" id="b-state">未建立</span>
         </header>
-        <div class="chat covert" id="c-chat">
-          <p class="dim">密钥交换完成后才能在这里收发密文。</p>
-        </div>
-        <div class="composer">
-          <input type="text" id="c-text" placeholder="未握手，无法输入" disabled>
-          <button class="action" id="c-send-text" disabled title="中文隐写：不消耗图片">文本混淆</button>
-          <button class="action" id="c-send-image" disabled title="把密文藏进图片：消耗队列里的图片">图片混淆</button>
-        </div>
-        <div class="row" id="c-handshake-row">
-          <button class="ghost" id="c-handshake">发起密钥交换</button>
-          <span class="hint" id="c-handshake-hint">握手也要附一张图：从下面队列取出第一张</span>
-        </div>
 
-        <!-- 图片队列：像火车一样排开，每次发送从前端抽出 -->
-        <div class="queue-head">
-          <span>待发送图片 <b id="q-count">0</b> 张</span>
-          <span class="dim" id="q-status"></span>
-        </div>
-        <div class="queue train" id="t-queue"></div>
-        <div class="row">
-          <label class="attach" title="一次选好十几张用于后续隐写">
-            <input type="file" id="c-files" accept="image/*" multiple hidden>
-            <span>＋加入队列</span>
-          </label>
-          <button class="ghost" id="t-queue-clear">清空队列</button>
-        </div>
+        <section class="pane">
+          <header class="pane-head">
+            <h3>明文窗口</h3>
+            <span class="dim" id="b-plain-peer"></span>
+          </header>
+          <div class="chat" id="b-plain"></div>
+          <div class="composer">
+            <input type="text" id="b-plain-text" placeholder="普通消息，随时可发…">
+            <label class="attach" title="附带图片（明文，不隐写）">
+              <input type="file" id="b-plain-files" accept="image/*" multiple hidden>
+              <span>＋图</span>
+            </label>
+            <button class="action" id="b-plain-send">发送</button>
+          </div>
+          <div class="attach-preview" id="b-plain-preview"></div>
+        </section>
 
-        <div class="queue-head"><span>已发送 <b id="s-count">0</b> 张</span>
-          <span><button class="ghost" id="t-sent-clear">清空</button></span>
-        </div>
-        <div class="queue train sent" id="t-sent"></div>
-      </section>
+        <section class="pane covert-pane">
+          <header class="pane-head">
+            <h3>密文窗口</h3>
+            <span class="dim" id="b-covert-peer"></span>
+          </header>
+          <div class="chat covert" id="b-covert">
+            <p class="dim">密钥交换完成后才能收发密文。</p>
+          </div>
+          <div class="composer">
+            <input type="text" id="b-covert-text" placeholder="未握手，无法输入" disabled>
+            <button class="action" id="b-send-text" disabled title="中文隐写：不消耗图片">文本混淆</button>
+            <button class="action" id="b-send-image" disabled title="把密文藏进图片：消耗队列里的图片">图片混淆</button>
+          </div>
+          <div class="row">
+            <button class="ghost" id="b-handshake">发起密钥交换</button>
+            <span class="hint" id="b-handshake-hint">握手也要附一张图</span>
+          </div>
+
+          <div class="queue-head">
+            <span>待发送图片 <b id="b-q-count">0</b> 张</span>
+            <span class="dim" id="b-q-status"></span>
+          </div>
+          <div class="queue train" id="b-queue"></div>
+          <div class="row">
+            <label class="attach" title="一次选好十几张用于后续隐写">
+              <input type="file" id="b-files" accept="image/*" multiple hidden>
+              <span>＋加入队列</span>
+            </label>
+            <button class="ghost" id="b-queue-clear">清空</button>
+          </div>
+
+          <div class="queue-head"><span>已发送 <b id="b-s-count">0</b> 张</span>
+            <span><button class="ghost" id="b-sent-clear">清空</button></span>
+          </div>
+          <div class="queue train sent" id="b-sent"></div>
+        </section>
+      </div>
     </div>
   </section>
 
@@ -699,6 +843,9 @@ for (const tab of document.querySelectorAll("#tabs button")) {
       other.setAttribute("aria-selected", String(other === tab));
       $(`tab-${other.dataset.tab}`).hidden = other !== tab;
     }
+    // 终端页首次打开才绑定事件、开始轮询：它有两个客户端在跑，
+    // 没人看的页签不该一直发请求。
+    if (tab.dataset.tab === "terminal") bootTerminal();
   };
 }
 
@@ -709,93 +856,87 @@ $("b-run").onclick = submitBatch;
 
 // ------------------------------------------------------------------ terminal
 //
-// Two panes, one per *kind* of traffic -- not one per user:
-//   left  : plaintext. Works always, with or without a session.
-//   right : covert. Dead until the handshake completes, and its image mode is
-//           dead again whenever the picture queue runs dry.
-// The identity switch only decides who is typing; both panes show both sides.
+// Two *fully separate clients* on one page. alice and bob each have their own
+// two windows (plaintext + covert) and their own picture queue; the only thing
+// they share is the wire in the middle, drawn as the dashed line between them.
+// That mirrors the real setup -- two machines, nothing shared, bytes crossing a
+// network -- so nothing here may leak state from one side to the other except
+// through /terminal/send.
+//
+// Each client's transcript holds both directions (what it sent and what it
+// received), like any chat app. The server keeps one transcript per terminal.
 
-const t = {
-  who: "alice",
-  queue: [],        // {id, name, dataUrl} -- waiting, in send order
-  sent: [],         // {id, name, dataUrl} -- consumed, newest last
-  seq: 0,
-  nextInbox: 0,
-  established: false,
-  textReady: true,  // 中文信道模型是否可用
+const SIDES = ["alice", "bob"];
+
+// Per-client editor state: queue, sent, inbox cursor, attachment preview.
+const clients = {
+  alice: { queue: [], sent: [], next: 0, attached: [], seq: 0,
+           established: false, stateLabel: "未建立", textReady: true },
+  bob:   { queue: [], sent: [], next: 0, attached: [], seq: 0,
+           established: false, stateLabel: "未建立", textReady: true },
 };
 
-const other = () => (t.who === "alice" ? "bob" : "alice");
+const peerOf = (me) => (me === "alice" ? "bob" : "alice");
 
-// --- identity ---
+// 元素 id 用单字母前缀（a-/b-），逻辑里用完整名字，避免满屏 alice-/bob-。
+const el = (me, suffix) => $(me[0] + "-" + suffix);
 
-function tSwitch(who) {
-  if (who === t.who) return;
-  t.who = who;
-  for (const button of document.querySelectorAll(".term-switch button[data-who]")) {
-    button.setAttribute("aria-selected", String(button.dataset.who === who));
-  }
-  // 收件箱从头看：换身份后两边的对话是分开的。
-  t.nextInbox = 0;
-  $("p-chat").innerHTML = "<p class='dim'>（空）</p>";
-  $("c-chat").innerHTML = "<p class='dim'>（空）</p>";
-  $("plain-peer").textContent = "↔ " + other();
-  $("covert-peer").textContent = "↔ " + other();
-  tState().then(tPoll);
-}
+// --- 可用性 ---
 
-for (const button of document.querySelectorAll(".term-switch button[data-who]")) {
-  button.onclick = () => tSwitch(button.dataset.who);
-}
+function applyAvailability(me) {
+  const c = clients[me];
+  const covert = c.established;
+  el(me, "covert-text").disabled = !covert;
+  el(me, "covert-text").placeholder =
+    covert ? "密文内容，只有对方能看到…" : "未握手，无法输入";
+  // 文本混淆不消耗图片，只看会话 + 模型；图片混淆还要求队列非空。
+  el(me, "send-text").disabled = !(covert && c.textReady);
+  el(me, "send-image").disabled = !(covert && c.queue.length > 0);
+  el(me, "handshake").disabled = covert;
+  el(me, "handshake").hidden = covert;
 
-// --- 会话与可用性 ---
-
-function tApplyAvailability() {
-  const covert = t.established;
-  $("c-text").disabled = !covert;
-  $("c-text").placeholder = covert ? "密文内容，只有对方能看到…" : "未握手，无法输入";
-  // 文本混淆不消耗图片，所以只看会话 + 模型；图片混淆还要求队列非空。
-  $("c-send-text").disabled = !(covert && t.textReady);
-  $("c-send-image").disabled = !(covert && t.queue.length > 0);
-  $("c-handshake").disabled = covert;
-  $("c-handshake").hidden = covert;
-
-  const count = t.queue.length;
-  $("q-count").textContent = String(count);
-  $("s-count").textContent = String(t.sent.length);
+  el(me, "q-count").textContent = String(c.queue.length);
+  el(me, "s-count").textContent = String(c.sent.length);
+  const status = el(me, "q-status");
   if (!covert) {
-    $("q-status").textContent = "未握手：先密钥交换";
-  } else if (!count) {
-    $("q-status").textContent = "队列为空，图片隐写链路不可用";
-  } else if (!t.textReady) {
-    $("q-status").textContent = "文本混淆不可用（无模型），仅图片可用";
+    status.textContent = "未握手";
+  } else if (!c.queue.length) {
+    status.textContent = "队列空，图片隐写不可用";
   } else {
-    $("q-status").textContent = "图片隐写可用";
+    status.textContent = "图片隐写可用";
   }
-  $("q-status").className = "dim" + (covert && count ? " ok" : "");
-  $("c-handshake-hint").textContent = count
-    ? "握手也要附一张图：从下面队列取出第一张"
+  status.className = "dim" + (covert && c.queue.length ? " ok" : "");
+  el(me, "handshake-hint").textContent = c.queue.length
+    ? "握手从队首取一张图"
     : "握手也要附一张图：先加入队列";
 }
 
-async function tState() {
+// --- 会话状态 ---
+
+async function refreshState(me) {
   const data = await api("/terminal/state");
-  const me = data.terminals[t.who];
-  t.established = me.established;
-  t.textReady = data.text_channel_ready;
-  const box = $("t-state");
-  box.textContent = "会话：" + me.state_label;
-  box.className = "hint" + (me.established ? " ok" : "");
-  tApplyAvailability();
+  const info = data.terminals[me];
+  const c = clients[me];
+  c.established = info.established;
+  c.stateLabel = info.state_label;
+  c.textReady = data.text_channel_ready;
+  const box = el(me, "state");
+  box.textContent = info.established
+    ? info.state_label
+    : info.state_label;
+  box.className = "hint" + (info.established ? " ok" : "");
+  el(me, "plain-peer").textContent = "↔ " + peerOf(me);
+  el(me, "covert-peer").textContent = "↔ " + peerOf(me);
+  applyAvailability(me);
 }
 
-// --- 图片队列 ---
+// --- 图片队列（每个客户端一套，互不影响）---
 
-function tRenderQueue() {
-  const box = $("t-queue");
+function renderQueue(me) {
+  const c = clients[me];
+  const box = el(me, "queue");
   box.innerHTML = "";
-  if (!t.queue.length) { tApplyAvailability(); return; }
-  t.queue.forEach((item, index) => {
+  c.queue.forEach((item, index) => {
     const div = document.createElement("div");
     div.className = "qitem";
     const img = document.createElement("img");
@@ -806,21 +947,21 @@ function tRenderQueue() {
     const del = document.createElement("button");
     del.className = "del"; del.textContent = "×"; del.title = "从队列移出";
     del.onclick = () => {
-      t.queue = t.queue.filter(x => x !== item);
-      tRenderQueue(); tApplyAvailability();
+      c.queue = c.queue.filter(x => x !== item);
+      renderQueue(me);
     };
     bar.append(order, del);
     div.append(img, bar);
     box.append(div);
   });
-  tApplyAvailability();
+  applyAvailability(me);
 }
 
-function tRenderSent() {
-  const box = $("t-sent");
+function renderSent(me) {
+  const c = clients[me];
+  const box = el(me, "sent");
   box.innerHTML = "";
-  if (!t.sent.length) { tApplyAvailability(); return; }
-  for (const item of [...t.sent].reverse()) {
+  for (const item of [...c.sent].reverse()) {
     const div = document.createElement("div");
     div.className = "qitem";
     const tag = document.createElement("span");
@@ -830,183 +971,307 @@ function tRenderSent() {
     div.append(tag, img);
     box.append(div);
   }
-  tApplyAvailability();
+  applyAvailability(me);
 }
 
-// 把队列前 n 张交给本次发送，并归档到已发送。
-// 抽走的是队首（火车从前端出站），顺序即发送顺序。
-function tConsume(count) {
-  const used = t.queue.slice(0, count);
-  t.queue = t.queue.slice(count);
-  t.sent.push(...used);
-  tRenderQueue();
-  tRenderSent();
+// 队首抽取 n 张：顺序即发送顺序，抽走的进"已发送"。
+function consume(me, count) {
+  const c = clients[me];
+  const used = c.queue.slice(0, count);
+  c.queue = c.queue.slice(count);
+  c.sent.push(...used);
+  renderQueue(me);
+  renderSent(me);
   return used;
 }
 
-async function tAddFiles(fileList) {
+async function addFiles(me, fileList) {
+  const c = clients[me];
   const reads = [...fileList].map(file => new Promise(resolve => {
     const reader = new FileReader();
-    reader.onload = () => resolve({ id: ++t.seq, name: file.name,
-                                    dataUrl: reader.result });
+    reader.onload = () => resolve({ id: ++c.seq, name: file.name, dataUrl: reader.result });
     reader.readAsDataURL(file);
   }));
-  t.queue.push(...await Promise.all(reads));
-  tRenderQueue();
+  c.queue.push(...await Promise.all(reads));
+  renderQueue(me);
 }
 
-$("c-files").onchange = (event) => {
-  tAddFiles(event.target.files);
-  event.target.value = "";
-};
-$("t-queue-clear").onclick = () => { t.queue = []; tRenderQueue(); };
-$("t-sent-clear").onclick = () => { t.sent = []; tRenderSent(); };
+// 明文附件：发送前预览，可逐个移除。
+function renderAttachments(me) {
+  const c = clients[me];
+  const box = el(me, "plain-preview");
+  box.innerHTML = "";
+  c.attached.forEach(item => {
+    const div = document.createElement("div");
+    div.className = "thumb2";
+    const img = document.createElement("img");
+    img.src = item.dataUrl; img.alt = item.name; img.title = item.name;
+    const del = document.createElement("button");
+    del.textContent = "×"; del.title = "移除";
+    del.onclick = () => {
+      c.attached = c.attached.filter(x => x !== item);
+      renderAttachments(me);
+    };
+    div.append(img, del);
+    box.append(div);
+  });
+}
+
+async function addAttachments(me, fileList) {
+  const c = clients[me];
+  const reads = [...fileList].map(file => new Promise(resolve => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({ id: ++c.seq, name: file.name, dataUrl: reader.result });
+    reader.readAsDataURL(file);
+  }));
+  c.attached.push(...await Promise.all(reads));
+  renderAttachments(me);
+}
+
+// --- 网络连线动画 ---
+
+let wireTimer = null;
+function flashWire(from, count) {
+  const wire = $("wire");
+  const box = $("wire-packets");
+  wire.classList.add("active");
+  const packets = Math.max(1, Math.min(3, count));
+  for (let i = 0; i < packets; i++) {
+    const dot = document.createElement("div");
+    // alice 在左往右跑；bob 在右往左跑。
+    dot.className = "pkt" + (from === "bob" ? " left" : "");
+    dot.style.animationDelay = (i * 90) + "ms";
+    box.append(dot);
+    setTimeout(() => dot.remove(), 1100 + i * 90);
+  }
+  $("wire-label").textContent = from + " → " + peerOf(from);
+  clearTimeout(wireTimer);
+  wireTimer = setTimeout(() => {
+    wire.classList.remove("active");
+    $("wire-label").textContent = "网络";
+  }, 1000);
+}
+
+// --- 会话建立提示：落在两个客户端的密文窗里 ---
+
+function handshakeNotice(me) {
+  const box = el(me, "covert");
+  const sys = document.createElement("div");
+  sys.className = "sys";
+  const peer = peerOf(me).toUpperCase();
+  const now = new Date().toLocaleTimeString();
+  sys.textContent = `— ${now} 已与 ${peer} 完成密钥协商，密文通道可用 —`;
+  box.append(sys);
+  box.scrollTop = box.scrollHeight;
+}
 
 // --- 发送 ---
 
-async function tBlob(item) {
+async function toBlob(item) {
   return (await fetch(item.dataUrl)).blob();
 }
 
-async function tPost(mode, text, items) {
+async function post(me, mode, text, items) {
   const form = new FormData();
   form.append("text", text);
   form.append("mode", mode);
-  for (const item of items) form.append("files", await tBlob(item), item.name);
-  return api("/terminal/" + t.who + "/send", { method: "POST", body: form });
+  for (const item of items) form.append("files", await toBlob(item), item.name);
+  return api("/terminal/" + me + "/send", { method: "POST", body: form });
 }
 
-// 明文：任意时刻可用，图片原样发送（不隐写）。
-async function tSendPlain() {
-  const text = $("p-text").value.trim();
-  const files = $("p-files").files;
-  if (!text && !files.length) return;
+async function sendPlain(me) {
+  const c = clients[me];
+  const text = el(me, "plain-text").value.trim();
+  if (!text && !c.attached.length) return;
   const form = new FormData();
   form.append("text", text);
   form.append("mode", "plain");
-  for (const file of files) form.append("files", file, file.name);
+  for (const item of c.attached) {
+    form.append("files", await toBlob(item), item.name);
+  }
   try {
-    await api("/terminal/" + t.who + "/send", { method: "POST", body: form });
-    $("p-text").value = "";
-    $("p-files").value = "";
-    $("p-attach-hint").textContent = "";
-    await tPoll();
+    await api("/terminal/" + me + "/send", { method: "POST", body: form });
+    flashWire(me, 1);
+    el(me, "plain-text").value = "";
+    c.attached = [];
+    renderAttachments(me);
+    await poll(me);
   } catch (error) { alert(describeError(error)); }
 }
 
-$("p-files").onchange = () => {
-  const n = $("p-files").files.length;
-  $("p-attach-hint").textContent = n ? "将附带 " + n + " 张图片（明文）" : "";
-};
-
-// 文本混淆：中文隐写，不消耗图片。
-async function tSendText() {
-  const text = $("c-text").value.trim();
+async function sendCovertText(me) {
+  const text = el(me, "covert-text").value.trim();
   if (!text) return;
   try {
-    await tPost("covert-text", text, []);
-    $("c-text").value = "";
-    await tPoll();
+    await post(me, "covert-text", text, []);
+    flashWire(me, 1);
+    el(me, "covert-text").value = "";
+    await poll(me);
   } catch (error) { alert(describeError(error)); }
 }
 
-// 图片混淆：消耗队列里的图片。需要几张抽几张，其余留在队列。
-async function tSendImage() {
-  const text = $("c-text").value.trim();
+async function sendCovertImage(me) {
+  const c = clients[me];
+  const text = el(me, "covert-text").value.trim();
   if (!text) { alert("请先输入要隐藏的内容。"); return; }
-  if (!t.queue.length) { alert("队列为空，无法图片混淆发送。"); return; }
-  // 服务端把密文均分给这 n 张；装不下会逐张说明，此时不消耗任何图片。
-  const items = t.queue.slice();
+  if (!c.queue.length) { alert("队列为空，无法图片混淆发送。"); return; }
+  // 服务端把密文均分给这 n 张；装不下会逐张说明，此时一张都不消耗。
+  const items = c.queue.slice();
   try {
-    await tPost("covert-image", text, items);
-    tConsume(items.length);
-    $("c-text").value = "";
-    await tPoll();
+    await post(me, "covert-image", text, items);
+    flashWire(me, items.length);
+    consume(me, items.length);
+    el(me, "covert-text").value = "";
+    await poll(me);
   } catch (error) { alert(describeError(error)); }
 }
 
-// 握手：从队列取第一张（也消耗图片）。
-async function tHandshake() {
-  if (!t.queue.length) { alert("握手也要附一张图：先加入队列。"); return; }
-  const items = t.queue.slice(0, 1);
+async function handshake(me) {
+  const c = clients[me];
+  if (!c.queue.length) { alert("握手也要附一张图：先加入队列。"); return; }
+  const items = c.queue.slice(0, 1);
   try {
-    await tPost("handshake", "", items);
-    tConsume(1);
-    await tState();
-    await tPoll();
+    await post(me, "handshake", "", items);
+    flashWire(me, 1);
+    consume(me, 1);
+    await refreshState(me);
+    await refreshState(peerOf(me));
+    await poll(me);
+    await poll(peerOf(me));
   } catch (error) { alert(describeError(error)); }
 }
-
-$("p-send").onclick = tSendPlain;
-$("p-text").onkeydown = (event) => { if (event.key === "Enter") tSendPlain(); };
-$("c-send-text").onclick = tSendText;
-$("c-send-image").onclick = tSendImage;
-$("c-text").onkeydown = (event) => {
-  if (event.key === "Enter" && !$("c-send-text").disabled) tSendText();
-};
-$("c-handshake").onclick = tHandshake;
 
 // --- 接收 ---
 
-function tRenderChat(box, message) {
-  const wrap = document.createElement("div"); wrap.className = "msg";
-  const who = document.createElement("div"); who.className = "who";
-  who.textContent = "来自 " + message.sender;
-  wrap.append(who);
+function renderMessage(box, message, me, withImages) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg " + (message.direction === "out" ? "out" : "in");
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+
+  const who = document.createElement("div");
+  who.className = "who";
+  who.textContent = message.direction === "out" ? "我" : message.sender;
+  bubble.append(who);
+
   if (message.chat_text) {
-    const p = document.createElement("p"); p.textContent = message.chat_text;
-    wrap.append(p);
+    const p = document.createElement("p");
+    p.textContent = message.chat_text;
+    bubble.append(p);
   }
-  for (let i = 0; i < message.chat_image_count; i++) {
-    const img = document.createElement("img");
-    img.className = "thumb"; img.alt = "图片";
-    img.src = "/terminal/media/" + t.who + "/" + message.packet_index + "?image=" + i;
-    wrap.append(img);
+  if (withImages && message.packet_index >= 0) {
+    for (let i = 0; i < message.chat_image_count; i++) {
+      const img = document.createElement("img");
+      img.className = "thumb"; img.alt = "图片";
+      img.src = "/terminal/media/" + me + "/" + message.packet_index + "?image=" + i;
+      bubble.append(img);
+    }
+  } else if (message.chat_image_count) {
+    const p = document.createElement("p");
+    p.className = "dim";
+    p.textContent = `［${message.chat_image_count} 张图片］`;
+    bubble.append(p);
   }
   for (const note of message.notes) {
-    const p = document.createElement("p"); p.className = "note"; p.textContent = note;
-    wrap.append(p);
+    const p = document.createElement("p");
+    p.className = "note"; p.textContent = note;
+    bubble.append(p);
   }
-  if (message.handshake) {
-    const p = document.createElement("p"); p.className = "note";
-    p.textContent = message.handshake;
-    wrap.append(p);
-  }
+  wrap.append(bubble);
   box.append(wrap);
 }
 
-async function tPoll() {
-  const data = await api("/terminal/inbox/" + t.who + "?after=" + t.nextInbox);
-  t.nextInbox = data.next;
+function clearPlaceholder(box) {
+  const dim = box.querySelector("p.dim");
+  if (dim && box.children.length === 1) box.innerHTML = "";
+}
+
+async function poll(me) {
+  const c = clients[me];
+  const data = await api("/terminal/inbox/" + me + "?after=" + c.next);
+  c.next = data.next;
+  const plain = el(me, "plain"), covert = el(me, "covert");
   if (data.messages.length) {
-    const chat = $("p-chat"), covert = $("c-chat");
-    if (chat.querySelector("p.dim")) chat.innerHTML = "";
-    if (covert.querySelector("p.dim")) covert.innerHTML = "";
+    clearPlaceholder(plain);
+    clearPlaceholder(covert);
     for (const message of data.messages) {
-      tRenderChat(chat, message);
+      // 明文窗：所有宿主内容（自己发的 + 对方发的）+ 握手系统提示。
+      if (message.handshake) {
+        const sys = document.createElement("div");
+        sys.className = "sys"; sys.textContent = message.handshake;
+        covert.append(sys);
+      }
+      // 本地发起握手时，发送记录本身不带 handshake 字段（那是收到的包），
+      // 所以用 mode 判一次，保证"我发起的"这边也留下协商完成的痕迹。
+      if (message.direction === "out" && message.mode === "handshake") {
+        handshakeNotice(me);
+      }
+      renderMessage(plain, message, me, true);
+      // 密文窗：解出来的密文。自己发的密文也显示（自己知道发了什么）。
       for (const secret of message.covert) {
-        const wrap = document.createElement("div"); wrap.className = "msg";
-        const who = document.createElement("div"); who.className = "who";
-        who.textContent = "来自 " + message.sender;
-        const p = document.createElement("p"); p.className = "secret";
-        p.textContent = secret;
-        wrap.append(who, p);
+        const wrap = document.createElement("div");
+        wrap.className = "msg " + (message.direction === "out" ? "out" : "in");
+        const bubble = document.createElement("div");
+        bubble.className = "bubble";
+        const who = document.createElement("div");
+        who.className = "who";
+        who.textContent = message.direction === "out" ? "我" : message.sender;
+        const p = document.createElement("p");
+        p.className = "secret"; p.textContent = secret;
+        bubble.append(who, p);
+        wrap.append(bubble);
         covert.append(wrap);
       }
+      // 被动建起会话的那一侧：握手包到达即为"协商完成"。
+      if (message.direction === "in" && message.handshake) handshakeNotice(me);
     }
-    chat.scrollTop = chat.scrollHeight;
+    plain.scrollTop = plain.scrollHeight;
     covert.scrollTop = covert.scrollHeight;
   }
-  // 握手可能在接收端被动完成，所以每轮都刷新会话状态。
-  await tState();
+  // 握手可能被动完成（对方发起），所以每轮都刷新状态。
+  await refreshState(me);
 }
+
+// --- 绑定 ---
 
 let terminalBooted = false;
 function bootTerminal() {
   if (terminalBooted) return;
   terminalBooted = true;
-  tSwitch("alice");
-  setInterval(() => { if (!$("tab-terminal").hidden) tPoll().catch(() => {}); }, 1500);
+
+  for (const me of SIDES) {
+    el(me, "plain-send").onclick = () => sendPlain(me);
+    el(me, "plain-text").onkeydown = (e) => { if (e.key === "Enter") sendPlain(me); };
+    // 先把 FileList 拷成数组再清空 input：FileList 是活引用，
+    // 异步 readAsDataURL 还没跑完就被清空的话，文件就丢了。
+    el(me, "plain-files").onchange = (e) => {
+      const files = [...e.target.files];
+      e.target.value = "";
+      addAttachments(me, files);
+    };
+    el(me, "files").onchange = (e) => {
+      const files = [...e.target.files];
+      e.target.value = "";
+      addFiles(me, files);
+    };
+    el(me, "queue-clear").onclick = () => { clients[me].queue = []; renderQueue(me); };
+    el(me, "sent-clear").onclick = () => { clients[me].sent = []; renderSent(me); };
+    el(me, "send-text").onclick = () => sendCovertText(me);
+    el(me, "send-image").onclick = () => sendCovertImage(me);
+    el(me, "covert-text").onkeydown = (e) => {
+      if (e.key === "Enter" && !el(me, "send-text").disabled) sendCovertText(me);
+    };
+    el(me, "handshake").onclick = () => handshake(me);
+    renderQueue(me);
+    renderSent(me);
+  }
+
+  const tick = () => {
+    if ($("tab-terminal").hidden) return;
+    Promise.all(SIDES.map(me => poll(me).catch(() => {})));
+  };
+  Promise.all(SIDES.map(me => refreshState(me).catch(() => {}))).then(tick);
+  setInterval(tick, 1500);
 }
 
 boot();

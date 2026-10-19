@@ -196,6 +196,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         client = Cdp(_ws_url(debug_port))
         try:
+            # 页面里的任何 JS 异常都记下来：前端的失败往往只表现为"没反应"，
+            # 没有这条通道就只能猜。
+            client.call("Runtime.enable")
+            client.eval("window.__errs = [];"
+                        "window.addEventListener('error', e => window.__errs.push("
+                        "String(e.message) + ' @' + (e.filename || '') + ':' + e.lineno));"
+                        "window.addEventListener('unhandledrejection', e => "
+                        "window.__errs.push('reject: ' + String(e.reason)));")
             print("浏览器冒烟：")
             check(client.wait_for("!!document.querySelector('#channel option')"),
                   "页面加载并填充了信道下拉框", failures)
@@ -271,100 +279,124 @@ def main(argv: list[str] | None = None) -> int:
             check("DCT" in detail or "隐写" in detail,
                   "信道详情页有内容", failures)
 
-            # --- 终端页：左明文 / 右密文两窗口 + 火车式图片队列 ---
+            # --- 终端页：两个客户端 × 双窗 + 中间网络连线 ---
             client.eval("document.querySelector('[data-tab=terminal]').click()")
             check(client.eval("!document.querySelector('#tab-terminal').hidden"),
                   "终端页签可切换", failures)
-            check(client.eval(
-                "document.querySelector('#p-chat') !== null && "
-                "document.querySelector('#c-chat') !== null"),
-                "明文窗与密文窗都存在", failures)
-            check(not client.eval("document.querySelector('#p-text').disabled"),
-                  "明文输入框随时可用", failures)
-            check(client.eval("document.querySelector('#c-text').disabled"),
-                  "未握手时密文输入框不可用", failures)
-            check(client.eval("document.querySelector('#c-send-image').disabled"),
-                  "队列为空时图片混淆按钮禁用", failures)
+            for me in ("a", "b"):
+                check(client.eval(f"document.querySelector('#{me}-plain') !== null && "
+                                  f"document.querySelector('#{me}-covert') !== null"),
+                      f"{me} 侧明文窗与密文窗都存在", failures)
+                check(not client.eval(f"document.querySelector('#{me}-plain-text').disabled"),
+                      f"{me} 明文输入框随时可用", failures)
+                check(client.eval(f"document.querySelector('#{me}-covert-text').disabled"),
+                      f"{me} 未握手时密文输入框不可用", failures)
+            check(client.eval("document.querySelector('#wire') !== null"),
+                  "两客户端之间有网络连线", failures)
 
-            # 向队列加两张图（不经真实文件选择框），确认火车序列生成。
-            for name in ("a.png", "b.png"):
+            def queue_push(me, name):
                 client.eval(f"""(() => {{
                     const bin = atob('{cover_b64}');
                     const bytes = new Uint8Array(bin.length);
                     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
                     const file = new File([bytes], '{name}', {{type: 'image/png'}});
-                    const input = document.querySelector('#c-files');
+                    const input = document.querySelector('#{me}-files');
                     const dt = new DataTransfer(); dt.items.add(file);
                     input.files = dt.files;
                     input.dispatchEvent(new Event('change'));
                 }})()""")
                 time.sleep(0.4)
-            count = client.eval("document.querySelectorAll('#t-queue .qitem').length")
-            check(count == 2, f"队列排入两张图（实际 {count} 张）", failures)
-            check(client.eval("document.querySelector('#q-count').textContent") == "2",
-                  "队列计数已更新", failures)
-            check(not client.eval("document.querySelector('#c-send-image').disabled"),
-                  "队列非空后图片混淆按钮仍待会话（不应解锁）", failures) \
-                if False else None
-            check(client.eval("document.querySelector('#c-send-image').disabled"),
-                  "未握手时图片混淆按钮仍禁用", failures)
 
-            # 左侧明文发送：不消耗队列，队列仍为 2。
+            # 两侧各自加图：队列必须互不影响。
+            queue_push("a", "a1.png")
+            queue_push("a", "a2.png")
+            queue_push("b", "b1.png")
+            check(client.eval("document.querySelectorAll('#a-queue .qitem').length") == 2,
+                  "alice 队列有 2 张", failures)
+            check(client.eval("document.querySelectorAll('#b-queue .qitem').length") == 1,
+                  "bob 队列有 1 张（互不影响）", failures)
+
+            # 明文附件发送前应有预览。
+            client.eval(f"""(() => {{
+                const bin = atob('{cover_b64}');
+                const bytes = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                const file = new File([bytes], 'attach.png', {{type: 'image/png'}});
+                const input = document.querySelector('#a-plain-files');
+                const dt = new DataTransfer(); dt.items.add(file);
+                input.files = dt.files;
+                input.dispatchEvent(new Event('change'));
+            }})()""")
+            time.sleep(0.5)
+            check(client.eval("document.querySelectorAll('#a-plain-preview .thumb2').length") == 1,
+                  "明文附件有预览缩略图", failures)
+
+            # 明文发送：不消耗图片队列，两侧窗口都应显示这句话。
             client.eval("""(() => {
-                document.querySelector('#p-text').value = '普通消息';
-                document.querySelector('#p-send').click();
+                document.querySelector('#a-plain-text').value = '普通消息';
+                document.querySelector('#a-plain-send').click();
             })()""")
-            time.sleep(1.5)
-            check(client.eval("document.querySelectorAll('#t-queue .qitem').length") == 2,
-                  "明文发送不消耗图片队列", failures)
-            check(client.eval("document.querySelector('#p-chat').textContent.length") > 0,
-                  "明文聊天窗有内容", failures)
-
-            # 握手：从队首抽走一张 → 队列 2→1，已发送 0→1，会话建立。
-            client.eval("document.querySelector('#c-handshake').click()")
-            time.sleep(3.5)
-            check(client.eval("document.querySelectorAll('#t-queue .qitem').length") == 1,
-                  "握手从队首取走了一张图", failures)
-            check(client.eval("document.querySelectorAll('#t-sent .qitem').length") == 1,
-                  "握手的图归档到已发送", failures)
-            check(not client.eval("document.querySelector('#c-text').disabled"),
-                  "握手后密文输入框解锁", failures)
-            check(not client.eval("document.querySelector('#c-send-text').disabled"),
-                  "握手后文本混淆按钮解锁", failures)
-            check(not client.eval("document.querySelector('#c-send-image').disabled"),
-                  "握手后且队列非空，图片混淆按钮解锁", failures)
-
-            # 文本混淆发送：不消耗图片，队列仍为 1。
-            client.eval("""(() => {
-                document.querySelector('#c-text').value = '文字机密';
-                document.querySelector('#c-send-text').click();
-            })()""")
-            time.sleep(3.0)
-            check(client.eval("document.querySelectorAll('#t-queue .qitem').length") == 1,
-                  "文本混淆不消耗图片", failures)
-
-            # 图片混淆发送：消耗掉最后一张，队列清空 → 按钮重新禁用。
-            client.eval("""(() => {
-                document.querySelector('#c-text').value = '图片机密';
-                document.querySelector('#c-send-image').click();
-            })()""")
-            time.sleep(3.5)
-            check(client.eval("document.querySelectorAll('#t-queue .qitem').length") == 0,
-                  "图片混淆消耗了队列里的图", failures)
-            check(client.eval("document.querySelector('#c-send-image').disabled"),
-                  "队列空后图片混淆按钮重新禁用", failures)
-            check(client.eval("document.querySelector('#q-status').textContent")
-                  .find("不可用") >= 0,
-                  "队列空时明确提示隐写链路不可用", failures)
-            # 收件箱只显示收到的消息；切到 bob 才能看到 alice 发来的密文。
-            client.eval("document.querySelector('#t-who-bob').click()")
             time.sleep(2.0)
-            check(client.eval("document.querySelector('#c-chat').textContent").find("机密") >= 0,
-                  "对端密文窗收到了密文", failures)
-            check(client.eval("document.querySelector('#p-chat').textContent").find("普通消息") >= 0,
-                  "对端明文窗收到了普通消息", failures)
+            check(client.eval("document.querySelectorAll('#a-queue .qitem').length") == 2,
+                  "明文发送不消耗图片队列", failures)
+            print("  JS 错误：", client.eval("JSON.stringify(window.__errs || [])"))
+            check(client.eval("document.querySelector('#a-plain').textContent")
+                  .find("普通消息") >= 0, "发送方明文窗看到自己发的消息", failures)
+            check(client.eval("document.querySelector('#b-plain').textContent")
+                  .find("普通消息") >= 0, "接收方明文窗看到对方发的消息", failures)
+
+            # alice 握手：从她的队首取一张；bob 的队列不受影响。
+            client.eval("document.querySelector('#a-handshake').click()")
+            time.sleep(4.0)
+            check(client.eval("document.querySelectorAll('#a-queue .qitem').length") == 1,
+                  "握手从 alice 队首取走一张", failures)
+            check(client.eval("document.querySelectorAll('#b-queue .qitem').length") == 1,
+                  "握手不动 bob 的队列", failures)
+            check(not client.eval("document.querySelector('#a-covert-text').disabled"),
+                  "alice 握手后密文输入框解锁", failures)
+            check(not client.eval("document.querySelector('#b-covert-text').disabled"),
+                  "bob 侧也被动解锁", failures)
+            check(client.eval("document.querySelector('#a-covert').textContent")
+                  .find("密钥协商") >= 0, "alice 密文窗显示协商完成提示", failures)
+            check(client.eval("document.querySelector('#b-covert').textContent")
+                  .find("密钥协商") >= 0, "bob 密文窗显示协商完成提示", failures)
+
+            # 文本混淆：不耗图，两侧密文窗都看得到。
+            client.eval("""(() => {
+                document.querySelector('#a-covert-text').value = '文字机密';
+                document.querySelector('#a-send-text').click();
+            })()""")
+            time.sleep(3.5)
+            check(client.eval("document.querySelectorAll('#a-queue .qitem').length") == 1,
+                  "文本混淆不消耗图片", failures)
+            check(client.eval("document.querySelector('#a-covert').textContent")
+                  .find("文字机密") >= 0, "发送方密文窗看到自己发的密文", failures)
+            check(client.eval("document.querySelector('#b-covert').textContent")
+                  .find("文字机密") >= 0, "接收方密文窗收到密文", failures)
+
+            # 图片混淆：消耗 alice 队列最后一张，队列空后按钮重新禁用。
+            client.eval("""(() => {
+                document.querySelector('#a-covert-text').value = '图片机密';
+                document.querySelector('#a-send-image').click();
+            })()""")
+            time.sleep(4.0)
+            check(client.eval("document.querySelectorAll('#a-queue .qitem').length") == 0,
+                  "图片混淆消耗了 alice 队列的图", failures)
+            check(client.eval("document.querySelector('#a-send-image').disabled"),
+                  "队列空后图片混淆按钮重新禁用", failures)
+            check(client.eval("document.querySelector('#a-q-status').textContent")
+                  .find("不可用") >= 0, "队列空时明确提示隐写不可用", failures)
+            check(client.eval("document.querySelector('#b-covert').textContent")
+                  .find("图片机密") >= 0, "接收方收到图片密文", failures)
+            check(client.eval("document.querySelectorAll('#a-sent .qitem').length") == 2,
+                  "alice 已发送栏归档 2 张（握手 + 密文）", failures)
 
             if args.screenshot:
+                # 大屏用户的实际窗口很宽，截图前把视口拉到终端页需要的尺寸。
+                client.call("Emulation.setDeviceMetricsOverride",
+                            width=1700, height=1400, deviceScaleFactor=1,
+                            mobile=False)
+                time.sleep(0.6)
                 shot = client.call("Page.captureScreenshot", format="png")
                 Path(args.screenshot).write_bytes(
                     base64.b64decode(shot["data"]))

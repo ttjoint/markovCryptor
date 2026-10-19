@@ -75,6 +75,9 @@ class TerminalHub:
         self.raw_history: dict[str, list[tuple[str, bytes]]] = {
             name: [] for name in self.terminals
         }
+        #: 每个终端**看到**的完整对话（自己发的 + 对方发的），一条时间线。
+        #: 两端各自一份，顺序按本地时钟推进——真实的两个客户端也是各记各的。
+        self.transcript: dict[str, list[dict]] = {name: [] for name in self.terminals}
         for name, terminal in self.terminals.items():
             terminal.on_packet = (
                 lambda sender, packet, n=name: self.raw_history[n].append((sender, packet))
@@ -84,10 +87,50 @@ class TerminalHub:
     def _collector(self, name: str):
         def sink(inbound: Inbound) -> None:
             bucket = self.history[name]
+            index = len(self.raw_history[name]) - 1                 if self.raw_history[name] else -1
             bucket.append(inbound)
             if len(bucket) > HISTORY_LIMIT:
                 del bucket[: len(bucket) - HISTORY_LIMIT]
+            self._record(name, {
+                "direction": "in",
+                "sender": inbound.sender,
+                "chat_text": inbound.chat_text,
+                "chat_image_count": len(inbound.chat_images),
+                "covert": list(inbound.covert),
+                "notes": list(inbound.notes),
+                "handshake": inbound.handshake,
+                "packet_index": index,
+            })
         return sink
+
+    def _record(self, name: str, entry: dict) -> None:
+        bucket = self.transcript[name]
+        bucket.append(entry)
+        if len(bucket) > HISTORY_LIMIT:
+            del bucket[: len(bucket) - HISTORY_LIMIT]
+
+    def note_outgoing(self, name: str, *, mode: str, text: str | None,
+                      image_count: int, covert: str | None = None) -> None:
+        """记一条"我发出的"到本地对话线。
+
+        发送动作本身不产生 ``Inbound``（那是收到的包），但聊天软件必须显示
+        自己发的消息。这里只在本地记一笔，不进网络——两端各记各的，
+        正好对应"两个隔绝的客户端"这个设定。
+
+        ``covert`` 是刚发出去的密文原文。发送方知道自己写了什么，所以
+        密文窗里也该看见它；对方是靠解密才知道的，两条路径互不相干。
+        """
+        self._record(name, {
+            "direction": "out",
+            "sender": name,
+            "mode": mode,
+            "chat_text": text,
+            "chat_image_count": image_count,
+            "covert": [covert] if covert else [],
+            "notes": [],
+            "handshake": None,
+            "packet_index": -1,
+        })
 
     @property
     def text_channel_ready(self) -> bool:
@@ -107,6 +150,7 @@ class TerminalHub:
             terminal.inbox.clear()
             self.history[name].clear()
             self.raw_history[name].clear()
+            self.transcript[name].clear()
         self.network.history.clear()
 
 
@@ -154,21 +198,17 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
 
     @app.get("/terminal/inbox/{name}")
     def inbox(name: str, after: int = 0) -> JSONResponse:
+        """本端看到的完整双窗对话（自己发的 + 对方发的），从 ``after`` 起。"""
         terminal = _terminal(hub, name)
-        items = hub.history[name][after:]
-        # history 与 raw_history 同步追加（collector 和 on_packet 都在
-        # deliver 的调用链上），所以下标一一对应；media 端点靠它找字节。
-        messages = []
-        for offset, item in enumerate(items):
-            entry = _inbound_dict(item)
-            entry["packet_index"] = after + offset
-            messages.append(entry)
+        items = hub.transcript[name][after:]
         return JSONResponse({
             "ok": True,
             "next": after + len(items),
             "state": terminal.state.value,
             "state_label": terminal.state.label,
-            "messages": messages,
+            "established": terminal.established,
+            "peer": terminal.peer_id,
+            "messages": items,
         })
 
     @app.post("/terminal/{name}/send")
@@ -181,15 +221,21 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
         # The images are exactly what the user selected, in the order they
         # selected them. Nothing here reorders, substitutes or invents a cover:
         # a covert or handshake send without pictures is refused instead.
+        covert = None
         if mode == "covert-image":
             terminal.send_covert_in_images(peer, text, tuple(raws))
+            covert = text
         elif mode == "covert-text":
             # 文本混淆不消耗图片：密文藏进生成的中文文本。
             terminal.send_covert_text(peer, text)
+            covert = text
         elif mode == "handshake":
             terminal.send_handshake(peer, tuple(raws))
         else:
             terminal.send_packet(peer, Packet(text=text or None, images=tuple(raws)))
+        # 本地对话线记一笔"我发的"：聊天软件两边都要显示自己说过的话。
+        hub.note_outgoing(name, mode=mode, text=text or None,
+                          image_count=len(raws), covert=covert)
         delivered = hub.pump()
         METRICS.incr("terminal_sent", mode=mode, sender=name)
         return JSONResponse({

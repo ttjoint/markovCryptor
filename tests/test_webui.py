@@ -182,48 +182,57 @@ class TerminalContractTest(unittest.TestCase):
             self.assertIn(expected, paths)
 
     def test_page_terminal_ids_all_exist(self):
-        """Every element id the JS touches must exist in the HTML.
-
-        Covers the whole terminal tab, plaintext pane included: a renamed id
-        leaves a box dead with no error anywhere.
-        """
+        """Every element id the JS touches must exist in the HTML."""
         used = set(re.findall(r'\$\("([a-z][a-z0-9-]*)"\)', self.html))
-        # 只校验终端相关的前缀，其它页签有自己的用例。
         used = {name for name in used
-                if name.startswith(("t-", "p-", "c-", "q-", "s-"))}
+                if name.startswith(("a-", "b-", "wire"))}
         self.assertTrue(used, "终端 JS 没有找到任何元素引用，可能被重写")
+        # JS 里也会拼出 ``me + "-queue"`` 这类 id，补进来一起校验。
+        for me in ("alice", "bob"):
+            for suffix in ("plain", "covert", "plain-text", "plain-send",
+                           "plain-files", "plain-preview", "covert-text",
+                           "send-text", "send-image", "handshake",
+                           "handshake-hint", "queue", "files", "queue-clear",
+                           "sent", "sent-clear", "state",
+                           "plain-peer", "covert-peer", "q-count", "q-status",
+                           "s-count"):
+                used.add(me[0] + "-" + suffix)
         defined = set(re.findall(r'id="([a-z][a-z0-9-]*)"', self.html))
         missing = used - defined
         self.assertEqual(missing, set(), f"JS 引用了不存在的元素 id：{sorted(missing)}")
 
-    def test_two_panes_and_a_train_queue(self):
-        """Layout contract: one plaintext pane, one covert pane, one picture train."""
+    def test_two_clients_each_with_two_windows(self):
+        """两侧各有明文窗与密文窗，一共四个窗，无需切换身份。"""
         html = self.html
-        # 左明文 / 右密文两窗口。
-        self.assertIn('id="p-chat"', html, "缺少明文聊天窗口")
-        self.assertIn('id="c-chat"', html, "缺少密文聊天窗口")
-        # 明文侧随时可用：输入框不带 disabled。
-        plain_input = re.search(r'<input[^>]*id="p-text"[^>]*>', html)
-        self.assertIsNotNone(plain_input)
-        self.assertNotIn("disabled", plain_input.group(0),
-                         "明文输入框不该被禁用")
-        # 密文侧未握手不可输入 —— 初始就带 disabled，由 JS 解锁。
-        covert_input = re.search(r'<input[^>]*id="c-text"[^>]*>', html)
-        self.assertIsNotNone(covert_input)
-        self.assertIn("disabled", covert_input.group(0),
-                      "密文输入框初始必须禁用")
-        # 两种密文发送方式各一个按钮：文本混淆不耗图，图片混淆耗图。
-        self.assertIn('id="c-send-text"', html)
-        self.assertIn('id="c-send-image"', html)
-        # 火车序列：待发送与已发送两栏。
-        self.assertIn("待发送图片", html)
-        self.assertIn("已发送", html)
-        self.assertIn('id="t-queue"', html)
-        self.assertIn('id="t-sent"', html)
-        # 队列项：删除按钮 + 队首抽取 + 归档到已发送。
-        self.assertIn("从队列移出", html, "队列项缺少移出按钮")
-        self.assertIn("function tConsume", html, "缺少“从队首抽 N 张”的逻辑")
-        self.assertIn("function tRenderSent", html, "缺少已发送渲染")
+        for me in ("a", "b"):
+            self.assertIn(f'id="{me}-plain"', html, f"{me} 缺少明文窗")
+            self.assertIn(f'id="{me}-covert"', html, f"{me} 缺少密文窗")
+            # 明文侧随时可用：输入框不带 disabled。
+            match = re.search(rf'<input[^>]*id="{me}-plain-text"[^>]*>', html)
+            self.assertIsNotNone(match)
+            self.assertNotIn("disabled", match.group(0), "明文输入框不该被禁用")
+            # 密文侧未握手不可输入。
+            match = re.search(rf'<input[^>]*id="{me}-covert-text"[^>]*>', html)
+            self.assertIsNotNone(match)
+            self.assertIn("disabled", match.group(0), "密文输入框初始必须禁用")
+            # 两种密文发送方式各一个按钮。
+            self.assertIn(f'id="{me}-send-text"', html)
+            self.assertIn(f'id="{me}-send-image"', html)
+            # 每个客户端自己的图片队列。
+            self.assertIn(f'id="{me}-queue"', html)
+            self.assertIn(f'id="{me}-sent"', html)
+
+    def test_network_wire_between_clients(self):
+        """两个客户端之间有一条网络连线，收发时会闪。"""
+        self.assertIn('id="wire"', self.html)
+        self.assertIn("function flashWire", self.html)
+
+    def test_queue_is_per_client(self):
+        """图片队列各自独立：抽走 alice 的图不影响 bob 的。"""
+        html = self.html
+        self.assertIn("const clients = {", html)
+        self.assertIn("function consume(me, count)", html)
+        self.assertIn("function renderSent(me)", html)
 
     def test_terminal_flow_end_to_end(self):
         """全流程：明文 → 握手 → 图片混淆 → 文本混淆，两个窗口各收各的。"""
