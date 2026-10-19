@@ -45,6 +45,11 @@ class Kind(str, Enum):
     HANDSHAKE = "H"
     BODY_IMAGE = "B"
     BODY_TEXT = "T"
+    #: One slice of a ``BODY_IMAGE`` body that was cut across several pictures.
+    #: Carries ``index(1) | count(1) | bytes`` so each picture can say where it
+    #: sits in the sequence; the receiver joins them by index and only then
+    #: authenticates, because the AEAD tag covers the reassembled whole.
+    BODY_SLICE = "S"
 
     @classmethod
     def of(cls, raw: bytes | str) -> "Kind":
@@ -111,8 +116,8 @@ def _aad(kind: Kind) -> bytes:
 
 def seal_body(kind: Kind, key: bytes, plaintext: bytes) -> bytes:
     """Encrypt ``plaintext`` into a body envelope for ``kind``."""
-    if kind is Kind.HANDSHAKE:
-        raise InvalidInput("握手报文不含密文，请用 build_handshake")
+    if kind in (Kind.HANDSHAKE, Kind.BODY_SLICE):
+        raise InvalidInput(f"{kind.name} 不是密文类型；切片请用 build_slice")
     nonce, ciphertext = crypto.seal(key, plaintext, _aad(kind))
     return MAGIC + kind.value.encode() + nonce + ciphertext
 
@@ -125,12 +130,42 @@ def open_body(payload: bytes, kind: Kind, key: bytes) -> bytes:
     tag fails. The caller *must* treat ``BadKey`` as "no hidden message here"
     rather than surfacing it -- see ``docs/TERMINAL.md`` §5.
     """
-    if kind is Kind.HANDSHAKE:
-        raise InvalidInput("握手报文不含密文，请用 parse_handshake")
+    if kind in (Kind.HANDSHAKE, Kind.BODY_SLICE):
+        raise InvalidInput(f"{kind.name} 不是密文类型；切片请用 parse_slice")
     body = _body(payload, kind)
     if len(body) < NONCE_BYTES:
         raise NoHiddenFrame(f"正文报文过短：{len(body)} 字节，连 nonce 都放不下")
     return crypto.open_(key, body[:NONCE_BYTES], body[NONCE_BYTES:], _aad(kind))
+
+
+# ------------------------------------------------------------------- slices
+#
+# A body too big for one picture is cut into consecutive slices, one per
+# picture. Each slice travels in its own PBX1 envelope so every picture on the
+# wire contains a *valid* envelope -- otherwise a slice would look like a
+# picture with no frame in it, which is the one thing an observer can pick out.
+
+SLICE_HEADER_BYTES = 2      # index(1) | count(1)
+
+
+def build_slice(index: int, count: int, chunk: bytes) -> bytes:
+    """Wrap one piece of a split body."""
+    if not 0 <= index < count <= 255:
+        raise InvalidInput(f"分片序号越界：{index}/{count}")
+    if not chunk:
+        raise InvalidInput("分片不能为空：没有载荷的图片会被一眼挑出")
+    return MAGIC + Kind.BODY_SLICE.value.encode() + bytes((index, count)) + chunk
+
+
+def parse_slice(payload: bytes) -> tuple[int, int, bytes]:
+    """Return ``(index, count, chunk)``. Raises if it is not a slice envelope."""
+    body = _body(payload, Kind.BODY_SLICE)
+    if len(body) < SLICE_HEADER_BYTES:
+        raise NoHiddenFrame(f"分片报文过短：{len(body)} 字节，装不下序号")
+    index, count = body[0], body[1]
+    if index >= count or count == 0:
+        raise NoHiddenFrame(f"分片序号非法：{index}/{count}")
+    return index, count, body[SLICE_HEADER_BYTES:]
 
 
 # -------------------------------------------------------------------- helpers
@@ -178,8 +213,10 @@ def unwrap(frame_payload: bytes) -> bytes:
 
 __all__ = [
     "MAGIC", "HEADER_BYTES", "PUBLIC_KEY_BYTES", "NONCE_BYTES",
+    "SLICE_HEADER_BYTES",
     "Kind", "Mode",
     "build_handshake", "parse_handshake",
     "seal_body", "open_body", "peek_kind",
+    "build_slice", "parse_slice",
     "wrap", "unwrap",
 ]

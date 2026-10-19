@@ -40,13 +40,14 @@ from ..core.errors import (
     UnsupportedCarrier,
 )
 from ..observability import event
-from .covers import CoverLibrary
 from .protocol import (
     HEADER_BYTES,
     Kind,
     Mode,
     build_handshake,
+    build_slice,
     parse_handshake,
+    parse_slice,
     peek_kind,
     wrap,
 )
@@ -98,6 +99,11 @@ class _Inspected:
     covert: str | None = None
     note: str | None = None
     handshake: str | None = None
+    #: Set when this carrier holds one slice of a split body: ``(index, count)``.
+    #: The bytes themselves are in ``slice_bytes``; the pair belongs together so a
+    #: misplaced slice can never be joined as if it were in position.
+    piece: tuple[int, int] | None = None
+    slice_bytes: bytes = b""
     #: True when ``note`` merely says "nothing here" -- routine, log-only.
     unremarkable: bool = False
 
@@ -106,8 +112,7 @@ class Terminal:
     """A named endpoint. Owns one session and one outbox of pending handshakes."""
 
     def __init__(self, terminal_id: str, network: Network, *,
-                 psk: str = "pbx1", on_inbound: Callable[[Inbound], None] | None = None,
-                 covers: CoverLibrary | None = None):
+                 psk: str = "pbx1", on_inbound: Callable[[Inbound], None] | None = None):
         self.id = terminal_id
         self.network = network
         #: Pre-shared key for the *image stego layer* (the MKX1 key), not the
@@ -127,9 +132,6 @@ class Terminal:
         self.peer_id: str | None = None
         #: Optional text carrier (Chinese channel). See :meth:`use_text_channel`.
         self.text_channel = None
-        #: Where handshake-response covers come from. Every image we send must
-        #: be based on a real picture; see ``terminal/covers.py``.
-        self.covers = covers or CoverLibrary()
 
     # ------------------------------------------------------------------ config
 
@@ -170,16 +172,27 @@ class Terminal:
 
     def send_handshake(self, target: str, images: tuple[bytes, ...],
                        *, mode: Mode | None = None) -> None:
-        """Start (or answer) a handshake, hiding the key in the first image.
+        """Start (or answer) a handshake, hiding the key in the user's images.
 
         The requirement is explicit that a handshake message *must* carry at
         least one image, because that is the only carrier the exchange travels
         in. We therefore fail loudly -- naming the required capacity -- rather
-        than silently downgrading to a text carrier.
+        than silently downgrading to a text carrier or inventing a cover.
+
+        The key goes into the *first* image only. A handshake is a 38-byte
+        control message, so a multi-image handshake is refused rather than
+        padded: splitting it would mean writing padding into the other pictures
+        just to even out the sizes.
         """
         if not images:
             raise InvalidInput(
-                "密钥交换必须至少附带一张图片：X25519 公钥藏在图片里，文本载体装不下"
+                "密钥交换必须至少附带一张图片：X25519 公钥藏在图片里，文本载体装不下",
+                hints=("在待发送队列里至少勾选一张图片",),
+            )
+        if len(images) > 1:
+            raise InvalidInput(
+                f"密钥交换一次只用一张图片，收到 {len(images)} 张",
+                hints=("握手是 38 字节的控制报文，只勾选一张图片即可",),
             )
         if mode is Mode.RESPONSE:
             public, mode = self.session.answer()
@@ -187,10 +200,10 @@ class Terminal:
             public, mode = self.session.begin()
 
         envelope = build_handshake(public, mode)
-        stego, used = self._embed_into_first(envelope, images, what="密钥交换报文")
+        stego = self._embed_into_all((envelope,), images, what="密钥交换报文")
         self.peer_id = target
         event("terminal", "handshake_out", id=self.id, peer=target,
-              mode=mode.value, cover=used)
+              mode=mode.value)
         self.send_packet(target, Packet(images=stego))
 
     def send_covert_text(self, target: str, text: str) -> None:
@@ -204,10 +217,12 @@ class Terminal:
         """
         if not self.session.established:
             raise InvalidInput(
-                f"会话{self.session.state.label}，不能发送密文；先点「密钥交换」"
+                f"会话{self.session.state.label}，不能发送密文",
+                hints=("先做密钥交换：从图片队列取一张图发起握手",),
             )
         if not text:
-            raise InvalidInput("密文内容为空")
+            raise InvalidInput("密文内容为空",
+                           hints=("在密文输入框里写下要隐藏的内容",))
         if self.text_channel is None:
             raise InvalidInput(
                 "文本隐写信道不可用：需要先训练并加载中文信道模型",
@@ -226,52 +241,89 @@ class Terminal:
     def send_covert_in_images(self, target: str, text: str,
                               images: tuple[bytes, ...],
                               *, chat_text: str | None = None) -> None:
-        """Encrypt ``text`` and hide it in every image of a normal message.
+        """Encrypt ``text`` and hide it in ``images``, one slice per image.
+
+        The payload is cut into ``len(images)`` consecutive pieces and picture
+        ``i`` carries piece ``i``, so the user's sequence is preserved and every
+        picture they chose is actually used. The peer reassembles by index.
+
+        A single picture gets a plain ``BODY_IMAGE`` envelope rather than a
+        one-of-one slice: a slice header would be two bytes of pure overhead on
+        the common case, and the receiver handles both.
 
         The *visible* text (``chat_text``) still goes out as plaintext: the user
         asked to keep the plaintext side unchanged. Only the images are stego.
         """
         if not self.session.established:
             raise InvalidInput(
-                f"会话{self.session.state.label}，不能发送密文；先点「密钥交换」"
+                f"会话{self.session.state.label}，不能发送密文",
+                hints=("先做密钥交换：从图片队列取一张图发起握手",),
             )
+        if not text:
+            raise InvalidInput("密文内容为空",
+                           hints=("在密文输入框里写下要隐藏的内容",))
         if not images:
-            raise InvalidInput("密文图片发送需要至少一张图片")
+            raise InvalidInput(
+                "图片混淆发送需要至少一张图片：密文只能藏在图片里，不会自动生成",
+                hints=("在待发送预览栏里准备图片", "或改用文本混淆发送（不消耗图片）"),
+            )
         envelope = self.session.seal(Kind.BODY_IMAGE, text.encode("utf-8"))
-        stego, used = self._embed_into_first(envelope, images, what="正文密文")
+        pieces = (envelope,) if len(images) == 1 else split_payload(envelope, len(images))
+        stego = self._embed_into_all(pieces, images, what="正文密文")
         event("terminal", "covert_out", id=self.id, peer=target,
-              cover=used, bytes=len(envelope))
+              images=len(stego), bytes=len(envelope))
         self.send_packet(target, Packet(text=chat_text, images=stego))
 
     # --------------------------------------------------------------- embedding
 
-    def _embed_into_first(self, envelope: bytes, images: tuple[bytes, ...],
-                          *, what: str) -> tuple[tuple[bytes, ...], str]:
-        """Hide ``envelope`` in the first image that can hold it.
+    def _embed_into_all(self, envelopes: tuple[bytes | None, ...],
+                        images: tuple[bytes, ...],
+                        *, what: str) -> tuple[bytes, ...]:
+        """Hide one envelope per image, in the order given.
 
-        Tries them in order and reports *why* the ones that failed did, so a user
-        who picked four small pictures is told what was wrong rather than "失败".
+        Three rules, all of them user-visible requirements:
+
+        1. **No substitution.** Picture ``i`` carries ``envelopes[i]`` or the
+           send fails. Never move an envelope to a roomier picture and let the
+           original ride along as filler -- the sequence is the user's.
+        2. **No leftover plaintext.** A picture with nothing hidden in it would
+           be the one thing an observer could separate out, so we never send
+           one. Callers pass ``None`` only for a picture that is *already*
+           stego (the automatic handshake response hands its own image back).
+        3. **No invention.** If there are no images we refuse. Fabricating a
+           cover would put a picture on the wire that the user never chose.
         """
+        if not images:
+            raise InvalidInput(
+                f"{what}需要至少一张图片：隐写必须藏在你上传的图里，不会自动生成",
+                hints=("在待发送队列里至少勾选一张图片",),
+            )
+        if len(envelopes) != len(images):
+            raise ValueError(
+                f"内部错误：{len(envelopes)} 个信封对 {len(images)} 张图"
+            )
+        stego: list[bytes] = []
         reasons: list[str] = []
-        for index, raw in enumerate(images):
+        for index, (envelope, raw) in enumerate(zip(envelopes, images)):
+            if envelope is None:
+                stego.append(raw)
+                continue
             try:
-                stego = self._embed_bytes(envelope, raw)
-            except CapacityExceeded as exc:
+                stego.append(self._embed_bytes(envelope, raw))
+            except (CapacityExceeded, UnsupportedCarrier, InvalidInput) as exc:
                 reasons.append(f"第 {index + 1} 张：{exc}")
-                continue
-            except (UnsupportedCarrier, InvalidInput) as exc:
-                reasons.append(f"第 {index + 1} 张：{exc}")
-                continue
-            rest = images[:index] + images[index + 1:]
-            return (stego,) + rest, f"#{index + 1}"
-        raise CapacityExceeded(
-            f"{what}装不进这 {len(images)} 张图片里",
-            reasons=tuple(reasons),
-            hints=(
-                f"先从图片序列里选一张能容纳 {len(envelope)} 字节的图",
-                "需要的容量随图面积增长：160×160 约 162 字节，256×256 约 441 字节",
-            ),
-        )
+        if reasons:
+            total = sum(len(e) for e in envelopes if e is not None)
+            raise CapacityExceeded(
+                f"{what}装不进这 {len(images)} 张图片里（共 {total} 字节，逐张分摊）",
+                reasons=tuple(reasons),
+                hints=(
+                    "每张图只装自己那一份；只要有一张装不下，整条消息就不发",
+                    "少勾几张图（分母变小）或多勾几张大图",
+                    "容量随图面积增长：160×160 约 162 字节，256×256 约 441 字节",
+                ),
+            )
+        return tuple(stego)
 
     def _embed_bytes(self, envelope: bytes, raw: bytes) -> bytes:
         payload = wrap(envelope)
@@ -304,6 +356,10 @@ class Terminal:
         notes: list[str] = []
         handshake: str | None = None
         shown: list[Image.Image] = []
+        #: 正文分片：同一包内的图片各自携带一段，收齐后按序号拼接。
+        #: 每片自带 (index, count)，所以丢哪一张、漏哪一张都能说清楚。
+        pieces: dict[int, bytes] = {}
+        want = 0
 
         for index, raw in enumerate(raws):
             try:
@@ -315,8 +371,11 @@ class Terminal:
                 continue
             if display is not None:
                 shown.append(display)
-            if result.covert:
+            if result.covert is not None:
                 covert.append(result.covert)
+            if result.piece is not None:
+                position, want = result.piece
+                pieces[position] = result.slice_bytes
             if result.note:
                 # "No hidden frame" is the normal case for an ordinary photo, so
                 # it goes to the log only. Notes are reserved for things the user
@@ -329,6 +388,22 @@ class Terminal:
                     notes.append(f"图片 {index + 1}：{result.note}")
             if result.handshake:
                 handshake = result.handshake
+
+        if pieces:
+            missing = [i for i in range(want) if i not in pieces]
+            if missing:
+                # 缺片不猜：拼出半截密文只会得到认证失败，不如直接说缺第几片。
+                notes.append(
+                    f"正文分片不齐：缺第 {', '.join(str(i + 1) for i in missing)} 片"
+                    f"（共应 {want} 片），已丢弃"
+                )
+                event("terminal", "covert_incomplete", level=logging.WARNING,
+                      id=self.id, missing=missing, want=want)
+            else:
+                joined = b"".join(pieces[i] for i in range(want))
+                message = self._decrypt(Kind.BODY_IMAGE, joined)
+                if message:
+                    covert.append(message)
 
         if text is not None:
             result = self._inspect_text(text)
@@ -381,16 +456,26 @@ class Terminal:
             return _Inspected(note=f"载荷不是 PBX1 信封——{exc}"), display
 
         if kind is Kind.HANDSHAKE:
-            return self._on_handshake(payload), display
+            return self._on_handshake(payload, raw), display
         if kind is Kind.BODY_TEXT:
             # A text body inside an image means the sender's carrier choice was
             # inconsistent. Not fatal, but worth saying rather than guessing.
             return _Inspected(note="信封类型与载体不符：文本正文出现在图片里"), display
+        if kind is Kind.BODY_SLICE:
+            index, count, chunk = parse_slice(payload)
+            return _Inspected(piece=(index, count), slice_bytes=chunk), display
+        # A body image holds the whole message in one picture; decrypt it now.
         return _Inspected(covert=self._decrypt(kind, payload)), display
 
     def _inspect_text(self, text: str) -> _Inspected:
-        """Text may only carry ``BODY_TEXT``. Everything else is not stego."""
-        envelope = _unhex_or_none(text)
+        """Text may only carry ``BODY_TEXT``. Everything else is not stego.
+
+        Two carriers can put an envelope in a text field: the Chinese channel
+        (prose that *is* the cover) and a hex dump. The Chinese channel is tried
+        first when it exists because it is the one this terminal sends with; a
+        text that decodes to neither is ordinary chat and stays quiet.
+        """
+        envelope = self._envelope_from_text(text)
         if envelope is None:
             return _Inspected(note="不是 PBX1 信封", unremarkable=True)
         try:
@@ -402,7 +487,19 @@ class Terminal:
         message = self._decrypt(kind, envelope)
         return _Inspected(covert=message) if message else _Inspected()
 
-    def _on_handshake(self, payload: bytes) -> _Inspected:
+    def _envelope_from_text(self, text: str) -> bytes | None:
+        """Pull a PBX1 envelope out of a text field, or None if there is none."""
+        if self.text_channel is not None:
+            try:
+                envelope = self.text_channel.extract_text(text)
+            except StegoError:
+                # 不是隐写、或不是这块模型的隐写：都只是普通文本。
+                envelope = b""
+            if envelope:
+                return envelope
+        return _unhex_or_none(text)
+
+    def _on_handshake(self, payload: bytes, raw: bytes) -> _Inspected:
         peer_public, mode = parse_handshake(payload)
         was = self.session.state
         completed = self.session.absorb(peer_public, mode)
@@ -412,19 +509,21 @@ class Terminal:
 
         if mode is Mode.REQUEST:
             # Requirement: a request must be answered automatically, with an
-            # image, without the user doing anything.
-            self._auto_respond(peer_public)
+            # image, without the user doing anything. Reusing ``raw`` is what
+            # keeps that promise without inventing a cover.
+            self._auto_respond(peer_public, raw)
             return _Inspected(handshake=summary + "，已自动回发")
         if completed:
             return _Inspected(handshake=summary + "，会话可用")
         return _Inspected(handshake=summary)
 
-    def _auto_respond(self, peer_public: bytes) -> None:
-        """Reply with our own key, hidden in an image we generate.
+    def _auto_respond(self, peer_public: bytes, raw: bytes) -> None:
+        """Reply with our own key, hidden in **the image the request arrived in**.
 
-        We have no cover from the peer to reuse, so we synthesise one. It has to
-        be big enough for the handshake envelope; 256x256 gives 441 bytes, well
-        over the ~60 needed, and keeps the response robust.
+        The response picture is therefore one the *peer* chose and already sent
+        us; we write over its frame. There is no picture invented on this side,
+        which is the requirement: every image leaving this terminal is either
+        selected by the user or already on the wire.
         """
         target = self.peer_id
         if target is None:
@@ -432,11 +531,14 @@ class Terminal:
             return
         public, mode = self.session.answer()
         envelope = build_handshake(public, mode)
-        # The response must ride in a real picture, same as any other image we
-        # send -- a noise cover would announce itself. cover_for() fails loudly
-        # if the library cannot hold the envelope, naming the shortfall.
-        cover = self.covers.cover_for(len(envelope))
-        stego = self._embed_bytes(envelope, cover)
+        try:
+            stego = self._embed_bytes(envelope, raw)
+        except StegoError as exc:
+            # The peer's own request picture could carry a 38-byte request but
+            # somehow not a response; do not substitute a cover, just say so.
+            event("terminal", "handshake_response_failed", level=logging.WARNING,
+                  id=self.id, peer=target, error=exc)
+            return
         event("terminal", "handshake_auto_response", id=self.id, peer=target)
         self.network.send(self.id, target, _encode_packet(Packet(images=(stego,))))
 
@@ -495,6 +597,41 @@ def _unhex_or_none(text: str) -> bytes | None:
     except ValueError:
         return None
     return raw if raw[:4] == b"PBX1" else None
+
+
+def split_payload(envelope: bytes, parts: int) -> tuple[bytes, ...]:
+    """Cut ``envelope`` into ``parts`` consecutive slices, each a PBX1 envelope.
+
+    Consecutive (not interleaved) because the receiver must be able to put them
+    back with nothing but their order, and because a picture that fails to
+    decode then costs a contiguous hole rather than shredding every byte.
+
+    Each slice gets its own :func:`build_slice` envelope carrying ``index`` and
+    ``count``, for two reasons: the receiver can tell a genuine mid-picture
+    slice from a picture with no frame in it, and a missing picture is detected
+    by index rather than by lucky-count. Slices must be non-empty --- an empty
+    slice would mean a picture with nothing hidden, the one thing an observer
+    can single out --- so ``parts`` is authoritative and too many parts is an
+    error rather than a silently skipped picture.
+    """
+    if parts <= 0:
+        raise InvalidInput(
+            "密文图片发送需要至少一张图片",
+            hints=("先在待发送队列里准备图片",),
+        )
+    if parts > len(envelope):
+        raise InvalidInput(
+            f"密文共 {len(envelope)} 字节，不够分给 {parts} 张图片",
+            hints=("少用几张图，或把密文写长一点",),
+        )
+    size, extra = divmod(len(envelope), parts)
+    slices: list[bytes] = []
+    start = 0
+    for index in range(parts):
+        end = start + size + (1 if index < extra else 0)
+        slices.append(build_slice(index, parts, envelope[start:end]))
+        start = end
+    return tuple(slices)
 
 
 def _encode_packet(packet: Packet) -> bytes:

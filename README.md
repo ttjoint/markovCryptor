@@ -201,7 +201,7 @@ python run_chat.py
 | `markovcryptor/cli.py` | 命令行入口（`python -m markovcryptor.cli`） |
 | `markovcryptor/engine.py` | 引擎：模型缓存 + 信道调度，CLI / Web / 批处理都建在它之上 |
 | `markovcryptor/web.py` | 本机 Web API（FastAPI，无鉴权，仅回环） |
-| `markovcryptor/webui/index.html` | 网页界面（单文件、零依赖、无构建） |
+| `markovcryptor/webui/index.html` | 网页界面（单文件、零依赖、无构建）；终端页为左右双窗：左明文、右密文 |
 | `markovcryptor/jobs.py` | 批处理作业：线程池、断点续跑、逐项结果 |
 | `markovcryptor/observability.py` | 结构化日志与进程内指标（`/metrics`） |
 
@@ -284,9 +284,9 @@ if feas.ok:
 python -m unittest discover -s tests
 ```
 
-共 197 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项、统一信道接口 20 项、
-引擎与缓存 14 项、批处理作业 20 项、CLI 端到端 16 项、Web API 24 项、Web UI 8 项、
-可观测性 20 项、插件契约 12 项。
+共 252 项：中文信道 25 项、图片信道 26 项、GIF 信道 13 项、统一信道接口 22 项、
+引擎与缓存 14 项、批处理作业 21 项、CLI 端到端 16 项、Web API 24 项、Web UI 17 项、
+终端协议 42 项、可观测性 20 项、插件契约 12 项。
 全部夹具随仓库分发，**不依赖 `data/`、`corpus/`、`models/`**，干净检出即可跑完，
 无跳过。若需重新生成夹具（例如某个测试要换形状）：
 

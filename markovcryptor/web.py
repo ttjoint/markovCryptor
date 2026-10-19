@@ -107,11 +107,19 @@ def create_app(config: ApiConfig | None = None, *, engine: Engine | None = None)
     app.state.jobs = {}
 
     # One terminal pair per process: the conversation feature is a demonstration
-    # of the protocol, not a multiuser chat server. Cover directory follows the
-    # model directory's lead -- user data stays out of version control.
-    from .web_terminal import TerminalHub, wire_terminal_routes
+    # of the protocol, not a multiuser chat server.
+    from .web_terminal import TerminalHub, TextChannelAdapter, wire_terminal_routes
 
-    app.state.terminal_hub = TerminalHub(cover_dir=settings.model_dir or None)
+    # Text covert sending rides the Chinese channel, which only exists once a
+    # model is loaded. Without one the hub simply gets no adapter and the UI
+    # greys that button out instead of failing at send time.
+    text_channel = None
+    try:
+        text_channel = TextChannelAdapter(app.state.engine.channel("chinese"))
+    except StegoError:
+        text_channel = None
+
+    app.state.terminal_hub = TerminalHub(text_channel=text_channel)
     wire_terminal_routes(app, app.state.terminal_hub,
                          max_upload_bytes=settings.max_upload_bytes)
 

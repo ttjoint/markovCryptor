@@ -24,14 +24,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from markovcryptor.terminal import Inbound, LoopbackNetwork, Packet, Terminal  # noqa: E402
-from markovcryptor.terminal.covers import CoverLibrary  # noqa: E402
 from PIL import Image  # noqa: E402
 import numpy as np  # noqa: E402
 
 
 def _demo_cover(size=256):
-    """Demo cover: a plausible gradient photo stand-in. Real deployments should
-    point the terminals' CoverLibrary at a photo directory instead."""
+    """Demo cover: a plausible gradient photo stand-in.
+
+    Only the *demo* invents a picture, and it hands it to the terminals as a
+    picture the user chose -- the library itself never fabricates one. Real
+    deployments point ``data/`` at a photo directory.
+    """
     yy, xx = np.mgrid[0:size, 0:size].astype("float64")
     base = np.empty((size, size, 3))
     base[:, :, 0] = 70 + 120 * (yy / size)
@@ -58,14 +61,9 @@ HELP = """\
 class Demo:
     def __init__(self) -> None:
         self.net = LoopbackNetwork()
-        # data/ 不入版本库：缺席时 CoverLibrary 自动退回内建替代图，
-        # demo 仍然能跑，只是底图没那么"像照片"。
-        data_dir = ROOT / "data"
-        covers = CoverLibrary(data_dir if data_dir.is_dir() else None)
-        print(f"底图：{covers.describe()}")
-        self.alice = Terminal("alice", self.net, covers=covers).attach()
-        self.bob = Terminal("bob", self.net, covers=covers).attach()
-        self.cover = covers.next_cover()
+        self.alice = Terminal("alice", self.net).attach()
+        self.bob = Terminal("bob", self.net).attach()
+        self.cover = _demo_cover()
         self.windows: dict[str, list[Inbound]] = {"alice": [], "bob": []}
         for name, terminal in (("alice", self.alice), ("bob", self.bob)):
             terminal.subscribe(self._collector(name))

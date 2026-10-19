@@ -40,6 +40,19 @@ def _run(coro):
     return anyio.run(_await)
 
 
+def _noise_png(size: int) -> bytes:
+    """A cover the image channel accepts: flat colour is rejected as too smooth."""
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    array = np.random.default_rng(11).integers(64, 192, (size, size, 3), dtype="uint8")
+    buffer = io.BytesIO()
+    Image.fromarray(array, "RGB").save(buffer, "PNG")
+    return buffer.getvalue()
+
+
 class AssetTest(unittest.TestCase):
     def test_index_exists_and_is_single_file(self):
         self.assertTrue(INDEX.exists(), "index.html 必须存在，否则首页 404")
@@ -169,41 +182,52 @@ class TerminalContractTest(unittest.TestCase):
             self.assertIn(expected, paths)
 
     def test_page_terminal_ids_all_exist(self):
-        """Every $("t-") target in the JS must exist as an id in the HTML."""
-        used = set(re.findall(r'\$\("(t-[a-z-]+)"\)', self.html))
+        """Every element id the JS touches must exist in the HTML.
+
+        Covers the whole terminal tab, plaintext pane included: a renamed id
+        leaves a box dead with no error anywhere.
+        """
+        used = set(re.findall(r'\$\("([a-z][a-z0-9-]*)"\)', self.html))
+        # 只校验终端相关的前缀，其它页签有自己的用例。
+        used = {name for name in used
+                if name.startswith(("t-", "p-", "c-", "q-", "s-"))}
         self.assertTrue(used, "终端 JS 没有找到任何元素引用，可能被重写")
-        defined = set(re.findall(r'id="(t-[a-z-]+)"', self.html))
+        defined = set(re.findall(r'id="([a-z][a-z0-9-]*)"', self.html))
         missing = used - defined
         self.assertEqual(missing, set(), f"JS 引用了不存在的元素 id：{sorted(missing)}")
 
-    def test_queue_has_checkbox_delete_and_sent_list(self):
-        """The queue rows are built in JS, so assert on the code that builds them."""
+    def test_two_panes_and_a_train_queue(self):
+        """Layout contract: one plaintext pane, one covert pane, one picture train."""
         html = self.html
-        self.assertIn("t-queue", html)
-        self.assertIn("t-sent", html)
-        self.assertIn("已发送", html, "缺少已发送列表")
-        # 预览项内部：勾选框 + 删除按钮。
-        self.assertIn('check.type = "checkbox"', html,
-                      "待发送预览项缺少勾选框")
-        self.assertIn("从队列删除", html, "待发送预览项缺少删除按钮")
-        self.assertIn("function tArchiveChecked", html,
-                      "缺少“发送后归档到已发送”的逻辑")
+        # 左明文 / 右密文两窗口。
+        self.assertIn('id="p-chat"', html, "缺少明文聊天窗口")
+        self.assertIn('id="c-chat"', html, "缺少密文聊天窗口")
+        # 明文侧随时可用：输入框不带 disabled。
+        plain_input = re.search(r'<input[^>]*id="p-text"[^>]*>', html)
+        self.assertIsNotNone(plain_input)
+        self.assertNotIn("disabled", plain_input.group(0),
+                         "明文输入框不该被禁用")
+        # 密文侧未握手不可输入 —— 初始就带 disabled，由 JS 解锁。
+        covert_input = re.search(r'<input[^>]*id="c-text"[^>]*>', html)
+        self.assertIsNotNone(covert_input)
+        self.assertIn("disabled", covert_input.group(0),
+                      "密文输入框初始必须禁用")
+        # 两种密文发送方式各一个按钮：文本混淆不耗图，图片混淆耗图。
+        self.assertIn('id="c-send-text"', html)
+        self.assertIn('id="c-send-image"', html)
+        # 火车序列：待发送与已发送两栏。
+        self.assertIn("待发送图片", html)
+        self.assertIn("已发送", html)
+        self.assertIn('id="t-queue"', html)
+        self.assertIn('id="t-sent"', html)
+        # 队列项：删除按钮 + 队首抽取 + 归档到已发送。
+        self.assertIn("从队列移出", html, "队列项缺少移出按钮")
+        self.assertIn("function tConsume", html, "缺少“从队首抽 N 张”的逻辑")
+        self.assertIn("function tRenderSent", html, "缺少已发送渲染")
 
     def test_terminal_flow_end_to_end(self):
-        """The full conversation: plain, handshake, covert, then read both windows."""
-        import io
-
-        from PIL import Image
-
-        buffer = io.BytesIO()
-        Image.new("RGB", (256, 256), (120, 130, 140)).save(buffer, "PNG")
-        # 纯色底图会被图片信道拒绝；用噪声。
-        import numpy as np
-
-        array = np.random.default_rng(3).integers(64, 192, (256, 256, 3), dtype="uint8")
-        buffer = io.BytesIO()
-        Image.fromarray(array, "RGB").save(buffer, "PNG")
-        png = buffer.getvalue()
+        """全流程：明文 → 握手 → 图片混淆 → 文本混淆，两个窗口各收各的。"""
+        png = _noise_png(256)
         files = [("files", ("c.png", png, "image/png"))]
 
         response = _run(self.client.post("/terminal/alice/send",
@@ -211,37 +235,62 @@ class TerminalContractTest(unittest.TestCase):
                                          files=files))
         self.assertEqual(response.status_code, 200)
 
+        # 握手也要图：从队列里拿一张。
         response = _run(self.client.post("/terminal/alice/send",
-                                         data={"mode": "handshake"}))
+                                         data={"mode": "handshake"}, files=files))
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["state_label"].startswith("已建立"))
 
         response = _run(self.client.post("/terminal/alice/send",
-                                         data={"text": "机密", "mode": "covert"},
+                                         data={"text": "机密", "mode": "covert-image"},
                                          files=files))
         self.assertEqual(response.status_code, 200)
 
+        response = _run(self.client.post("/terminal/alice/send",
+                                         data={"text": "文字机密", "mode": "covert-text"}))
+        self.assertEqual(response.status_code, 200)
+
         inbox = _run(self.client.get("/terminal/inbox/bob")).json()
-        chat = [m for m in inbox["messages"] if m["chat_text"]]
         covert = [s for m in inbox["messages"] for s in m["covert"]]
-        self.assertEqual(chat[-1]["chat_text"], "普通消息")
-        self.assertEqual(covert, ["机密"])
+        # 图片混淆的可见文本原样到达聊天窗。
+        chat = [m["chat_text"] for m in inbox["messages"] if m["chat_text"] == "普通消息"]
+        self.assertEqual(chat, ["普通消息"])
+        # 两路密文都进隐密窗，且互不混淆。
+        self.assertIn("机密", covert)
+        self.assertIn("文字机密", covert)
 
     def test_covert_requires_session(self):
         # bob 未握手就发密文 → 422，错误体带可操作建议。
-        import io
-        import numpy as np
-        from PIL import Image
-
-        array = np.random.default_rng(4).integers(64, 192, (256, 256, 3), dtype="uint8")
-        buffer = io.BytesIO()
-        Image.fromarray(array, "RGB").save(buffer, "PNG")
         response = _run(self.client.post("/terminal/bob/send",
-                                         data={"text": "x", "mode": "covert"},
-                                         files=[("files", ("c.png", buffer.getvalue(), "image/png"))]))
+                                         data={"text": "x", "mode": "covert-image"},
+                                         files=[("files", ("c.png", _noise_png(256),
+                                                           "image/png"))]))
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("hints", response.json())
+
+    def test_covert_text_without_session_is_refused_honestly(self):
+        """未握手时文本混淆也必须拒绝，且给出可操作建议。"""
+        response = _run(self.client.post("/terminal/bob/send",
+                                         data={"text": "x", "mode": "covert-text"}))
         self.assertEqual(response.status_code, 422)
         body = response.json()
-        self.assertIn("hints", body)
+        self.assertIn("会话", body["message"])
+        self.assertTrue(body["hints"])
+
+    def test_covert_image_without_files_is_refused(self):
+        """图片混淆不给图必须拒绝：绝不自动配图。"""
+        _run(self.client.post("/terminal/alice/send",
+                              data={"mode": "handshake"},
+                              files=[("files", ("c.png", _noise_png(200), "image/png"))]))
+        response = _run(self.client.post("/terminal/alice/send",
+                                         data={"text": "x", "mode": "covert-image"}))
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("hints", response.json())
+
+    def test_state_reports_text_channel_availability(self):
+        body = _run(self.client.get("/terminal/state")).json()
+        self.assertIn("text_channel_ready", body)
+        self.assertIsInstance(body["text_channel_ready"], bool)
 
     def test_media_serves_received_image(self):
         import io

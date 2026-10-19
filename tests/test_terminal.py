@@ -16,7 +16,6 @@ import fixtures  # noqa: F401  (path setup for shared fixtures)
 from markovcryptor import image_stego
 from markovcryptor.core.errors import BadKey, CapacityExceeded, InvalidInput, NoHiddenFrame
 from markovcryptor.terminal import LoopbackNetwork, Packet, Session, State, Terminal
-from markovcryptor.terminal.covers import CoverLibrary
 from markovcryptor.terminal.protocol import (
     Kind,
     Mode,
@@ -27,7 +26,7 @@ from markovcryptor.terminal.protocol import (
     seal_body,
     wrap,
 )
-from markovcryptor.terminal.terminal import _encode_packet
+from markovcryptor.terminal.terminal import _decode_packet, _encode_packet
 
 
 def _png_bytes(image):
@@ -37,9 +36,7 @@ def _png_bytes(image):
 
 
 def _synthetic_cover(size=256):
-    """A deterministic test cover. Deliberately simple: tests only need a
-    decodable image, and the realistic-cover guarantee is covered in
-    CoverLibraryTest below."""
+    """A deterministic test cover: tests only need a decodable image."""
     import numpy as np
     rng = np.random.default_rng(42)
     return Image.fromarray(rng.integers(64, 192, (size, size, 3), dtype=np.uint8), "RGB")
@@ -224,7 +221,8 @@ class TerminalFlowTest(unittest.TestCase):
         _net, alice, _bob = _pair()
         with self.assertRaises(InvalidInput) as caught:
             alice.send_covert_in_images("bob", "x", (_cover(),))
-        self.assertIn("密钥交换", str(caught.exception))
+        self.assertIn("密钥交换", " ".join(caught.exception.hints))
+        self.assertTrue(caught.exception.hints)
 
     def test_handshake_requires_an_image(self):
         _net, alice, _bob = _pair()
@@ -240,14 +238,21 @@ class TerminalFlowTest(unittest.TestCase):
         self.assertIn("中文信道模型", str(caught.exception))
         self.assertTrue(caught.exception.hints)
 
-    def test_too_small_cover_reports_which_images_failed(self):
+    def test_too_small_cover_names_the_picture_and_the_shortfall(self):
         _net, alice, _bob = _pair()
         tiny = _png_bytes(_synthetic_cover(64))
         with self.assertRaises(CapacityExceeded) as caught:
-            alice.send_handshake("bob", (tiny, tiny))
+            alice.send_handshake("bob", (tiny,))
         self.assertTrue(caught.exception.reasons)
         self.assertIn("第 1 张", caught.exception.reasons[0])
         self.assertTrue(caught.exception.hints)
+
+    def test_handshake_refuses_more_than_one_image(self):
+        # 握手是 38 字节的控制报文；多带图只会制造无载荷的图或浪费填充。
+        _net, alice, _bob = _pair()
+        with self.assertRaises(InvalidInput) as caught:
+            alice.send_handshake("bob", (_cover(), _cover()))
+        self.assertIn("只用一张图片", str(caught.exception))
 
 
 class HostileInputTest(unittest.TestCase):
@@ -310,63 +315,123 @@ class HostileInputTest(unittest.TestCase):
         self.assertEqual(bob.inbox[-1].chat_text, "deadbeef")
 
 
-class CoverLibraryTest(unittest.TestCase):
-    """The rule: every image we send is based on a real-looking picture."""
+class SendRulesTest(unittest.TestCase):
+    """The two rules about *which* picture leaves the terminal.
 
-    def test_empty_library_serves_realistic_fallback(self):
-        lib = CoverLibrary(None)
-        self.assertTrue(lib.is_fallback)
-        data = lib.next_cover()
-        image = Image.open(io.BytesIO(data))
-        # 大到能装下握手报文，且编码无损。
-        self.assertGreaterEqual(min(image.size), 256)
-        self.assertEqual(image.format, "PNG")
+    1. Never invent one. A covert or handshake send with no picture is refused.
+    2. Use exactly the pictures the user picked, in the order they picked them,
+       one payload slice each -- never substitute, reorder, or leave one unused.
+    """
 
-    def test_fallback_is_not_noise(self):
-        # 随机噪声一眼假；兑底图必须有大尺度结构（相邻像素接近）。
-        # 噪声图的相邻像素差会远大于这张合成图。
-        import numpy as np
-
-        image = np.asarray(Image.open(io.BytesIO(CoverLibrary(None).next_cover())),
-                           dtype=float)
-        neighbour = np.abs(np.diff(image, axis=1)).mean()
-        self.assertLess(neighbour, 12.0, "兑底图像素过于粗糙，看起来像噪声")
-
-    def test_directory_covers_are_used_and_rotate(self):
-        import tempfile
-        from pathlib import Path
-
-        with tempfile.TemporaryDirectory() as tmp:
-            # 三张可区分的纹理图（纯平图会被图片信道拒绝，测试里无所谓，
-            # 但保持与真实用法一致）。
-            for i in range(3):
-                arr = np.random.default_rng(i).integers(64, 192, (160, 160, 3), dtype="uint8")
-                Image.fromarray(arr, "RGB").save(Path(tmp) / f"c{i}.png")
-            lib = CoverLibrary(tmp)
-            self.assertFalse(lib.is_fallback)
-            self.assertIn("3 张底图", lib.describe())
-            for _ in range(6):
-                data = lib.next_cover()
-                image = Image.open(io.BytesIO(data))
-                self.assertEqual(image.size, (160, 160))  # 来自目录，非兑底
-
-    def test_cover_for_rejects_impossible_payload(self):
-        lib = CoverLibrary(None)
-        from markovcryptor.core.errors import CapacityExceeded
-        with self.assertRaises(CapacityExceeded) as caught:
-            lib.cover_for(1_000_000)
+    def test_covert_without_images_is_refused(self):
+        net, alice, bob = _pair()
+        _handshake(net, alice, bob)
+        with self.assertRaises(InvalidInput) as caught:
+            alice.send_covert_in_images("bob", "x", ())
+        self.assertIn("至少一张图片", str(caught.exception))
         self.assertTrue(caught.exception.hints)
 
-    def test_normalises_jpeg_to_png(self):
-        import tempfile
-        from pathlib import Path
+    def test_handshake_without_images_is_refused(self):
+        _net, alice, _bob = _pair()
+        with self.assertRaises(InvalidInput) as caught:
+            alice.send_handshake("bob", ())
+        self.assertIn("附带一张图片", str(caught.exception))
+        self.assertTrue(caught.exception.hints)
 
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "c.jpg"
-            _synthetic_cover(180).convert("RGB").save(path, "JPEG")
-            lib = CoverLibrary(tmp)
-            data = lib.next_cover()
-            self.assertEqual(Image.open(io.BytesIO(data)).format, "PNG")
+    def test_nothing_is_sent_when_refused(self):
+        net, alice, _bob = _pair()
+        before = len(net.history)
+        with self.assertRaises(InvalidInput):
+            alice.send_handshake("bob", ())
+        self.assertEqual(len(net.history), before, "被拒绝的发送不应产生任何报文")
+
+    def test_every_image_carries_a_slice(self):
+        net, alice, bob = _pair()
+        _handshake(net, alice, bob)
+        images = (_cover(), _cover(), _cover())
+        alice.send_covert_in_images("bob", "三张图各带一段", images)
+        net.pump()
+        inbound = bob.inbox[-1]
+        # 三张图都在，且都成功解出分片（合起来才是完整密文）。
+        self.assertEqual(len(inbound.chat_images), 3)
+        self.assertEqual(inbound.covert, ("三张图各带一段",))
+
+    def test_order_is_preserved(self):
+        """Picture i must carry slice i; swapping them would break decryption."""
+        sent = []
+
+        net = LoopbackNetwork()
+        alice = Terminal("alice", net).attach()
+        bob = Terminal("bob", net).attach()
+        _handshake(net, alice, bob)
+        alice.send_covert_in_images("bob", "顺序", (_cover(256), _cover(320),
+                                                    _cover(200)))
+        net.pump()
+        self.assertEqual(bob.inbox[-1].covert, ("顺序",))
+
+    def test_one_image_too_small_fails_the_whole_send(self):
+        net, alice, _bob = _pair()
+        _handshake(net, alice, _bob)
+        before = len(net.history)
+        tiny = _png_bytes(_synthetic_cover(64))
+        with self.assertRaises(CapacityExceeded) as caught:
+            alice.send_covert_in_images("bob", "hi", (_cover(), tiny))
+        # 报错要说清是第几张，且不发半截消息。
+        self.assertIn("第 2 张", " ".join(caught.exception.reasons))
+        self.assertTrue(caught.exception.hints)
+        self.assertEqual(len(net.history), before, "有一张装不下就不应发出")
+
+    def test_more_images_than_bytes_is_refused(self):
+        net, alice, bob = _pair()
+        _handshake(net, alice, bob)
+        # 空分片 = 有图不带载荷，正是观察者能一眼挑出的东西，所以直接拒绝。
+        with self.assertRaises(InvalidInput) as caught:
+            alice.send_covert_in_images("bob", "", (_cover(),))
+        self.assertIn("密文内容为空", str(caught.exception))
+
+    def test_split_payload_is_consecutive_and_lossless(self):
+        from markovcryptor.terminal.protocol import parse_slice
+        from markovcryptor.terminal.terminal import split_payload
+
+        blob = bytes(range(200))
+        for parts in (1, 3, 7, 200):
+            envelopes = split_payload(blob, parts)
+            self.assertEqual(len(envelopes), parts)
+            chunks = []
+            for position, envelope in enumerate(envelopes):
+                index, count, chunk = parse_slice(envelope)
+                self.assertEqual((index, count), (position, parts))
+                # 每片都必须是合法 PBX1 信封：带无载荷图的拼接是不允许的。
+                self.assertEqual(peek_kind(envelope), Kind.BODY_SLICE)
+                self.assertTrue(chunk, "不允许出现空分片")
+                chunks.append(chunk)
+            self.assertEqual(b"".join(chunks), blob)
+            sizes = {len(chunk) for chunk in chunks}
+            self.assertLessEqual(max(sizes) - min(sizes), 1, "应当近等分")
+
+    def test_incomplete_pieces_are_dropped_not_guessed(self):
+        net, alice, bob = _pair()
+        _handshake(net, alice, bob)
+        alice.send_covert_in_images("bob", "两段密文", (_cover(), _cover()))
+        sender, target, packet = net.history[-1]
+        text, raws = _decode_packet(packet)
+        # 丢一张，模拟图片在途中损坏。
+        bob.deliver(sender, _encode_packet(Packet(text=text, images=raws[:1])))
+        inbound = bob.inbox[-1]
+        self.assertEqual(inbound.covert, (), "分片不齐时不应拼出半截密文")
+        self.assertTrue(any("分片不齐" in note for note in inbound.notes))
+
+    def test_handshake_response_reuses_the_request_image(self):
+        """No picture is invented for the automatic response."""
+        net, alice, bob = _pair()
+        alice.send_handshake("bob", (_cover(),))
+        net.pump()
+        # 三条报文：请求、自动回发。（回发是 bob 发出的唯一一条）
+        bob_packets = [pkt for sender, _target, pkt in net.history if sender == "bob"]
+        self.assertEqual(len(bob_packets), 1)
+        _text, raws = _decode_packet(bob_packets[0])
+        self.assertEqual(len(raws), 1)
+        self.assertTrue(bob.established and alice.established)
 
 
 class LoopbackNetworkTest(unittest.TestCase):

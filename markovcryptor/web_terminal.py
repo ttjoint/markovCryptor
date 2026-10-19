@@ -22,10 +22,10 @@ from typing import List
 from fastapi import UploadFile
 from fastapi.responses import JSONResponse, Response
 
+from .channels.base import Carrier
 from .observability import METRICS
 from .terminal import LoopbackNetwork, Packet, Terminal
-from .terminal.covers import CoverLibrary
-from .terminal.terminal import Inbound
+from .terminal.terminal import Inbound, _decode_packet
 
 #: Module-level alias: with ``from __future__ import annotations`` every
 #: annotation is a string, and pydantic resolves those against module globals --
@@ -38,16 +38,36 @@ FileList = List[UploadFile]
 HISTORY_LIMIT = 200
 
 
+class TextChannelAdapter:
+    """把 ``Channel`` 的（载体，密钥）接口收成终端要的 ``embed_text``/``extract_text``。
+
+    终端协议层只认识"给我一段明文，换回一段中文"——它不该知道信道有
+    ``options``、``Carrier``、``Envelope`` 这些平台概念。适配器就做这一件事，
+    所以它很小，也就可以留在这里而不是塞进信道层。
+    """
+
+    def __init__(self, channel) -> None:
+        self.channel = channel
+
+    def embed_text(self, payload: bytes):
+        envelope = self.channel.embed(Carrier.of_text(""), payload, b"")
+        return str(envelope.primary), envelope.report
+
+    def extract_text(self, covertext: str) -> bytes:
+        return self.channel.extract(Carrier.of_text(covertext), b"")
+
+
 class TerminalHub:
     """One pair of terminals sharing one loopback network, plus their history."""
 
-    def __init__(self, cover_dir: str | None = None, psk: str = "pbx1") -> None:
+    def __init__(self, psk: str = "pbx1", text_channel=None) -> None:
         self.network = LoopbackNetwork()
-        self.covers = CoverLibrary(cover_dir)
         self.terminals: dict[str, Terminal] = {}
         for name in ("alice", "bob"):
-            terminal = Terminal(name, self.network, psk=psk,
-                                covers=self.covers).attach()
+            terminal = Terminal(name, self.network, psk=psk).attach()
+            if text_channel is not None:
+                # 文本混淆走中文信道；模型由调用方注入，没有就诚实地不可用。
+                terminal.use_text_channel(text_channel)
             self.terminals[name] = terminal
         self.history: dict[str, list[Inbound]] = {name: [] for name in self.terminals}
         #: 收到的每个包的原始字节，按到达顺序。UI 重载后要重放宿主图，
@@ -68,6 +88,10 @@ class TerminalHub:
             if len(bucket) > HISTORY_LIMIT:
                 del bucket[: len(bucket) - HISTORY_LIMIT]
         return sink
+
+    @property
+    def text_channel_ready(self) -> bool:
+        return any(t.text_channel is not None for t in self.terminals.values())
 
     def pump(self) -> int:
         return self.network.pump()
@@ -115,7 +139,8 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
     def state() -> JSONResponse:
         return JSONResponse({
             "ok": True,
-            "covers": hub.covers.describe(),
+            # 文本混淆走中文信道，没有模型时那条路径不可用；前端据此禁用按钮。
+            "text_channel_ready": hub.text_channel_ready,
             "terminals": {
                 name: {
                     "state": terminal.state.value,
@@ -153,17 +178,16 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
         terminal = _terminal(hub, name)
         peer = _other(hub, name)
         raws, _names = await _images(files)
-        if mode == "covert":
-            if not raws:
-                from .core.errors import InvalidInput
-
-                raise InvalidInput(
-                    "密文发送至少需要一张图片：密文藏在图片里",
-                    hints=("先在预览栏添加图片，再点发送",),
-                )
+        # The images are exactly what the user selected, in the order they
+        # selected them. Nothing here reorders, substitutes or invents a cover:
+        # a covert or handshake send without pictures is refused instead.
+        if mode == "covert-image":
             terminal.send_covert_in_images(peer, text, tuple(raws))
+        elif mode == "covert-text":
+            # 文本混淆不消耗图片：密文藏进生成的中文文本。
+            terminal.send_covert_text(peer, text)
         elif mode == "handshake":
-            terminal.send_handshake(peer, tuple(raws) or (hub.covers.cover_for(38),))
+            terminal.send_handshake(peer, tuple(raws))
         else:
             terminal.send_packet(peer, Packet(text=text or None, images=tuple(raws)))
         delivered = hub.pump()
@@ -193,8 +217,6 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
                 f"包序号 {index} 超出范围（0~{len(history) - 1}）"
             )
         _sender, packet = history[index]
-        from .terminal.terminal import _decode_packet
-
         _text, images = _decode_packet(packet)
         if not 0 <= image < len(images):
             raise InvalidInput(f"图片序号 {image} 超出范围（该包有 {len(images)} 张）")
