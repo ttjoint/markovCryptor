@@ -339,6 +339,38 @@ class TerminalContractTest(unittest.TestCase):
             covert = [s for m in body["messages"] for s in m["covert"]]
             self.assertIn("秘密一句", covert, f"{name} 的密文窗没收到")
 
+    def test_plaintext_window_shows_the_wire_text(self):
+        """明文窗是网关视角：显示网线上真正传出去的那串内容。
+
+        文本混淆传出去的是生成的中文宿主文本，不是用户键入的密文；那串
+        文本双方都能看到，而密文只在密文窗。以前这里留空，用户看不出
+        自己到底往网上发了什么。
+        """
+        self._establish()
+        _run(self.client.post("/terminal/alice/send",
+                              data={"text": "机密一句话", "mode": "covert-text"}))
+
+        for name in ("alice", "bob"):
+            body = _run(self.client.get(f"/terminal/inbox/{name}")).json()
+            sent = [m for m in body["messages"] if m["covert"]]
+            self.assertTrue(sent, f"{name} 没收到密文")
+            wire = sent[-1]["chat_text"]
+            self.assertTrue(wire, f"{name} 的明文窗是空的（应显示宿主文本）")
+            self.assertNotEqual(wire, "机密一句话", "明文窗显示的是原文，不是网线内容")
+            # 宿主文本是中文散文，不是十六进制或 base64 之类的不可读东西。
+            self.assertTrue(any("一" <= ch <= "鿿" for ch in wire))
+
+    def test_image_covert_leaves_no_text_in_plaintext_window(self):
+        """图片混淆没有可见文本：明文窗只放图，不编造文字。"""
+        self._establish()
+        _run(self.client.post(
+            "/terminal/alice/send", data={"text": "秘密", "mode": "covert-image"},
+            files=[("files", ("c.png", _noise_png(256), "image/png"))]))
+        body = _run(self.client.get("/terminal/inbox/bob")).json()
+        sent = [m for m in body["messages"] if m["covert"]]
+        self.assertTrue(sent)
+        self.assertIsNone(sent[-1]["chat_text"])
+
     def test_every_message_carries_a_timestamp(self):
         """每条消息都要有时刻：没有时间的聊天记录没法对账。"""
         self._establish()

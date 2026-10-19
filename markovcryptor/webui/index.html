@@ -954,6 +954,8 @@ function renderQueue(me) {
     div.append(img, bar);
     box.append(div);
   });
+  // 新加的车厢总在最右：横排队列往右滚到底，不用手动拖。
+  scrollDown(box);
   applyAvailability(me);
 }
 
@@ -1052,6 +1054,19 @@ function flashWire(from, count) {
   }, 1000);
 }
 
+// 聊天窗永远停在最新一条：自己发的、对方来的、系统提示，都一样。
+// 放在 requestAnimationFrame 之后，等布局算完再滚，避免滚到"上一条的底"。
+function scrollDown(...boxes) {
+  requestAnimationFrame(() => {
+    for (const box of boxes) {
+      if (!box) continue;
+      box.scrollTop = box.scrollHeight;
+      // 图片队列是横排的火车，新加的车厢在最右边，所以横向也要跟上。
+      box.scrollLeft = box.scrollWidth;
+    }
+  });
+}
+
 // --- 会话建立提示：落在两个客户端的密文窗里 ---
 
 function handshakeNotice(me) {
@@ -1062,7 +1077,7 @@ function handshakeNotice(me) {
   const now = new Date().toLocaleTimeString();
   sys.textContent = `— ${now} 已与 ${peer} 完成密钥协商，密文通道可用 —`;
   box.append(sys);
-  box.scrollTop = box.scrollHeight;
+  scrollDown(box);
 }
 
 // --- 发送 ---
@@ -1245,8 +1260,7 @@ async function poll(me) {
       // 被动建起会话的那一侧：握手包到达即为"协商完成"。
       if (message.direction === "in" && message.handshake) handshakeNotice(me);
     }
-    plain.scrollTop = plain.scrollHeight;
-    covert.scrollTop = covert.scrollHeight;
+    scrollDown(plain, covert);
   }
   // 握手可能被动完成（对方发起），所以每轮都刷新状态。
   await refreshState(me);

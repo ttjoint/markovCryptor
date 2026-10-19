@@ -206,8 +206,13 @@ class Terminal:
               mode=mode.value)
         self.send_packet(target, Packet(images=stego))
 
-    def send_covert_text(self, target: str, text: str) -> None:
+    def send_covert_text(self, target: str, text: str) -> str:
         """Encrypt ``text`` and hide it in the text channel.
+
+        Returns the **covertext** that actually crossed the wire. That string is
+        ordinary-looking Chinese prose, not the secret -- it is what an observer
+        on the network would see, so it belongs in the chat window as the visible
+        message. The secret only ever appears in the covert window.
 
         The text carrier is the Chinese channel, which needs a trained model.
         Rather than import a model here (and make the whole terminal depend on
@@ -233,6 +238,7 @@ class Terminal:
         self.network.send(self.id, target, _encode_packet(Packet(text=covertext)))
         event("terminal", "covert_text_out", id=self.id, peer=target,
               bytes=len(envelope))
+        return covertext
 
     def use_text_channel(self, channel) -> None:
         """Attach the text carrier. ``channel`` must have ``embed_text``/``extract_text``."""

@@ -371,6 +371,13 @@ def main(argv: list[str] | None = None) -> int:
                   "文本混淆不消耗图片", failures)
             check(client.eval("document.querySelector('#a-covert').textContent")
                   .find("文字机密") >= 0, "发送方密文窗看到自己发的密文", failures)
+            # 明文窗是网关视角：文本混淆时看到的是网线上那串宿主中文。
+            check(client.eval(
+                "(() => { const m = [...document.querySelectorAll('#a-plain .msg.out')]"
+                ".pop(); if (!m) return false;"
+                " const t = m.textContent;"
+                " return t.length > 4 && !t.includes('文字机密'); })()"),
+                  "发送方明文窗显示发出的宿主文本", failures)
             check(client.eval("document.querySelector('#b-covert').textContent")
                   .find("文字机密") >= 0, "接收方密文窗收到密文", failures)
 
@@ -401,6 +408,12 @@ def main(argv: list[str] | None = None) -> int:
             check("图片机密" not in client.eval(
                       "document.querySelector('#b-plain').textContent"),
                   "对方的明文窗也不夹带密文", failures)
+
+            # 聊天窗自动停在最新一条。
+            check(client.eval(
+                "(() => { const b = document.querySelector('#a-plain');"
+                " return b.scrollTop + b.clientHeight >= b.scrollHeight - 4; })()"),
+                  "聊天窗自动滚到最新消息", failures)
 
             # 每条消息带时刻。
             check(bool(client.eval(

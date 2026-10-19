@@ -129,9 +129,11 @@ class TerminalHub:
 
         三件容易搞错的事，都在这里定死：
 
-        * **密文不算聊天内容**：``chat_text`` 只在明文发送时有值。把要隐藏的
-          句子同时显示在明文窗里，等于把密文摊开给旁观者看，还会让人分不清
-          "我到底公开说了什么"。
+        * **``chat_text`` 是网线内容，不是用户键入的原文**：明文窗站在网关
+          位置预览"这条消息实际传出去的东西"。明文发送传的是用户写的字；
+          文本混淆传的是生成的那串中文宿主文本（真正的密文在它里面，
+          别人看不出）；图片混淆传的是用户的公开说明。要隐藏的那句话
+          永远不进明文窗——它只出现在密文窗。
         * **图片字节要留一份**：自己发的图不在收件历史里，UI 又要显示它们，
           所以这里存下来供 ``/terminal/media`` 读。
         * **``covert`` 是刚发出去的密文原文**：发送方知道自己写了什么，
@@ -140,8 +142,9 @@ class TerminalHub:
         entry = {
             "direction": "out",
             "sender": name,
-            # 密文发送的载荷不是公开内容：明文窗只显示真正发出去的话。
-            "chat_text": text if mode == "plain" else None,
+            # 网线上可见的那串内容。密文发送时由调用方传入宿主文本（或 None），
+            # 原始密文绝不出现在这里。
+            "chat_text": text,
             "chat_image_count": len(images),
             "covert": [covert] if covert else [],
             "notes": [],
@@ -246,6 +249,10 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
         # selected them. Nothing here reorders, substitutes or invents a cover:
         # a covert or handshake send without pictures is refused instead.
         covert = None
+        # ``wire_text`` 是"网线上真正传出去的可见文本"，不是用户键入的原文。
+        # 网关视角的预览就靠它：文本混淆传出去的是混淆后的那串中文，
+        # 图片混淆传出去的是用户写的公开说明（或什么都没有）。
+        wire_text = text or None
         if mode == "covert-image":
             # 只从队首取够用的那几张：一句短话一张图就够，其余的留在队列里
             # 等下次。多发的图不但浪费，还会让"我到底发了几条"变得不可数。
@@ -254,9 +261,12 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
             terminal.send_covert_in_images(peer, text, used)
             raws = used
             covert = text
+            # 图片混淆没有可见文本：用户没写公开说明，明文窗就只有图。
+            wire_text = None
         elif mode == "covert-text":
             # 文本混淆不消耗图片：密文藏进生成的中文文本。
-            terminal.send_covert_text(peer, text)
+            # 传出去的是混淆后的宿主文本，它才是网络上看得到的东西。
+            wire_text = terminal.send_covert_text(peer, text)
             raws = ()
             covert = text
         elif mode == "handshake":
@@ -264,7 +274,7 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
         else:
             terminal.send_packet(peer, Packet(text=text or None, images=tuple(raws)))
         # 本地对话线记一笔"我发的"：聊天软件两边都要显示自己说过的话。
-        own_index = hub.note_outgoing(name, mode=mode, text=text or None,
+        own_index = hub.note_outgoing(name, mode=mode, text=wire_text,
                                      images=tuple(raws), covert=covert)
         delivered = hub.pump()
         METRICS.incr("terminal_sent", mode=mode, sender=name)
