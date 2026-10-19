@@ -29,6 +29,7 @@ payload ─→ 压缩 ─→ 加密 ─┼─ 图片信道 ─→ 一张 PNG 照
 | [docs/PLUGINS.md](docs/PLUGINS.md) | 如何新增一条信道（附可运行的完整示例） |
 | [docs/TERMINAL.md](docs/TERMINAL.md) | 点到点通信终端：消息模型、握手状态机、隐写判定规则 |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 平台化架构与迁移进度 |
+| [docs/QQ_TRANSPORT.md](docs/QQ_TRANSPORT.md) | 接 QQ / SnowLuma 做真实信道：可行性、改动点、风险 |
 
 ---
 
