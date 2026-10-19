@@ -227,6 +227,26 @@ class TerminalContractTest(unittest.TestCase):
         self.assertIn('id="wire"', self.html)
         self.assertIn("function flashWire", self.html)
 
+    def test_terminal_js_defines_every_function_it_calls(self):
+        """终端页的发送/接收链路必须完整。
+
+        一次误编辑曾把 ``sendPlain``/``renderMessage`` 整段删掉：页面照常
+        加载，按钮也在，但点下去只报 ``not defined``，而当时的冒烟只查了
+        元素 id，全部"通过"。这里按名字点一遍，缺一个就失败。
+        """
+        required = (
+            "post", "sendPlain", "sendCovertText", "sendCovertImage", "handshake",
+            "handshakeNotice", "renderMessage", "imageSource", "stamp",
+            "clearPlaceholder", "scrollDown", "pinToBottom", "poll",
+            "renderQueue", "renderSent", "consume", "addFiles", "addAttachments",
+            "renderAttachments", "applyAvailability", "refreshState", "flashWire",
+            "bootTerminal",
+        )
+        for name in required:
+            self.assertRegex(
+                self.html, rf"(?m)^(async )?function {re.escape(name)}\(",
+                f"终端 JS 缺少函数 {name}（调用处会抛 not defined）")
+
     def test_queue_is_per_client(self):
         """图片队列各自独立：抽走 alice 的图不影响 bob 的。"""
         html = self.html

@@ -1054,21 +1054,6 @@ function flashWire(from, count) {
   }, 1000);
 }
 
-// 聊天窗永远停在最新一条：自己发的、对方来的、系统提示，都一样。
-// 放在 requestAnimationFrame 之后，等布局算完再滚，避免滚到"上一条的底"。
-function scrollDown(...boxes) {
-  requestAnimationFrame(() => {
-    for (const box of boxes) {
-      if (!box) continue;
-      box.scrollTop = box.scrollHeight;
-      // 图片队列是横排的火车，新加的车厢在最右边，所以横向也要跟上。
-      box.scrollLeft = box.scrollWidth;
-    }
-  });
-}
-
-// --- 会话建立提示：落在两个客户端的密文窗里 ---
-
 function handshakeNotice(me) {
   const box = el(me, "covert");
   const sys = document.createElement("div");
@@ -1214,6 +1199,33 @@ function renderMessage(box, message, me, withImages) {
   }
   wrap.append(bubble);
   box.append(wrap);
+}
+
+// 聊天窗永远停在最新一条：自己发的、对方来的、系统提示，都一样。
+//
+// 一次滚不到底有三个原因，都得堵上：
+//   1. 布局还没算完 —— 用 requestAnimationFrame 等一帧；
+//   2. 图片是异步解码的 —— 图加载完（load）还会再撑高一次，那时得再滚;
+//   3. 编码不同步 —— 兜一个短延时重滚，覆盖"图已在缓存但仍触发布局"的情况。
+const scrollers = new WeakSet();
+
+function pinToBottom(box) {
+  box.scrollTop = box.scrollHeight;
+  box.scrollLeft = box.scrollWidth;
+}
+
+function scrollDown(...boxes) {
+  for (const box of boxes) {
+    if (!box) continue;
+    requestAnimationFrame(() => pinToBottom(box));
+    // 第一次见到这个容器就挂上 load 监听：之后每张图解码完都会把窗底拉回来。
+    if (!scrollers.has(box)) {
+      scrollers.add(box);
+      box.addEventListener("load", () => pinToBottom(box), true);
+    }
+    setTimeout(() => pinToBottom(box), 120);
+    setTimeout(() => pinToBottom(box), 400);
+  }
 }
 
 function clearPlaceholder(box) {

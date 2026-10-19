@@ -410,10 +410,30 @@ def main(argv: list[str] | None = None) -> int:
                   "对方的明文窗也不夹带密文", failures)
 
             # 聊天窗自动停在最新一条。
-            check(client.eval(
+            # 只查"贴近底部"不够：内容没溢出时 scrollHeight == clientHeight，
+            # 空窗也满足，等于白测。这里先灌够条数撑出滚动条，再查是否在底部。
+            for n in range(6):
+                client.eval(f"""(() => {{
+                    clients.alice.attached.push({{
+                        id: ++clients.alice.seq, name: 'f{n}.png',
+                        dataUrl: 'data:image/png;base64,{cover_b64}'
+                    }});
+                    renderAttachments('alice');
+                    document.querySelector('#a-plain-text').value = '灌水第 {n} 条';
+                    document.querySelector('#a-plain-send').click();
+                }})()""")
+                time.sleep(1.4)
+            time.sleep(1.2)
+            overflowing = client.eval(
                 "(() => { const b = document.querySelector('#a-plain');"
-                " return b.scrollTop + b.clientHeight >= b.scrollHeight - 4; })()"),
-                  "聊天窗自动滚到最新消息", failures)
+                " return b.scrollHeight > b.clientHeight + 40; })()")
+            check(overflowing, "聊天内容撑出了滚动条（否则这条检查没意义）", failures)
+            for box in ("a-plain", "b-plain", "a-covert", "b-covert"):
+                check(client.eval(
+                    f"(() => {{ const b = document.querySelector('#{box}');"
+                    " if (b.scrollHeight <= b.clientHeight) return true;"
+                    " return b.scrollTop + b.clientHeight >= b.scrollHeight - 6; })()"),
+                      f"{box} 收到新消息后滚到底部", failures)
 
             # 每条消息带时刻。
             check(bool(client.eval(
