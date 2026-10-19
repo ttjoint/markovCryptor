@@ -148,7 +148,7 @@ REM Chinese console defaults to codepage 936; force UTF-8 so the
 REM script's Chinese output is readable.
 chcp 65001 >nul
 cd /d "%~dp0"
-where python >nul 2>nul || where py >nul 2>nul
+where py >nul 2>nul || where python >nul 2>nul
 if errorlevel 1 (
   echo.
   echo   Python not found. Install Python 3.11+ and tick "Add to PATH".
@@ -201,8 +201,11 @@ $ErrorActionPreference = "Stop"
 $here = $PSScriptRoot
 Write-Host "=== markovcryptor QQ 连通性测试包 ===" -ForegroundColor Cyan
 
-$py = Get-Command python -ErrorAction SilentlyContinue
-if (-not $py) { $py = Get-Command py -ErrorAction SilentlyContinue }
+# 优先 py 启动器：它总能找到真正装好的 Python。直接找 python 有时会
+# 撞上 Microsoft Store 的占位符（运行后跳应用商店，不可用）。
+# 这也解释了"install 能跑但 python 不在 PATH"——那种机器上只有 py。
+$py = Get-Command py -ErrorAction SilentlyContinue
+if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
 if (-not $py) {
   Write-Host "没有找到 Python。请先装 Python 3.11+（勾选 Add to PATH），再重跑本脚本。" -ForegroundColor Red
   Write-Host "离线机器可用 wheels/ 目录里的 wheel；Python 安装包需另行准备。"
@@ -264,12 +267,14 @@ Write-Host "`n完成。详见 CHECKLIST.md" -ForegroundColor Green
 
 
 RUN_SNOWLUMA_PS1 = r"""# 起 SnowLuma 并等 OneBot 端口。由 tools/make_bundle.py 生成。
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+# 注意：param() 之前只能是注释 —— 放一条可执行语句进去，整个 param 块
+# 会被当成普通语句解析，报 "The assignment expression is not valid"。
 param(
   [string]$Snowluma = "$PSScriptRoot\snowluma",
   [int]$WsPort = 9721,
   [int]$TimeoutSec = 90
 )
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "Stop"
 
 if (-not (Test-Path (Join-Path $Snowluma "index.mjs"))) {
@@ -327,6 +332,19 @@ param(
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "Stop"
 
+# python 不一定在 PATH 里（只装 py 启动器、或没勾 Add to PATH 都很常见）。
+# install.ps1 能跑不代表这里能跑 —— 两边都要自己找。
+# 优先 py 启动器：它总能找到真正装好的 Python。直接找 python 有时会
+# 撞上 Microsoft Store 的占位符（运行后跳应用商店，不可用）。
+# 这也解释了"install 能跑但 python 不在 PATH"——那种机器上只有 py。
+$py = Get-Command py -ErrorAction SilentlyContinue
+if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+if (-not $py) {
+  Write-Host "没有找到 python，也没有 py 启动器。" -ForegroundColor Red
+  Write-Host "先跑 .\install.bat 装依赖；它同样需要 Python 3.11+。"
+  exit 1
+}
+
 $code = @'
 import asyncio, base64, hashlib, io, json, sys
 sys.stdout.reconfigure(encoding="utf-8")   # 中文输出，别依赖控制台代码页
@@ -357,7 +375,7 @@ sys.exit(asyncio.run(main()) or 0)
 '@
 $tmp = Join-Path $env:TEMP "mkx_probe.py"
 $code | Out-File -Encoding utf8 $tmp
-& python $tmp $WsPort $Token $Peer
+& $py $tmp $WsPort $Token $Peer
 exit $LASTEXITCODE
 """
 

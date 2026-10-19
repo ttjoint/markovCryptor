@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -234,6 +235,50 @@ class PackagingTest(unittest.TestCase):
         source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
         self.assertIn("plain", source)
         self.assertIn('"uvicorn>=0.27"', source)
+
+    def test_scripts_do_not_assume_python_on_path(self) -> None:
+        """``python`` 不一定在 PATH（只装 py 启动器、或没勾 Add to PATH）。
+
+        实测踩过：install.ps1 用 py 能跑，probe.ps1 硬编码 python 就
+        ``CommandNotFoundException``。所有脚本都要自己找。
+        """
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        for name, body in re.findall(r'(\w+_PS1) = r"""(.*?)"""', source, re.S):
+            hard = [ln for ln in body.splitlines()
+                    if re.search(r"&\s*python", ln)]
+            self.assertFalse(hard, f"{name} 直接调用了 python：{hard}")
+            if "markovcryptor" in body or "pip install" in body:
+                self.assertIn("Get-Command py", body,
+                              f"{name} 没做 py 降级查找")
+
+    def test_param_block_starts_the_script(self) -> None:
+        """``param()`` 前只能是注释。
+
+        实测踩过：在它前面插一条 ``[Console]::OutputEncoding = ...``，
+        PowerShell 会报
+        ``The assignment expression is not valid``
+        并指到 param 里面的每个参数 —— 看着像参数写错了，其实整块没被
+        当 param 解析。
+        """
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        scripts = re.findall(r'(\w+_PS1) = r"""(.*?)"""', source, re.S)
+        self.assertTrue(scripts, "没找到 ps1 模板")
+        checked = 0
+        for name, body in scripts:
+            lines = [ln.strip() for ln in body.splitlines()]
+            # 只认顶格的 param( —— 缩进或写在同一行都说明模板结构不对。
+            if "param(" not in lines:
+                continue
+            self.assertEqual(body.splitlines()[lines.index("param(")].strip(),
+                             "param(", f"{name}: param( 必须独占一行且顶格")
+            checked += 1
+            head = lines[:lines.index("param(")]
+            for line in head:
+                self.assertTrue(
+                    line == "" or line.startswith("#"),
+                    f"{name}: param() 前有可执行语句 {line!r}；"
+                    "PowerShell 要求 param 之前只能是注释")
+        self.assertGreaterEqual(checked, 2, "应至少检查到 probe 和 run-snowluma")
 
     def test_generated_wheels_cover_declared_targets(self) -> None:
         """真打一个包（不含 SnowLuma），检查每个组合都有 numpy 和 pillow。"""
