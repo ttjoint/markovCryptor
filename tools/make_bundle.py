@@ -119,7 +119,63 @@ def _copy_snowluma(source: Path, target: Path) -> None:
         print(f"  注意：SnowLuma 里缺 {missing}，guest 上可能起不来")
 
 
+INSTALL_BAT = r"""@echo off
+REM Double-click entry. Win10 ships with ExecutionPolicy=Restricted, so
+REM running a .ps1 directly fails with SecurityError. -ExecutionPolicy Bypass
+REM only affects this one process; nothing on the machine is changed.
+setlocal
+REM Chinese console defaults to codepage 936; force UTF-8 so the
+REM script's Chinese output is readable.
+chcp 65001 >nul
+cd /d "%~dp0"
+where python >nul 2>nul || where py >nul 2>nul
+if errorlevel 1 (
+  echo.
+  echo   Python not found. Install Python 3.11+ and tick "Add to PATH".
+  echo.
+  pause
+  exit /b 1
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" %*
+echo.
+pause
+"""
+
+
+RUN_BAT = r"""@echo off
+REM Start SnowLuma. Pass -WsPort 9721 on the guest machine.
+setlocal
+REM Chinese console defaults to codepage 936; force UTF-8 so the
+REM script's Chinese output is readable.
+chcp 65001 >nul
+cd /d "%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run-snowluma.ps1" %*
+echo.
+pause
+"""
+
+
+PROBE_BAT = r"""@echo off
+REM Usage: probe.bat mkx-<UIN> 9721 <peer QQ number>
+setlocal
+REM Chinese console defaults to codepage 936; force UTF-8 so the
+REM script's Chinese output is readable.
+chcp 65001 >nul
+cd /d "%~dp0"
+if "%~1"=="" (
+  echo Usage: probe.bat TOKEN WSPORT PEER_QQ
+  echo Example: probe.bat mkx-123456 9721 654321
+  pause
+  exit /b 1
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0probe.ps1" -Token "%~1" -WsPort "%~2" -Peer "%~3"
+echo.
+pause
+"""
+
+
 INSTALL_PS1 = r"""# 在 guest 上运行：离线安装依赖并自检。
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 # 这个文件由 tools/make_bundle.py 生成。
 $ErrorActionPreference = "Stop"
 $here = $PSScriptRoot
@@ -164,6 +220,7 @@ Write-Host "`n完成。详见 CHECKLIST.md" -ForegroundColor Green
 
 
 RUN_SNOWLUMA_PS1 = r"""# 起 SnowLuma 并等 OneBot 端口。由 tools/make_bundle.py 生成。
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 param(
   [string]$Snowluma = "$PSScriptRoot\snowluma",
   [int]$WsPort = 9721,
@@ -223,10 +280,12 @@ param(
   [int]$WsPort = 9721,
   [Parameter(Mandatory = $true)][long]$Peer
 )
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "Stop"
 
 $code = @'
 import asyncio, base64, hashlib, io, json, sys
+sys.stdout.reconfigure(encoding="utf-8")   # 中文输出，别依赖控制台代码页
 import numpy as np
 from PIL import Image
 from markovcryptor.onebot_ws import connect
@@ -332,6 +391,8 @@ CHECKLIST = r"""# QQ 跨机连通性测试 · 操作清单
    .\run-snowluma.ps1 -WsPort 9721
    ```
    预期：`就绪：OneBot WS 127.0.0.1:9721`。
+
+   双击 `run-snowluma.bat` 也行（端口默认 9721）。
 
 ---
 
@@ -455,7 +516,9 @@ New-NetFirewallRule -DisplayName "OneBot 9721" -Direction Inbound -LocalPort 972
 | WebUI 密码不知道 | 全新目录会生成随机密码 | 在日志里搜 `initial credentials` |
 | `EADDRINUSE` | 同机两号端口相同 | 每号一份 `onebot_<UIN>.json`，端口分开 |
 | 图片「被改动」 | 中间有重编码 | 改走中文信道，或换文件传输 |
-| `markovcryptor` 找不到 | 没跑 install.ps1 | 先跑 `.\install.ps1` |
+| `markovcryptor` 找不到 | 没跑 install.ps1 | 先跑 `install.bat` |
+| `禁止运行脚本` / `UnauthorizedAccess` | Win10 默认执行策略 | 双击 `.bat`，或加 `-ExecutionPolicy Bypass` |
+| `.ps1` 报 `缺少实际参数` / 中文乱码 | 脚本没 BOM（旧包） | 用 0.3.0 之后重新打的包 |
 | `python` 不是命令 | 没勾 Add to PATH | 用 `py` 代替 |
 
 ---
@@ -501,12 +564,24 @@ def _write_bundle(root: Path, args: argparse.Namespace, version: str) -> dict:
     for name, text in (("install.ps1", INSTALL_PS1),
                        ("run-snowluma.ps1", RUN_SNOWLUMA_PS1),
                        ("probe.ps1", PROBE_PS1),
+                       ("install.bat", INSTALL_BAT),
+                       ("run-snowluma.bat", RUN_BAT),
+                       ("probe.bat", PROBE_BAT),
                        ("CHECKLIST.md", CHECKLIST)):
         path = root / name
-        # PowerShell 5.1 对 LF 不友好，脚本一律 CRLF。
-        body = text.replace("\r\n", "\n")
-        path.write_bytes((body.replace("\n", "\r\n") if name.endswith(".ps1")
-                          else body).encode("utf-8"))
+        body = text.replace("\r\n", "\n").replace("\n", "\r\n")
+        if name.endswith(".ps1"):
+            # Windows PowerShell 5.1（Win10 自带）会按系统 ANSI 代码页读无 BOM
+            # 的 .ps1。UTF-8 里的中文按 GBK 解，尾字节会吃掉行尾 CRLF，
+            # 把 param( 拼进上一行注释，脚本直接报“缺少实际参数”。
+            # 所以：CRLF + UTF-8 BOM，两个都是硬要求。
+            path.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+        elif name.endswith(".bat"):
+            # .bat 走 OEM 代码页（中文机是 936）。保持纯 ASCII，不要放中文，
+            # 否则 cmd 下一样会乱。
+            path.write_bytes(body.encode("ascii"))
+        else:
+            path.write_bytes(body.encode("utf-8"))
 
     manifest["files"] = {
         str(path.relative_to(root)).replace("\\", "/"): _md5(path)

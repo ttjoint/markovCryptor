@@ -216,6 +216,51 @@ class PackagingTest(unittest.TestCase):
         for version in ("3.11", "3.12", "3.13"):
             self.assertIn(f'"{version}"', source)
 
+    def test_ps1_need_bom_and_crlf(self) -> None:
+        """Win10 自带的 PowerShell 5.1 按 ANSI 代码页读无 BOM 的 .ps1。
+
+        UTF-8 中文在 GBK 下解码时，`号` 的尾字节会吞掉行尾 CRLF，把
+        `param(` 拼进上一行注释 —— 脚本报「缺少实际参数」。
+        """
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        self.assertIn("UTF-8 BOM", source)
+
+    def test_bat_entry_points_exist(self) -> None:
+        """Win10 默认 ExecutionPolicy=Restricted，.ps1 双击跑不了。
+
+        给 .bat 入口，里面自己带 -ExecutionPolicy Bypass。
+        """
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        for name in ("install.bat", "run-snowluma.bat", "probe.bat"):
+            self.assertIn(name, source)
+        self.assertIn("-ExecutionPolicy Bypass", source)
+
+    def test_generated_scripts_have_right_encoding(self) -> None:
+        """实际打一个包，逐项检查编码。
+
+        - .ps1：UTF-8 BOM + CRLF，否则 PS 5.1 按 GBK 读会把行尾吃掉
+        - .bat：纯 ASCII + CRLF，cmd 走 OEM 代码页
+        """
+        bom = bytes([0xEF, 0xBB, 0xBF])
+        crlf = bytes([0x0D, 0x0A])
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            subprocess.run(
+                [sys.executable, str(TOOLS / "make_bundle.py"), "--out", str(out)],
+                cwd=str(ROOT), check=True, capture_output=True)
+            ps1 = list(out.rglob("*.ps1"))
+            bat = list(out.rglob("*.bat"))
+            self.assertEqual(len(ps1), 3, "应有 3 个 .ps1")
+            self.assertEqual(len(bat), 3, "应有 3 个 .bat")
+            for script in ps1:
+                raw = script.read_bytes()
+                self.assertTrue(raw.startswith(bom), f"{script.name} 缺 UTF-8 BOM")
+                self.assertIn(crlf, raw, f"{script.name} 不是 CRLF")
+            for script in bat:
+                raw = script.read_bytes()
+                raw.decode("ascii")          # cmd 走 OEM 代码页，只能放 ASCII
+                self.assertIn(crlf, raw, f"{script.name} 不是 CRLF")
+
     def test_bundle_installs_web_extra(self) -> None:
         """install.ps1 若只装 markovcryptor，guest 上会没有 fastapi。"""
         source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")

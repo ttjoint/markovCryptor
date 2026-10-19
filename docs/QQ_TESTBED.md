@@ -242,7 +242,50 @@ python tools/make_bundle.py --with-snowluma D:/Projects/SnowLuma-v1.14.22-win-x6
   `fastapi` / `uvicorn`。
 - 包内**不含 Python 与 Node 本体** —— 这两样 guest 要自己装。
 
-### 7.2 两个容易卡住的地方
+### 7.2 Win10 上的三个编码/策略坑
+
+Win10 自带 PowerShell 5.1，`ps1` 本身不是问题，但有三处会挡路。
+
+**（一）执行策略 `Restricted`**
+
+Win10 默认就是 `Restricted`，双击或直接跑 `.ps1` 会报：
+
+```
+无法加载文件 …install.ps1，因为在此系统上禁止运行脚本。
+FullyQualifiedErrorId : UnauthorizedAccess
+```
+
+包里每个 `.ps1` 都配了一个 `.bat`，双击即可 —— `.bat` 里带
+`-ExecutionPolicy Bypass`，只影响那一次进程，不改系统设置、不需要管理员。
+
+也可以手工：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+**（二）`.ps1` 必须带 UTF-8 BOM**
+
+PS 5.1 读无 BOM 的 `.ps1` 时按系统 ANSI（中文机是 GBK）解码。脚本里的
+中文注释会被解错，`号` 的尾字节 `` 与行尾 `` 结合成一个汉字，
+**吃掉 CRLF**，把 `param(` 并进上一行注释，于是报：
+
+```
+-File 格式不支持实际参数 .\probe.ps1
+```
+
+这不是「参数没给」，是整段 `param()` 消失了。所以生成 `.ps1` 时
+**BOM + CRLF 都是硬要求**，有测试盯着。
+
+**（三）控制台代码页 936**
+
+即使脚本解码对了，输出中文还是乱。`.bat` 里 `chcp 65001`，`.ps1` 里
+`[Console]::OutputEncoding = UTF8`，Python 子进程里
+`sys.stdout.reconfigure(encoding="utf-8")` —— 三层各管一段。
+
+`.bat` 本身只能放 ASCII（cmd 走 OEM 代码页），所以 `.bat` 里的提示是英文。
+
+### 7.3 两个容易卡住的地方
 
 **（一）首次启动会停在 EULA**
 
@@ -265,7 +308,7 @@ python -m markovcryptor.cli qq-init --snowluma <dir> --uin <UIN> \
 虚拟机网络用**桥接**最省事；用 NAT 的话要在虚拟网络编辑器里加端口转发。
 只在本机测时**不要**用 `0.0.0.0`。
 
-### 7.3 跨机之后必须重跑 P0
+### 7.4 跨机之后必须重跑 P0
 
 单机测得的「图片逐字节原样往返」是在同一条回环路径上得到的。跨机之后
 中间多了虚拟机网络，所以第 5 节的三层验证要按顺序重做，特别是第 3 层：
@@ -279,7 +322,7 @@ python tools/qq_probe.py \
 如果这里变成「被改动」，说明中间有环节重编码了图片，像素域隐写不可用，
 得退回中文信道。
 
-### 7.4 websockets 版本
+### 7.5 websockets 版本
 
 `websockets` 14 起删掉了 `legacy` 实现，鉴权头参数从 `extra_headers`
 改名为 `additional_headers`。项目里所有连 OneBot 的地方统一走
