@@ -374,14 +374,39 @@ def main(argv: list[str] | None = None) -> int:
             check(client.eval("document.querySelector('#b-covert').textContent")
                   .find("文字机密") >= 0, "接收方密文窗收到密文", failures)
 
-            # 图片混淆：消耗 alice 队列最后一张，队列空后按钮重新禁用。
+            # 图片混淆：短密文只需一张，队列里的另一张必须留着。
             client.eval("""(() => {
                 document.querySelector('#a-covert-text').value = '图片机密';
                 document.querySelector('#a-send-image').click();
             })()""")
             time.sleep(4.0)
             check(client.eval("document.querySelectorAll('#a-queue .qitem').length") == 0,
-                  "图片混淆消耗了 alice 队列的图", failures)
+                  "图片混淆消耗了队列里最后一张", failures)
+            check(client.eval("document.querySelectorAll('#a-sent .qitem').length") == 2,
+                  "只消耗够用的张数（不是把整队全发出去）", failures)
+
+            # 自己发的图要显示成图，而不是"[图片]"占位。
+            check(client.eval(
+                "[...document.querySelectorAll('#a-plain img.thumb')]"
+                ".every(i => i.naturalWidth > 0)"),
+                  "自己发的图片在聊天框里正常显示", failures)
+            check("张图片］" not in client.eval(
+                      "document.querySelector('#a-plain').textContent"),
+                  "自己发的不再退化成占位文字", failures)
+
+            # 密文发送的明文窗只显示公开内容，不夹带要隐藏的那句。
+            check("图片机密" not in client.eval(
+                      "document.querySelector('#a-plain').textContent"),
+                  "密文不出现在明文窗", failures)
+            check("图片机密" not in client.eval(
+                      "document.querySelector('#b-plain').textContent"),
+                  "对方的明文窗也不夹带密文", failures)
+
+            # 每条消息带时刻。
+            check(bool(client.eval(
+                "(() => { const w = document.querySelector('#a-plain .who');"
+                " return !!w && /[0-9]{1,2}:[0-9]{2}/.test(w.textContent); })()")),
+                  "消息带时间显示", failures)
             check(client.eval("document.querySelector('#a-send-image').disabled"),
                   "队列空后图片混淆按钮重新禁用", failures)
             check(client.eval("document.querySelector('#a-q-status').textContent")

@@ -17,6 +17,7 @@ list and uploads a picture only when the user actually sends it.
 from __future__ import annotations
 
 import logging
+import time
 from typing import List
 
 from fastapi import UploadFile
@@ -78,6 +79,11 @@ class TerminalHub:
         #: 每个终端**看到**的完整对话（自己发的 + 对方发的），一条时间线。
         #: 两端各自一份，顺序按本地时钟推进——真实的两个客户端也是各记各的。
         self.transcript: dict[str, list[dict]] = {name: [] for name in self.terminals}
+        #: 每个终端自己发出去的图片字节。收件历史里没有"我发的包"，
+        #: 但 UI 要显示自己发的图，所以单独留一份，供 /terminal/media 读。
+        self.outgoing: dict[str, list[tuple[bytes, ...]]] = {
+            name: [] for name in self.terminals
+        }
         for name, terminal in self.terminals.items():
             terminal.on_packet = (
                 lambda sender, packet, n=name: self.raw_history[n].append((sender, packet))
@@ -100,6 +106,10 @@ class TerminalHub:
                 "notes": list(inbound.notes),
                 "handshake": inbound.handshake,
                 "packet_index": index,
+                "own_index": -1,
+                "mode": "plain",
+                # 收到的时间：聊天软件每条消息都要带时刻。
+                "at": time.time(),
             })
         return sink
 
@@ -110,28 +120,41 @@ class TerminalHub:
             del bucket[: len(bucket) - HISTORY_LIMIT]
 
     def note_outgoing(self, name: str, *, mode: str, text: str | None,
-                      image_count: int, covert: str | None = None) -> None:
-        """记一条"我发出的"到本地对话线。
+                      images: tuple[bytes, ...], covert: str | None = None) -> int:
+        """记一条"我发出的"到本地对话线，返回本条在对话线里的序号。
 
         发送动作本身不产生 ``Inbound``（那是收到的包），但聊天软件必须显示
         自己发的消息。这里只在本地记一笔，不进网络——两端各记各的，
         正好对应"两个隔绝的客户端"这个设定。
 
-        ``covert`` 是刚发出去的密文原文。发送方知道自己写了什么，所以
-        密文窗里也该看见它；对方是靠解密才知道的，两条路径互不相干。
+        三件容易搞错的事，都在这里定死：
+
+        * **密文不算聊天内容**：``chat_text`` 只在明文发送时有值。把要隐藏的
+          句子同时显示在明文窗里，等于把密文摊开给旁观者看，还会让人分不清
+          "我到底公开说了什么"。
+        * **图片字节要留一份**：自己发的图不在收件历史里，UI 又要显示它们，
+          所以这里存下来供 ``/terminal/media`` 读。
+        * **``covert`` 是刚发出去的密文原文**：发送方知道自己写了什么，
+          所以密文窗里也该看见它；对方是靠解密才知道的，两条路径互不相干。
         """
-        self._record(name, {
+        entry = {
             "direction": "out",
             "sender": name,
-            "mode": mode,
-            "chat_text": text,
-            "chat_image_count": image_count,
+            # 密文发送的载荷不是公开内容：明文窗只显示真正发出去的话。
+            "chat_text": text if mode == "plain" else None,
+            "chat_image_count": len(images),
             "covert": [covert] if covert else [],
             "notes": [],
             "handshake": None,
+            "mode": mode,
             "packet_index": -1,
-        })
-
+            # 「我发的第几条」——media 端点靠它取自己发的图。
+            "own_index": len(self.outgoing[name]),
+            "at": time.time(),
+        }
+        self.outgoing[name].append(images)
+        self._record(name, entry)
+        return entry["own_index"]
     @property
     def text_channel_ready(self) -> bool:
         return any(t.text_channel is not None for t in self.terminals.values())
@@ -151,6 +174,7 @@ class TerminalHub:
             self.history[name].clear()
             self.raw_history[name].clear()
             self.transcript[name].clear()
+            self.outgoing[name].clear()
         self.network.history.clear()
 
 
@@ -223,19 +247,25 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
         # a covert or handshake send without pictures is refused instead.
         covert = None
         if mode == "covert-image":
-            terminal.send_covert_in_images(peer, text, tuple(raws))
+            # 只从队首取够用的那几张：一句短话一张图就够，其余的留在队列里
+            # 等下次。多发的图不但浪费，还会让"我到底发了几条"变得不可数。
+            need = terminal.images_needed(text, tuple(raws))
+            used = tuple(raws[:need])
+            terminal.send_covert_in_images(peer, text, used)
+            raws = used
             covert = text
         elif mode == "covert-text":
             # 文本混淆不消耗图片：密文藏进生成的中文文本。
             terminal.send_covert_text(peer, text)
+            raws = ()
             covert = text
         elif mode == "handshake":
             terminal.send_handshake(peer, tuple(raws))
         else:
             terminal.send_packet(peer, Packet(text=text or None, images=tuple(raws)))
         # 本地对话线记一笔"我发的"：聊天软件两边都要显示自己说过的话。
-        hub.note_outgoing(name, mode=mode, text=text or None,
-                          image_count=len(raws), covert=covert)
+        own_index = hub.note_outgoing(name, mode=mode, text=text or None,
+                                     images=tuple(raws), covert=covert)
         delivered = hub.pump()
         METRICS.incr("terminal_sent", mode=mode, sender=name)
         return JSONResponse({
@@ -243,29 +273,43 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
             "delivered": delivered,
             "state": terminal.state.value,
             "state_label": terminal.state.label,
+            # 前端据此把用掉的图片从队列移入"已发送"：服务端说了算，
+            # 免得两边各自猜一个数字。
+            "images_used": len(raws),
+            "own_index": own_index,
         })
 
     @app.get("/terminal/media/{name}/{index}")
-    def media(name: str, index: int, image: int = 0) -> Response:
-        """One received host image, so a reloaded page can rebuild its windows.
+    def media(name: str, index: int, image: int = 0, own: bool = False) -> Response:
+        """One host image from either side of a client's transcript.
 
-        ``index`` is the packet's position in the raw history and ``image`` the
-        picture inside that packet. Bytes are served exactly as they arrived;
-        the browser does its own decoding.
+        ``index`` is the message's position in that client's timeline and
+        ``image`` the picture inside it. ``own=true`` reads from what this client
+        *sent*--those bytes never come back through the network, so they are kept
+        separately; otherwise it reads from what it *received*. Bytes are served
+        exactly as they were, and the browser does its own decoding.
         """
         from .core.errors import InvalidInput
 
-        if name not in hub.raw_history:
-            raise InvalidInput(f"未知终端 {name!r}；可用：{sorted(hub.raw_history)}")
-        history = hub.raw_history[name]
-        if not 0 <= index < len(history):
-            raise InvalidInput(
-                f"包序号 {index} 超出范围（0~{len(history) - 1}）"
-            )
-        _sender, packet = history[index]
-        _text, images = _decode_packet(packet)
+        if name not in hub.transcript:
+            raise InvalidInput(f"未知终端 {name!r}；可用：{sorted(hub.transcript)}")
+        if own:
+            sent = hub.outgoing[name]
+            if not 0 <= index < len(sent):
+                raise InvalidInput(
+                    f"已发送序号 {index} 超出范围（0~{len(sent) - 1}）"
+                )
+            images = sent[index]
+        else:
+            history = hub.raw_history[name]
+            if not 0 <= index < len(history):
+                raise InvalidInput(
+                    f"包序号 {index} 超出范围（0~{len(history) - 1}）"
+                )
+            _sender, packet = history[index]
+            _text, images = _decode_packet(packet)
         if not 0 <= image < len(images):
-            raise InvalidInput(f"图片序号 {image} 超出范围（该包有 {len(images)} 张）")
+            raise InvalidInput(f"图片序号 {image} 超出范围（该条有 {len(images)} 张）")
         media_type = _sniff(images[image])
         return Response(content=images[image], media_type=media_type)
 

@@ -296,6 +296,75 @@ class TerminalContractTest(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertIn("hints", response.json())
 
+    def _establish(self):
+        png = _noise_png(256)
+        return _run(self.client.post(
+            "/terminal/alice/send", data={"mode": "handshake"},
+            files=[("files", ("c.png", png, "image/png"))]))
+
+    def test_covert_image_uses_only_as_many_covers_as_needed(self):
+        """短密文只消耗够用的张数，剩下的留在队列里。
+
+        以前是把整个队列都发给服务端，于是一句话也会把用户攒的十几张图
+        全吃掉——图用光了，下一次就没得发。
+        """
+        self._establish()
+        png = _noise_png(256)
+        files = [("files", (f"{i}.png", png, "image/png")) for i in range(6)]
+        response = _run(self.client.post(
+            "/terminal/alice/send", data={"text": "一句话", "mode": "covert-image"},
+            files=files))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["images_used"], 1)
+        # 收到的那一条只带一张图。
+        inbox = _run(self.client.get("/terminal/inbox/bob")).json()
+        sent = [m for m in inbox["messages"] if m["covert"]]
+        self.assertEqual(sent[-1]["chat_image_count"], 1)
+
+    def test_covert_text_is_not_echoed_into_plaintext_window(self):
+        """密文是给对端的，不该同时出现在双方的明文窗里。
+
+        图片混淆发送的 ``chat_text`` 必须为空：那句"图片机密"是载荷，
+        不是公开说的话。夹在明文窗里既泄密，也让人分不清自己公开说了什么。
+        """
+        self._establish()
+        _run(self.client.post(
+            "/terminal/alice/send", data={"text": "秘密一句", "mode": "covert-image"},
+            files=[("files", ("c.png", _noise_png(256), "image/png"))]))
+
+        for name in ("alice", "bob"):
+            body = _run(self.client.get(f"/terminal/inbox/{name}")).json()
+            texts = [m["chat_text"] for m in body["messages"] if m["chat_text"]]
+            self.assertNotIn("秘密一句", texts, f"{name} 的明文窗混进了密文")
+            covert = [s for m in body["messages"] for s in m["covert"]]
+            self.assertIn("秘密一句", covert, f"{name} 的密文窗没收到")
+
+    def test_every_message_carries_a_timestamp(self):
+        """每条消息都要有时刻：没有时间的聊天记录没法对账。"""
+        self._establish()
+        for name in ("alice", "bob"):
+            body = _run(self.client.get(f"/terminal/inbox/{name}")).json()
+            for message in body["messages"]:
+                self.assertIsInstance(message["at"], (int, float))
+                self.assertGreater(message["at"], 0)
+
+    def test_own_images_are_served_back(self):
+        """自己发的图也要能显示：收件历史里没有"我发的包"，得单独留一份。"""
+        self._establish()
+        png = _noise_png(256)
+        _run(self.client.post(
+            "/terminal/alice/send", data={"text": "带图", "mode": "plain"},
+            files=[("files", ("c.png", png, "image/png"))]))
+
+        mine = [m for m in _run(self.client.get(
+            "/terminal/inbox/alice")).json()["messages"] if m["direction"] == "out"]
+        own = [m for m in mine if m["chat_image_count"]]
+        self.assertTrue(own, "没记到自己发的图片")
+        response = _run(self.client.get(
+            f"/terminal/media/alice/{own[-1]['own_index']}?own=true&image=0"))
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["content-type"].startswith("image/"))
+
     def test_state_reports_text_channel_availability(self):
         body = _run(self.client.get("/terminal/state")).json()
         self.assertIn("text_channel_ready", body)

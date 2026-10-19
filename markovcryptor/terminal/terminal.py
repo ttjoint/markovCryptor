@@ -238,6 +238,58 @@ class Terminal:
         """Attach the text carrier. ``channel`` must have ``embed_text``/``extract_text``."""
         self.text_channel = channel
 
+    def images_needed(self, text: str, images: tuple[bytes, ...]) -> int:
+        """How many of ``images`` this message actually needs, front to back.
+
+        One short sentence fits in one picture; sending the other eleven the user
+        lined up would be pure waste -- they stay in the queue for the next
+        message instead. The count comes from the real envelope size against each
+        picture's real capacity, so it agrees with what ``embed`` will accept.
+
+        Raises the same refusals as :meth:`send_covert_in_images` (no session, no
+        text, no pictures) because the caller is about to send anyway.
+        """
+        if not self.session.established:
+            raise InvalidInput(
+                f"会话{self.session.state.label}，不能发送密文",
+                hints=("先做密钥交换：从图片队列取一张图发起握手",),
+            )
+        if not text:
+            raise InvalidInput("密文内容为空",
+                           hints=("在密文输入框里写下要隐藏的内容",))
+        if not images:
+            raise InvalidInput(
+                "图片混淆发送需要至少一张图片：密文只能藏在图片里，不会自动生成",
+                hints=("在待发送预览栏里准备图片", "或改用文本混淆发送（不消耗图片）"),
+            )
+        # 对称密钥下的信封长度与内容无关（GCM 是流式认证加密），所以先用
+        # 真实载荷量一次，再看第几张刚好装得下。
+        envelope = self.session.seal(Kind.BODY_IMAGE, text.encode("utf-8"))
+        used = 0
+        for raw in images:
+            used += 1
+            # 分给 n 张后每张的份额；最后一张可能略小，用最大值判够不够。
+            share = -(-len(envelope) // used)
+            if self._capacity_of(raw) >= share:
+                return used
+        # 全用上也不够：交给 send 去逐张说明原因，比在这里编一个数字好。
+        return len(images)
+
+    def _capacity_of(self, raw: bytes) -> int:
+        """Byte capacity of one picture, whatever its format.
+
+        GIF carries the payload in its first frame and ``gif_stego`` may scale it
+        up, so ask that module for the real number instead of guessing from the
+        file's nominal size.
+        """
+        try:
+            with Image.open(io.BytesIO(raw)) as image:
+                if getattr(image, "n_frames", 1) > 1 or image.format == "GIF":
+                    return gif_stego.capacity(image)["max_payload_bytes"]
+                return image_stego.max_payload_bytes(*image.size)
+        except Exception:                      # noqa: BLE001 - not a picture
+            return 0
+
     def send_covert_in_images(self, target: str, text: str,
                               images: tuple[bytes, ...],
                               *, chat_text: str | None = None) -> None:

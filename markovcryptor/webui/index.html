@@ -1115,12 +1115,15 @@ async function sendCovertImage(me) {
   const text = el(me, "covert-text").value.trim();
   if (!text) { alert("请先输入要隐藏的内容。"); return; }
   if (!c.queue.length) { alert("队列为空，无法图片混淆发送。"); return; }
-  // 服务端把密文均分给这 n 张；装不下会逐张说明，此时一张都不消耗。
+  // 只把够用的张数交给服务端：一句短话一张就够，其余留在队列里。
+  // 具体几张由服务端按每张真实容量算，它回的 images_used 就是答案；
+  // 装不下会逐张说明，此时一张都不消耗。
   const items = c.queue.slice();
   try {
-    await post(me, "covert-image", text, items);
-    flashWire(me, items.length);
-    consume(me, items.length);
+    const result = await post(me, "covert-image", text, items);
+    const used = result.images_used ?? 1;
+    flashWire(me, used);
+    consume(me, used);
     el(me, "covert-text").value = "";
     await poll(me);
   } catch (error) { alert(describeError(error)); }
@@ -1143,6 +1146,26 @@ async function handshake(me) {
 
 // --- 接收 ---
 
+// 自己发的图也要显示成图，不是"[图片]"三个字。收来的图在 raw_history 里，
+// 自己发的图只有本地留的那份，所以地址带 own=true 分流。
+function imageSource(me, message, index) {
+  if (message.direction === "out") {
+    return "/terminal/media/" + me + "/" + message.own_index + "?own=true&image=" + index;
+  }
+  return "/terminal/media/" + me + "/" + message.packet_index + "?image=" + index;
+}
+
+function stamp(at) {
+  if (!at) return "";
+  const d = new Date(at * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  const today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  const clock = pad(d.getHours()) + ":" + pad(d.getMinutes());
+  // 当天的只显示时分，隔天的补上日期，避免"昨天 14:02"被当成今天。
+  return sameDay ? clock : (d.getMonth() + 1) + "/" + d.getDate() + " " + clock;
+}
+
 function renderMessage(box, message, me, withImages) {
   const wrap = document.createElement("div");
   wrap.className = "msg " + (message.direction === "out" ? "out" : "in");
@@ -1151,7 +1174,9 @@ function renderMessage(box, message, me, withImages) {
 
   const who = document.createElement("div");
   who.className = "who";
-  who.textContent = message.direction === "out" ? "我" : message.sender;
+  const name = message.direction === "out" ? "我" : message.sender;
+  const when = stamp(message.at);
+  who.textContent = when ? name + " · " + when : name;
   bubble.append(who);
 
   if (message.chat_text) {
@@ -1159,18 +1184,13 @@ function renderMessage(box, message, me, withImages) {
     p.textContent = message.chat_text;
     bubble.append(p);
   }
-  if (withImages && message.packet_index >= 0) {
+  if (withImages && message.chat_image_count) {
     for (let i = 0; i < message.chat_image_count; i++) {
       const img = document.createElement("img");
       img.className = "thumb"; img.alt = "图片";
-      img.src = "/terminal/media/" + me + "/" + message.packet_index + "?image=" + i;
+      img.src = imageSource(me, message, i);
       bubble.append(img);
     }
-  } else if (message.chat_image_count) {
-    const p = document.createElement("p");
-    p.className = "dim";
-    p.textContent = `［${message.chat_image_count} 张图片］`;
-    bubble.append(p);
   }
   for (const note of message.notes) {
     const p = document.createElement("p");
