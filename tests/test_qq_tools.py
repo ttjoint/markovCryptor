@@ -251,6 +251,61 @@ class PackagingTest(unittest.TestCase):
                 self.assertIn("Get-Command py", body,
                               f"{name} 没做 py 降级查找")
 
+    def test_node_is_started_detached(self) -> None:
+        """node 必须脱离控制台。
+
+        实测踩过：``Start-Process -NoNewWindow`` 让 node 继承调用方的控制台，
+        调用链 start.ps1 -> run-snowluma.ps1 会一直等 node 退出，表现就是
+        "脚本卡住"——服务其实已经起来了。
+        """
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        m = re.search(r'RUN_SNOWLUMA_PS1 = r"""(.*?)"""', source, re.S)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        # 只看可执行行：注释里提到 -NoNewWindow 是在解释为什么不用它。
+        # 只看可执行行：注释里提到 -NoNewWindow 是在解释为什么不用它。
+        code = [ln for ln in body.splitlines()
+                if not ln.lstrip().startswith("#")]
+        joined = chr(10).join(code)
+        self.assertNotIn("-NoNewWindow", joined,
+                         "node 不能继承控制台，否则调用方会一直等")
+        self.assertIn("-WindowStyle Hidden", body)
+        self.assertIn("Start-Process", body)
+
+    def test_one_click_entry_passes_autonomous_env(self) -> None:
+        """免开网页的三件套必须由 run-snowluma 设好。
+
+        对应 SnowLuma 源码里的 SNOWLUMA_ACCEPT_EULA / _PRIVACY /
+        HOOK_AUTOLOAD / WEBUI_BOOTSTRAP_PASSWORD。
+        """
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        m = re.search(r'RUN_SNOWLUMA_PS1 = r"""(.*?)"""', source, re.S)
+        body = m.group(1)
+        for name in ("SNOWLUMA_HOOK_AUTOLOAD",
+                     "SNOWLUMA_ACCEPT_EULA",
+                     "SNOWLUMA_ACCEPT_PRIVACY",
+                     "SNOWLUMA_WEBUI_BOOTSTRAP_PASSWORD"):
+            self.assertIn(name, body, f"缺 {name}，首次启动要开网页手点")
+        # 协议同意必须两个都设，只设一个会被 SnowLuma 当 partial 忽略。
+        self.assertIn('SNOWLUMA_ACCEPT_EULA = "1"', body)
+        self.assertIn('SNOWLUMA_ACCEPT_PRIVACY = "1"', body)
+
+    def test_bundle_ships_one_click_entry(self) -> None:
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        self.assertIn("START_PS1", source)
+        self.assertIn("START_BAT", source)
+        self.assertIn('("start.bat", START_BAT)', source)
+        self.assertIn('("start.ps1", START_PS1)', source)
+
+    def test_probe_reads_port_and_token_from_config(self) -> None:
+        """SnowLuma 首次启动会自己生成随机端口和 token，手抄必错。"""
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        m = re.search(r'PROBE_PS1 = r"""(.*?)"""', source, re.S)
+        body = m.group(1)
+        self.assertIn("onebot_$Uin.json", body)
+        self.assertIn("accessToken", body)
+        self.assertIn("wsServers", body)
+
     def test_param_block_starts_the_script(self) -> None:
         """``param()`` 前只能是注释。
 
@@ -335,8 +390,8 @@ class PackagingTest(unittest.TestCase):
                 cwd=str(ROOT), check=True, capture_output=True)
             ps1 = list(out.rglob("*.ps1"))
             bat = list(out.rglob("*.bat"))
-            self.assertEqual(len(ps1), 3, "应有 3 个 .ps1")
-            self.assertEqual(len(bat), 3, "应有 3 个 .bat")
+            self.assertGreaterEqual(len(ps1), 4, "应有 install/run/probe/start 四个 .ps1")
+            self.assertGreaterEqual(len(bat), 4, "应有 install/run/probe/start 四个 .bat")
             for script in ps1:
                 raw = script.read_bytes()
                 self.assertTrue(raw.startswith(bom), f"{script.name} 缺 UTF-8 BOM")

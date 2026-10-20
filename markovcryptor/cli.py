@@ -302,7 +302,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return 0
 
     if args.command == "qq-init":
-        from .onebot_config import OneBotSettings, write_config
+        from .onebot_config import OneBotSettings, read_settings, write_config
 
         settings = OneBotSettings(uin=str(args.uin), ws_port=args.ws_port,
                                   http_port=args.http_port, host=args.host,
@@ -315,11 +315,25 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         if written:
             print(f"写入 {path.name}：WS {settings.ws_port} / HTTP {settings.http_port}"
                   f"  token={settings.token}")
+            print(f"下一步：启动 SnowLuma，连 {settings.ws_url}")
         else:
+            # 保留要说得足够清楚：SnowLuma 第一次启动会自己生成一份默认配置
+            # （常见是 3000/3001 + 随机 token），此时 qq-init 是空转的。
+            # 不把真实端口打出来，后面一定按 9721 去连，然后 ConnectionRefused。
+            current = read_settings(path)
             print(f"保留 {path.name}（已存在；要重写加 --force）")
+            if current is None:
+                print("  警告：这份文件解析不了，建议删掉后用 --force 重写。",
+                      file=sys.stderr)
+            else:
+                print(f"  该文件现在的实际取值：WS {current.ws_port} / "
+                      f"HTTP {current.http_port}  token={current.token}")
+                if current.ws_port != settings.ws_port:
+                    print(f"  你要的是 WS {settings.ws_port} —— 没生效。"
+                          f"连的时候请用 {current.ws_port}，或加 --force 重写。")
+                print(f"  连这个地址：{current.ws_url}")
         if settings.host == "0.0.0.0":
             print("注意：监听 0.0.0.0 会把这个 OneBot 暴露到局域网，仅跨机测试时这么用。")
-        print(f"下一步：启动 SnowLuma，连 {settings.ws_url}")
         return 0
 
     if args.command == "train":

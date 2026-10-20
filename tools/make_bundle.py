@@ -84,7 +84,7 @@ def _download(target: Path, version: str, platform: str,
         [sys.executable, "-m", "pip", "download", "--only-binary=:all:",
          "--platform", platform, "--python-version", version,
          "--implementation", "cp", "--dest", str(target), *requirements],
-        capture_output=True, text=True)
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode == 0:
         return True
     tail = (result.stderr.strip().splitlines() or ["?"])[-1]
@@ -94,9 +94,15 @@ def _download(target: Path, version: str, platform: str,
 
 def _build_wheels(target: Path) -> None:
     print("  构建本库 wheel…")
-    subprocess.run(
+    # 编码必须显式给：pip 在中文系统上会输出 UTF-8，而 subprocess 默认
+    # 按 GBK 解，遇到 0xaa 之类就是 UnicodeDecodeError。
+    result = subprocess.run(
         [sys.executable, "-m", "pip", "wheel", "--no-deps", "-w", str(target), str(ROOT)],
-        check=True, capture_output=True)
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        print(result.stdout[-800:])
+        print(result.stderr[-800:])
+        raise SystemExit("构建本库 wheel 失败")
     for version in PYTHON_TARGETS:
         for platform in PLATFORMS:
             print(f"  下载依赖 wheel（cp{version.replace('.', '')}-{platform}）…")
@@ -139,6 +145,93 @@ def _copy_snowluma(source: Path, target: Path) -> None:
         print(f"  注意：SnowLuma 里缺 {missing}，guest 上可能起不来")
 
 
+START_PS1 = r'''# 一键启动。由 tools/make_bundle.py 生成。
+# 做四件事：查依赖、准备配置、后台起 SnowLuma、报出 probe 要的参数。
+# 全程不需要开网页：协议同意、hook QQ、WebUI 密码都由环境变量给定。
+param(
+  [long]$Uin = 0,
+  [int]$WsPort = 0,
+  [int]$HttpPort = 0,
+  [int]$TimeoutSec = 120
+)
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$ErrorActionPreference = "Stop"
+$here = $PSScriptRoot
+
+$py = Get-Command py -ErrorAction SilentlyContinue
+if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+if (-not $py) {
+  Write-Host "没有找到 Python。先装 Python 3.11+（勾 Add to PATH）。" -ForegroundColor Red
+  exit 1
+}
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+  Write-Host "没有找到 Node（SnowLuma 要 18+）。" -ForegroundColor Red
+  exit 1
+}
+$snow = Join-Path $here "snowluma"
+if (-not (Test-Path (Join-Path $snow "index.mjs"))) {
+  Write-Host "找不到 $snow\index.mjs —— 这个包没带 SnowLuma。" -ForegroundColor Red
+  exit 1
+}
+
+Write-Host "=== 一键启动 ===" -ForegroundColor Cyan
+
+# [1/3] 依赖。装过就跳过，别每次都等。
+Write-Host "`n[1/3] 检查依赖…" -ForegroundColor Yellow
+& $py -c "import markovcryptor, fastapi, uvicorn, websockets, numpy, PIL, reedsolo, cryptography" 2>$null
+if ($LASTEXITCODE -ne 0) {
+  & $py -m pip install --no-index --find-links "$here\wheels" --upgrade `
+    numpy pillow reedsolo cryptography `
+    fastapi uvicorn python-multipart websockets markovcryptor
+  if ($LASTEXITCODE -ne 0) { Write-Host "  依赖安装失败。" -ForegroundColor Red; exit 1 }
+}
+Write-Host "  已就绪"
+
+# [2/3] 配置。指定了 UIN 且还没有配置就建一份；否则沿用现有的。
+Write-Host "`n[2/3] 准备配置…" -ForegroundColor Yellow
+$cfgDir = Join-Path $snow "config"
+$existing = @()
+if (Test-Path $cfgDir) {
+  $existing = @(Get-ChildItem $cfgDir -Filter "onebot_*.json" | Sort-Object Name)
+}
+if ($Uin -ne 0 -and -not ($existing.Name -contains "onebot_$Uin.json")) {
+  $cliArgs = @("qq-init", "--snowluma", $snow, "--uin", "$Uin")
+  if ($WsPort -ne 0) { $cliArgs += @("--ws-port", "$WsPort") }
+  if ($HttpPort -ne 0) { $cliArgs += @("--http-port", "$HttpPort") }
+  & $py -m markovcryptor.cli @cliArgs
+  if ($LASTEXITCODE -ne 0) { Write-Host "  写配置失败。" -ForegroundColor Red; exit 1 }
+  $existing = @(Get-ChildItem $cfgDir -Filter "onebot_*.json" | Sort-Object Name)
+}
+if ($existing.Count -eq 0) {
+  Write-Host "  没有配置。先登录一次 QQ，再跑：start.bat <你的QQ号>" -ForegroundColor Yellow
+  exit 1
+}
+if ($existing.Count -gt 1) {
+  # 多个号共用一个 SnowLuma 是支持的，但一键启动只能挑一个。
+  Write-Host "  有多份配置，请用 -Uin 指定：" -ForegroundColor Yellow
+  $existing | ForEach-Object { Write-Host ("    " + $_.Name) }
+  exit 1
+}
+$cfgFile = $existing[0].FullName
+$target = Get-Content -Raw $cfgFile | ConvertFrom-Json
+$wantPort = [int]@($target.networks.wsServers)[0].port
+Write-Host ("  使用 " + $existing[0].Name)
+
+# [3/3] 起服务。run-snowluma 自带无人值守环境变量，并会在端口就绪后返回。
+Write-Host "`n[3/3] 启动 SnowLuma（自动 hook QQ、自动同意协议）…" -ForegroundColor Yellow
+& (Join-Path $here "run-snowluma.ps1") -Snowluma $snow -Uin $Uin -TimeoutSec $TimeoutSec
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+Write-Host "`n=== 就绪 ===" -ForegroundColor Green
+Write-Host ("  OneBot WS : 127.0.0.1:" + $wantPort)
+Write-Host ("  Token     : " + @($target.networks.wsServers)[0].accessToken)
+Write-Host ("  WebUI     : http://127.0.0.1:5099/  (admin / mkx-webui-1)")
+Write-Host "`n  发一张图验证（参数只有对端 QQ 号）：" -ForegroundColor Cyan
+Write-Host "    .\probe.bat <对端QQ号>"
+Write-Host ""
+exit 0
+'''
+
 INSTALL_BAT = r"""@echo off
 REM Double-click entry. Win10 ships with ExecutionPolicy=Restricted, so
 REM running a .ps1 directly fails with SecurityError. -ExecutionPolicy Bypass
@@ -157,6 +250,35 @@ if errorlevel 1 (
   exit /b 1
 )
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" %*
+echo.
+pause
+"""
+
+
+START_BAT = r"""@echo off
+REM One-click: check deps, write config, start SnowLuma, wait for OneBot.
+REM Usage: start.bat            (reuse existing config)
+REM        start.bat 1741473279 (first run: create config for this UIN)
+setlocal
+chcp 65001 >nul
+cd /d "%~dp0"
+where py >nul 2>nul || where python >nul 2>nul
+if errorlevel 1 (
+  echo.
+  echo   Python not found. Install Python 3.11+ first.
+  echo.
+  pause
+  exit /b 1
+)
+set UINOPT=
+if not "%~1"=="" set UINOPT=-Uin "%~1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start.ps1" %UINOPT%
+if errorlevel 1 (
+  echo.
+  echo   Startup failed. See snowluma\logs\qqtest.log
+  pause
+  exit /b 1
+)
 echo.
 pause
 """
@@ -182,13 +304,18 @@ REM Chinese console defaults to codepage 936; force UTF-8 so the
 REM script's Chinese output is readable.
 chcp 65001 >nul
 cd /d "%~dp0"
+REM Port and token are read from snowluma\config\onebot_<UIN>.json,
+REM because SnowLuma picks them randomly on first run.
 if "%~1"=="" (
-  echo Usage: probe.bat TOKEN WSPORT PEER_QQ
-  echo Example: probe.bat mkx-123456 9721 654321
+  echo Usage: probe.bat PEER_QQ
+  echo Example: probe.bat 1741473279
+  echo Optional: probe.bat PEER_QQ UIN     (pick config explicitly)
   pause
   exit /b 1
 )
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0probe.ps1" -Token "%~1" -WsPort "%~2" -Peer "%~3"
+set UINOPT=
+if not "%~2"=="" set UINOPT=-Uin "%~2"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0probe.ps1" -Peer "%~1" %UINOPT%
 echo.
 pause
 """
@@ -271,8 +398,10 @@ RUN_SNOWLUMA_PS1 = r"""# 起 SnowLuma 并等 OneBot 端口。由 tools/make_bund
 # 会被当成普通语句解析，报 "The assignment expression is not valid"。
 param(
   [string]$Snowluma = "$PSScriptRoot\snowluma",
-  [int]$WsPort = 9721,
-  [int]$TimeoutSec = 90
+  [int]$WsPort = 0,
+  [long]$Uin = 0,
+  [int]$TimeoutSec = 90,
+  [string]$WebuiPassword = "mkx-webui-1"
 )
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "Stop"
@@ -281,14 +410,54 @@ if (-not (Test-Path (Join-Path $Snowluma "index.mjs"))) {
   Write-Host "找不到 $Snowluma\index.mjs" -ForegroundColor Red; exit 1
 }
 
-$env:SNOWLUMA_HOOK_AUTOLOAD = "1"     # 自动挂载已登录的 QQ
+# 端口从配置读：SnowLuma 首次启动会自己生成一份默认配置（常见 3000/3001），
+# 跟我们以为的 9721 不一致，写死就会一直等一个永远不来的端口。
+if ($WsPort -eq 0) {
+  $cfgDir = Join-Path $Snowluma "config"
+  $files = @()
+  if ($Uin -ne 0) {
+    $files = @(Join-Path $cfgDir "onebot_$Uin.json")
+  } elseif (Test-Path $cfgDir) {
+    $files = @(Get-ChildItem $cfgDir -Filter "onebot_*.json" |
+               Sort-Object Name | ForEach-Object { $_.FullName })
+  }
+  foreach ($f in $files) {
+    if (-not (Test-Path $f)) { continue }
+    try { $cfg = Get-Content -Raw $f | ConvertFrom-Json } catch { continue }
+    $ws = @($cfg.networks.wsServers)[0]
+    if ($ws) {
+      $WsPort = [int]$ws.port
+      Write-Host ("从 " + (Split-Path $f -Leaf) + " 读到 WS 端口 " + $WsPort)
+      break
+    }
+  }
+  if ($WsPort -eq 0) { $WsPort = 9721 }
+}
+
+# --- 无人值守三件套 -------------------------------------------------------
+# 三个都是 SnowLuma 源码里自己认的环境变量，不改它一行代码：
+#   HOOK_AUTOLOAD   自动 hook 已登录的 QQ，不用去 WebUI 里挑 PID
+#   ACCEPT_EULA     自动同意协议，跳过首次启动的同意页
+#   ACCEPT_PRIVACY
+# 两边都设才会生效 —— 只设一个会被当成 partial 而忽略（源码里有明确提示）。
+$env:SNOWLUMA_HOOK_AUTOLOAD = "1"
+$env:SNOWLUMA_ACCEPT_EULA = "1"
+$env:SNOWLUMA_ACCEPT_PRIVACY = "1"
+
+# 省掉"必须大小写+特殊字符"的改密码流程：设了引导密码就按
+# mustChangePassword=false 落盘，直接能用给定密码登录 WebUI。
+if ($WebuiPassword) { $env:SNOWLUMA_WEBUI_BOOTSTRAP_PASSWORD = $WebuiPassword }
+
 $log = Join-Path $Snowluma "logs\qqtest.log"
 New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
 
 Write-Host "启动 SnowLuma（自动 hook 已登录 QQ）…" -ForegroundColor Cyan
 Write-Host "日志：$log"
+# 必须不带 -NoNewWindow：那样 node 会继承当前控制台，调用方（start.bat /
+# 本脚本的调用者）会一直等它退出，看着像"卡住"。加 -WindowStyle Hidden
+# 让它真正独立运行，关闭启动窗口也不影响服务。
 $proc = Start-Process -FilePath "node" -ArgumentList "index.mjs" `
-  -WorkingDirectory $Snowluma -PassThru -NoNewWindow `
+  -WorkingDirectory $Snowluma -PassThru -WindowStyle Hidden `
   -RedirectStandardOutput $log -RedirectStandardError "$log.err"
 
 for ($i = 0; $i -lt $TimeoutSec; $i++) {
@@ -323,11 +492,14 @@ exit 1
 
 
 PROBE_PS1 = r"""# 发一张图，验 OneBot 通不通。由 tools/make_bundle.py 生成。
-# 用法：.\probe.ps1 -Token mkx-<UIN> -WsPort 9721 -Peer <对端QQ号>
+# 用法：.\probe.ps1 -Peer <对端QQ号> [-Uin <本机QQ号>] [-WsPort N] [-Token T]
+# 不给 Uin/Token/WsPort 时自动读 snowluma\config\onebot_<UIN>.json ——
+# SnowLuma 自己生成的配置端口和 token 都是随机的，手抄必错。
 param(
-  [Parameter(Mandatory = $true)][string]$Token,
-  [int]$WsPort = 9721,
-  [Parameter(Mandatory = $true)][long]$Peer
+  [Parameter(Mandatory = $true)][long]$Peer,
+  [long]$Uin = 0,
+  [int]$WsPort = 0,
+  [string]$Token = ""
 )
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "Stop"
@@ -344,6 +516,39 @@ if (-not $py) {
   Write-Host "先跑 .\install.bat 装依赖；它同样需要 Python 3.11+。"
   exit 1
 }
+
+# 从配置文件里取真实的端口和 token。优先级：命令行 > 配置文件 > 内置默认。
+$cfg = $null
+if (-not $Token -or $WsPort -eq 0) {
+  $cfgDir = Join-Path $PSScriptRoot "snowluma\config"
+  $files = @()
+  if ($Uin -ne 0) {
+    $files = @(Join-Path $cfgDir "onebot_$Uin.json")
+  } elseif (Test-Path $cfgDir) {
+    $files = @(Get-ChildItem $cfgDir -Filter "onebot_*.json" |
+               Sort-Object Name | ForEach-Object { $_.FullName })
+  }
+  foreach ($f in $files) {
+    if (-not (Test-Path $f)) { continue }
+    try { $cfg = Get-Content -Raw $f | ConvertFrom-Json } catch { continue }
+    Write-Host ("读取配置：" + (Split-Path $f -Leaf))
+    break
+  }
+  if ($cfg) {
+    $ws = @($cfg.networks.wsServers)[0]
+    if ($ws) {
+      if ($WsPort -eq 0) { $WsPort = [int]$ws.port }
+      if (-not $Token) { $Token = [string]$ws.accessToken }
+    }
+  }
+}
+if ($WsPort -eq 0) { $WsPort = 9721 }
+if (-not $Token) {
+  Write-Host "找不到配置里的 token，也没有 -Token。" -ForegroundColor Red
+  Write-Host "先跑 qq-init，或直接 -Token <wsServers[0].accessToken>。"
+  exit 1
+}
+Write-Host ("连接 ws://127.0.0.1:$WsPort/  token 长度 " + $Token.Length)
 
 $code = @'
 import asyncio, base64, hashlib, io, json, sys
@@ -387,123 +592,92 @@ CHECKLIST = r"""# QQ 跨机连通性测试 · 操作清单
 
 ---
 
-## 一、两边都要准备的东西
+## 一、前置条件（只需满足一次）
 
 | 项目 | 说明 |
 |---|---|
-| Windows | guest 是 Win10，本机不限 |
-| **Python 3.11+** | 包里 `wheels/` 是离线依赖，但 Python 本体要自己装 |
+| **Python 3.11+** | 包里 `wheels/` 是离线依赖，Python 本体要自己装 |
 | **Node 18+** | SnowLuma 需要 |
-| **QQ 客户端** | 已登录，且两个号**互为好友** |
-| SnowLuma | 本包 `snowluma/`（若打包时加了 `--with-snowluma`） |
+| **QQ 客户端** | **已登录**，且两个号**互为好友** |
 
-> 两个 QQ 必须互为好友，否则 `send_private_msg` 会失败或消息不投递。
-
----
-
-## 二、端口约定
-
-装之前先把表填好，两边**不能冲突**（同一台机器上冲突；两台机器各自独立）。
-
-| | 本机（宿主机） | 虚拟机（Win10） |
-|---|---|---|
-| QQ 号 | ________________ | ________________ |
-| OneBot WS | 9711 | 9721 |
-| OneBot HTTP | 9712 | 9722 |
-| SnowLuma WebUI | 5099 | 5099 |
-| markovcryptor 端口 | 8731 | 8731 |
-
-之前实测确认的两件事：
-
-1. **一个 SnowLuma 只挂一个号时不用改端口**；同一台机器挂两个号才需要分开
-   （会 `EADDRINUSE`）。
-2. **虚拟机和宿主机是两个系统**，所以 5099 / 8731 两边相同也没关系。
+> 包里不含 Python / Node 本体。QQ 必须**先登录**——SnowLuma 是 hook 已登录的
+> 进程，它不能替你输密码、过验证码。这是唯一无法自动化的环节。
 
 ---
 
-## 三、guest（Win10 虚拟机）步骤
+## 二、一键启动（推荐）
 
-1. 把整个 `qqtest-*` 目录拷进虚拟机（共享文件夹、U 盘都行）。
-2. 确认 guest 上装好 **Python 3.11+**（`python --version`）和 **Node 18+**
-   （`node --version`）。
-3. 在 PowerShell 里：
-   ```powershell
-   cd <拷进去的目录>
-   .\install.ps1
-   ```
-   预期最后一行：`imports ok, webui 5xxxx bytes`。
-4. **首次启动要先点同意**（重要）：
-   干净的 SnowLuma 在没有 `config/consent.json` 时会停在
-   「awaiting EULA/PRIVACY consent」，**此时 QQ hook 和 OneBot 端口都不会起**。
+把整个 `qqtest-*` 目录拷进虚拟机，然后**双击 `start.bat`**。
 
-   先正常启一次，看日志里给出的初始密码：
-   ```powershell
-   .\run-snowluma.ps1 -WsPort 9721     # 这次会超时，是预期的
-   Get-Content .\snowluma\logs\qqtest.log | Select-String "initial credentials"
-   ```
-   浏览器开 http://127.0.0.1:5099/ ，用 `admin` + 那个密码登录，
-   同意 EULA，再改一个自己的密码。**这一步只需做一次**，之后
-   `config/consent.json` 与 `config/webui.json` 都会留下，重启不再问。
-5. 配 SnowLuma（`<UIN>` 换成 guest 上登录的号）：
-   ```powershell
-   python -m markovcryptor.cli qq-init --snowluma .\snowluma --uin <UIN> --ws-port 9721 --http-port 9722
-   ```
-6. 起 SnowLuma：
-   ```powershell
-   .\run-snowluma.ps1 -WsPort 9721
-   ```
-   预期：`就绪：OneBot WS 127.0.0.1:9721`。
+首次运行需要告诉它哪个号：
 
-   双击 `run-snowluma.bat` 也行（端口默认 9721）。
+```powershell
+.\start.bat 1741473279
+```
 
----
+之后直接双击 `start.bat`（或 `.\start.bat`）即可，端口和 token 自动沿用。
 
-## 四、本机步骤
+它会依次做：
 
-1. 配 SnowLuma（用本机那个号的 UIN）：
-   ```bash
-   python tools/qq_setup.py init --snowluma D:/Projects/SnowLuma-v1.14.22-win-x64-lite --a-uin <本机UIN>
-   python tools/qq_setup.py up --snowluma D:/Projects/SnowLuma-v1.14.22-win-x64-lite
-   ```
-   本机 `qq_setup init` 默认给 a 号 9711。
+1. 检查依赖（装过就跳过，几秒钟）
+2. 没有配置就用 `qq-init` 生成一份
+3. 后台起 SnowLuma，等 OneBot 端口就绪
+4. 打印 `probe.bat` 要用的端口和 token
 
-2. 起终端页：
-   ```bash
-   python -m markovcryptor.cli serve
-   ```
-   浏览器开 http://127.0.0.1:8731/ → 终端页。
+**全程不需要打开网页**：协议同意、hook QQ、WebUI 密码都由环境变量给定
+（见附录）。实测约 6 秒返回，node 在后台独立运行，关掉窗口也不影响。
+
+预期输出最后几行：
+
+```
+=== 就绪 ===
+  OneBot WS : 127.0.0.1:9721
+  Token     : mkx-1741473279
+  WebUI     : http://127.0.0.1:5099/  (admin / mkx-webui-1)
+
+  发一张图验证（参数只有对端 QQ 号）：
+    .\probe.bat <对端QQ号>
+```
+
+### 分步执行（想看清每一步时）
+
+```powershell
+.\install.bat                      # 装依赖，可选：start.bat 会自动装
+.\run-snowluma.bat                 # 只起服务
+.\probe.bat 3925697820             # 发一张图（参数是对端 QQ 号）
+```
+
+`run-snowluma.bat` 端口从 `snowluma\config\onebot_*.json` 读，不用手工传。
 
 ---
 
-## 五、连通性怎么验（分三层，逐层排除）
+## 三、怎么验证连通（分三层，逐层排除）
 
 **不要一上来就测隐写**。哪层断了就停在那层。
 
 ### 第 1 层：QQ 本身通不通
 
-guest 上给宿主机那个号发一句普通文字。收到了 → 好友关系、网络、QQ 都正常。
+虚拟机给宿主机那个号发一句普通文字。收到了 → 好友关系、网络、QQ 都正常。
 
 ### 第 2 层：OneBot 能不能发消息
 
-在 guest 本机跑，不需要跨机网络：
-
 ```powershell
-.\probe.ps1 -Token mkx-<guest的UIN> -WsPort 9721 -Peer <宿主机QQ号>
+.\probe.bat <对端QQ号>
 ```
 
-预期 `已发出: {'message_id': ...}`。这同时验了三件事：端口通、token 对、
-`send_private_msg` 有权限。
+预期 `已发出: {'message_id': ...}`。这同时验了端口通、token 对、
+`send_private_msg` 有权限。**不需要知道端口和 token** —— 脚本自己从配置里读。
 
 ### 第 3 层：图片能不能原样往返（P0）
 
-这是像素域隐写的前提。需要**宿主机能连到 guest 的 9721**（见第六节）。
+这是像素域隐写的前提，需要**宿主机能连到虚拟机的 OneBot**（见第五节）。
 
 在宿主机跑：
 
 ```bash
-python tools/qq_probe.py `
-  --a-uin <本机UIN>  --a-ws ws://127.0.0.1:9711/ --a-token mkx-<本机UIN> `
-  --b-uin <guest的UIN> --b-ws ws://<guest IP>:9721/ --b-token mkx-<guestUIN>
+python tools/qq_probe.py \
+  --a-uin <本机UIN>  --a-ws ws://127.0.0.1:9711/ --a-token mkx-<本机UIN> \
+  --b-uin <guestUIN> --b-ws ws://<guest IP>:9721/ --b-token mkx-<guestUIN>
 ```
 
 预期：
@@ -513,16 +687,27 @@ python tools/qq_probe.py `
 结论：QQ 原样往返图片，像素域隐写（DCT-QIM）在 QQ 上可用。
 ```
 
-**跨机之后必须重跑这一步**：之前的一致性结论是同一台机器两个号之间得的，
-中间现在多了一条虚拟机网络路径。如果这里变成「被改动」，说明中间有环节
-重编码了图片。
-
-> 不想改网络也行：把这条命令反过来在 guest 上跑，`--a-ws` 指向 guest 自己的
-> `127.0.0.1:9721`，`--b-ws` 指向宿主机的 9711。
+**跨机之后必须重跑这一步**：一致性结论之前是同一台机器两个号之间得的，
+现在中间多了一条虚拟机网络路径。如果这里变成「被改动」，说明有环节重编码。
 
 ---
 
-## 六、虚拟机网络怎么配（最容易卡在这）
+## 四、端口约定
+
+同一台机器挂两个号时才需要分开（会 `EADDRINUSE`）。虚拟机和宿主机是
+两个系统，5099 / 8731 相同没有关系。
+
+| | 本机（宿主机） | 虚拟机（Win10） |
+|---|---|---|
+| QQ 号 | ________________ | ________________ |
+| OneBot WS | 9711 | 9721 |
+| OneBot HTTP | 9712 | 9722 |
+| SnowLuma WebUI | 5099 | 5099 |
+| markovcryptor 端口 | 8731 | 8731 |
+
+---
+
+## 五、虚拟机网络怎么配（最容易卡在这）
 
 默认 **NAT** 下 guest 能出去，但宿主机连不进去。
 
@@ -548,7 +733,7 @@ NAT 下宿主机用 `127.0.0.1:9721` 去连。
 要让另一台机器连进来：
 
 ```powershell
-python -m markovcryptor.cli qq-init --snowluma .\snowluma --uin <UIN> ``
+python -m markovcryptor.cli qq-init --snowluma .\snowluma --uin <UIN> `
   --ws-port 9721 --http-port 9722 --host 0.0.0.0 --force
 ```
 
@@ -566,22 +751,39 @@ New-NetFirewallRule -DisplayName "OneBot 9721" -Direction Inbound -LocalPort 972
 
 ---
 
+## 六、本机（宿主机）步骤
+
+```bash
+python tools/qq_setup.py init --snowluma D:/Projects/SnowLuma-v1.14.22-win-x64-lite --a-uin <本机UIN>
+python tools/qq_setup.py up   --snowluma D:/Projects/SnowLuma-v1.14.22-win-x64-lite
+python -m markovcryptor.cli serve
+```
+
+浏览器开 http://127.0.0.1:8731/ → 终端页。
+
+---
+
 ## 七、常见失败与判断
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `ConnectionRefused` | SnowLuma 没起 / 端口不对 | 看 `snowluma\logs\qqtest.log` |
-| `HTTP 401` | token 不匹配 | token 就是 `mkx-<UIN>`，核对 UIN |
+| `ConnectionRefused` | SnowLuma 没起 / 端口不对 | 看 `snowluma\logs\qqtest.log`；`start.bat` 会打印真实端口 |
+| `HTTP 401` | token 不匹配 | 用配置文件里的 `wsServers[0].accessToken`，不是 `httpServers` 那个 |
 | 连上了但收不到消息 | 好友关系 / 发的是群聊 | 确认两号互为好友，确认私聊 |
-| 没有 `login detected` | QQ 没登录 / hook 失败 | 手动登录 QQ，重启 SnowLuma |
-| 卡在 `awaiting EULA/PRIVACY consent` | 首次运行没同意 | 看第三节第 4 步，登录 WebUI 点同意 |
-| WebUI 密码不知道 | 全新目录会生成随机密码 | 在日志里搜 `initial credentials` |
+| 没有 `login detected` | QQ 没登录 | 先登录 QQ，再重跑 `start.bat` |
+| 卡在 `awaiting EULA` | 旧脚本没设 `SNOWLUMA_ACCEPT_*` | 用本包的 `start.bat`，它已经设好 |
 | `EADDRINUSE` | 同机两号端口相同 | 每号一份 `onebot_<UIN>.json`，端口分开 |
 | 图片「被改动」 | 中间有重编码 | 改走中文信道，或换文件传输 |
-| `markovcryptor` 找不到 | 没跑 install.ps1 | 先跑 `install.bat` |
-| `禁止运行脚本` / `UnauthorizedAccess` | Win10 默认执行策略 | 双击 `.bat`，或加 `-ExecutionPolicy Bypass` |
-| `.ps1` 报 `缺少实际参数` / 中文乱码 | 脚本没 BOM（旧包） | 用 0.3.0 之后重新打的包 |
-| `python` 不是命令 | 没勾 Add to PATH | 用 `py` 代替 |
+| `禁止运行脚本` | Win10 默认执行策略 | 双击 `.bat`；或 `powershell -ExecutionPolicy Bypass -File x.ps1` |
+| `.ps1` 报 `缺少实际参数` | 脚本没 BOM（旧包） | 用 0.3.0 之后重新打的包 |
+| `python` 不是命令 | 没勾 Add to PATH | 用 `py`，或跑 `.bat`（内部优先用 `py`） |
+| 装依赖报 `No matching distribution found for numpy` | 缺对应 wheel | 用本包（覆盖 cp311–cp315 × 32/64 位） |
+
+排查服务状态：
+
+```powershell
+Get-Content .\snowluma\logs\qqtest.log -Tail 30
+```
 
 ---
 
@@ -592,12 +794,26 @@ New-NetFirewallRule -DisplayName "OneBot 9721" -Direction Inbound -LocalPort 972
 Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
   Where-Object { $_.CommandLine -match 'index\.mjs' } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
-
-# 本机
-python tools/qq_setup.py down
 ```
 
 **不要**按进程名杀 QQ（`Stop-Process -Name QQ`）—— 会关掉你正在用的 QQ。
+
+---
+
+## 附录：无人值守用到的 SnowLuma 环境变量
+
+这些都写在 `run-snowluma.ps1` 里，是 SnowLuma 源码自己认的变量，**不改它一行代码**：
+
+| 变量 | 作用 |
+|---|---|
+| `SNOWLUMA_HOOK_AUTOLOAD=1` | 自动 hook 已登录的 QQ，不用去 WebUI 挑 PID |
+| `SNOWLUMA_ACCEPT_EULA=1` | 自动同意 EULA，跳过同意页 |
+| `SNOWLUMA_ACCEPT_PRIVACY=1` | 自动同意隐私协议。**两个都设才生效**，只设一个会被忽略 |
+| `SNOWLUMA_WEBUI_BOOTSTRAP_PASSWORD` | 设定初始密码，同时 `mustChangePassword=false`，跳过强制改密码 |
+
+默认 WebUI 密码：`admin` / `mkx-webui-1`（可改：`run-snowluma.bat -WebuiPassword <新密码>`）。
+
+协议同意是**临时**的：不写 `consent.json`，每次启动靠环境变量生效。
 """
 
 
@@ -629,6 +845,8 @@ def _write_bundle(root: Path, args: argparse.Namespace, version: str) -> dict:
                        ("install.bat", INSTALL_BAT),
                        ("run-snowluma.bat", RUN_BAT),
                        ("probe.bat", PROBE_BAT),
+                       ("start.ps1", START_PS1),
+                       ("start.bat", START_BAT),
                        ("CHECKLIST.md", CHECKLIST)):
         path = root / name
         body = text.replace("\r\n", "\n").replace("\n", "\r\n")
