@@ -232,6 +232,20 @@ def frames_for(target: str, packet: bytes, *,
                packet_id: int | None = None) -> list[dict]:
     """PKT1 packet bytes -> the OneBot actions that put it on the wire.
 
+    One packet becomes **one** message: text segment first, then every picture,
+    in the order the user chose them. A QQ message is a segment list -- it
+    carries words and a dozen pictures at once -- and the P0 measurement did
+    exactly this (one ``send_private_msg`` with three ``image`` segments) and got
+    all three back merged into a single message, in order, byte for byte
+    (``docs/QQ_TRANSPORT.md`` §4 第 2 条).
+
+    So why keep the per-picture trailer at all, if they travel together? Because
+    the same measurement also says they *may* be split apart, and that depends on
+    the QQ build, the account's risk state and whether it is a group. Splitting
+    on the sending side is a guess about the receiver; keeping the trailer is
+    insurance that costs 14 bytes and stays invisible (it rides after ``IEND``).
+    The receiver does not care which happened -- see :class:`Reassembler`.
+
     Pure (no socket, no clock beyond id generation), which is what lets the
     mapping be tested exactly.
     """
@@ -239,19 +253,44 @@ def frames_for(target: str, packet: bytes, *,
     if not images:
         if not text:
             raise TransportError("空包：既没有文字也没有图片")
-        # Text-only is a single message and needs no reassembly at all.
+        # Text-only: one message, and nothing to reassemble.
         return [_action(target, [{"type": "text", "data": {"text": text}}])]
 
+    pid = _new_packet_id() if packet_id is None else packet_id
+    count = len(images)
+    segments: list[dict] = []
+    if text:
+        # Words first: that is the order a person reads a message in, and it
+        # keeps the visible part of a covert send where the user put it.
+        segments.append({"type": "text", "data": {"text": text}})
+    for index, raw in enumerate(images):
+        segments.append(_image_segment(attach_trailer(raw, pid, index, count)))
+    return [_action(target, segments, echo=f"mkx-{pid}")]
+
+
+def frames_split(target: str, packet: bytes, *,
+                 packet_id: int | None = None) -> list[dict]:
+    """Same packet, one message per picture.
+
+    Not the default, but not dead code either: a group chat or a stricter QQ
+    build can drop a multi-picture message outright, and a caller that has
+    already seen that happen needs a way to fall back without reimplementing the
+    framing. The trailers are identical either way, so the receiver cannot tell
+    the difference -- which is the property that makes the fallback safe to use
+    mid-conversation.
+    """
+    text, images = _decode_packet(packet)
+    if not images:
+        return frames_for(target, packet, packet_id=packet_id)
     pid = _new_packet_id() if packet_id is None else packet_id
     count = len(images)
     actions = []
     for index, raw in enumerate(images):
         marked = attach_trailer(raw, pid, index, count)
-        segments = []
+        segments: list[dict] = []
         if index == 0 and text:
-            # Text rides with the first picture so it shares that picture's
-            # packet id; a separate text message would have no id at all and
-            # would be delivered as its own, unrelated packet.
+            # Text rides with the first picture; a separate text-only message
+            # would carry no packet id and would be delivered as its own packet.
             segments.append({"type": "text", "data": {"text": text}})
         segments.append(_image_segment(marked))
         actions.append(_action(target, segments, echo=f"mkx-{pid}-{index}"))
@@ -582,6 +621,11 @@ class InProcessOneBot:
         self.pending: list[tuple[str, dict]] = []
         #: Every action ever routed, in order, for assertions and transcripts.
         self.history: list[tuple[str, dict]] = []
+        #: Split every outgoing message into one event per image segment.
+        #: Real QQ does this sometimes (group chats, stricter builds), and it is
+        #: the case the reassembly rules exist for. Default off, because the
+        #: common path -- and what P0 measured -- is a single merged message.
+        self.split_messages = False
 
     def connect(self, uin: str) -> InProcessOneBotNetwork:
         """Create and "connect" one account. Returns its network."""
@@ -599,12 +643,28 @@ class InProcessOneBot:
             event("onebot", "in_process_no_target", level=logging.DEBUG,
                   sender=sender, target=target)
             return
+        segments = params.get("message") or []
+        if self.split_messages and len(segments) > 1:
+            # One event per image; the text (if any) rides with the first, which
+            # is exactly what the sender already put there.
+            text = [seg for seg in segments if seg.get("type") == "text"]
+            images = [seg for seg in segments if seg.get("type") == "image"]
+            for position, image in enumerate(images):
+                batch = ([*text] if position == 0 else []) + [image]
+                self.pending.append((target, {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "user_id": int(sender),
+                    "self_id": int(target),
+                    "message": batch,
+                }))
+            return
         self.pending.append((target, {
             "post_type": "message",
             "message_type": "private",
             "user_id": int(sender),
             "self_id": int(target),
-            "message": params.get("message") or [],
+            "message": segments,
         }))
 
     def pump(self, *, reverse: bool = False, max_rounds: int = 500) -> int:

@@ -156,13 +156,31 @@ class FramesForTest(unittest.TestCase):
                          "user_id 必须是数字，字符串会被 OneBot 拒掉")
         self.assertEqual(action["params"]["message"][0]["type"], "image")
 
-    def test_each_picture_carries_its_own_trailer(self):
+    def test_many_pictures_go_in_one_message(self):
+        """一条 QQ 消息本来就装得下文本 + 多张图，不要拆。
+
+        P0 实测就是这么发的（一条 `send_private_msg` 带 3 个 image 段），
+        收回来的也是合并成一条、顺序不变、逐字节一致。
+        """
         images = (_png((1, 1, 1)), _png((2, 2, 2)))
         actions = frames_for("1", _encode_packet(Packet(images=images)))
-        self.assertEqual(len(actions), 2, "两张图必须是两条消息，QQ 不保证合并")
+        self.assertEqual(len(actions), 1, "两张图应当一条消息发完")
+        message = actions[0]["params"]["message"]
+        self.assertEqual([seg["type"] for seg in message], ["image", "image"],
+                         "顺序就是用户选的顺序")
+
+    def test_every_picture_carries_its_own_trailer(self):
+        """装在一条消息里，也照样带分组头。
+
+        QQ 可能把一条多图消息拆开推送（取决于版本/风控/是否群聊），
+        那时收侧只能靠这个头重组。14 字节的保险，看不见也不影响像素。
+        """
+        images = (_png((1, 1, 1)), _png((2, 2, 2)))
+        actions = frames_for("1", _encode_packet(Packet(images=images)))
+        message = actions[0]["params"]["message"]
+        self.assertEqual(len(message), 2)
         seen = []
-        for action in actions:
-            segment = action["params"]["message"][-1]
+        for segment in message:
             raw = base64.b64decode(segment["data"]["file"][len("base64://"):])
             body, packet_id, index, count = strip_trailer(raw)
             seen.append((packet_id, index, count))
@@ -170,6 +188,27 @@ class FramesForTest(unittest.TestCase):
         self.assertEqual(len({pid for pid, _, _ in seen}), 1, "同一包必须同一个 id")
         self.assertEqual([i for _, i, _ in seen], [0, 1])
         self.assertEqual({c for _, _, c in seen}, {2})
+
+    def test_frames_split_is_the_documented_fallback(self):
+        """一条消息装不下时（群聊/严格版本）要能改成一图一条。
+
+        分组头一样，所以收侧无法区分两种发法 —— 这正是它能中途切换的原因。
+        """
+        from markovcryptor.terminal.onebot import frames_split
+
+        images = (_png((1, 1, 1)), _png((2, 2, 2)), _png((3, 3, 3)))
+        actions = frames_split("1", _encode_packet(Packet(images=images)))
+        self.assertEqual(len(actions), 3)
+        ids, indexes = set(), []
+        for action in actions:
+            raw = base64.b64decode(
+                action["params"]["message"][-1]["data"]["file"][len("base64://"):])
+            _body, pid, index, count = strip_trailer(raw)
+            ids.add(pid)
+            indexes.append(index)
+            self.assertEqual(count, 3)
+        self.assertEqual(len(ids), 1)
+        self.assertEqual(indexes, [0, 1, 2])
 
     def test_text_rides_with_the_first_picture(self):
         """A separate text message would arrive with no packet id at all."""
@@ -389,6 +428,28 @@ class TwoSidesOverOneBotTest(unittest.TestCase):
         self.assertEqual([t for i in bob.inbox for t in i.covert], ["去吗？"])
         self.assertEqual([t for i in alice.inbox for t in i.covert], ["去。"])
 
+    def test_reassembles_when_qq_splits_the_message(self):
+        """兜底路径：QQ 真把一条多图消息拆成几条，也要能拼回去。
+
+        这不是假设——同一条实测里也提到"也可能被拆开"。分组头存在的唯一
+        理由就是这个，所以必须有一条测试真的把它拆开。
+        """
+        hub, sides = self._pair()
+        alice, _ = sides["alice"]
+        bob, _ = sides["bob"]
+        alice.send_handshake("10002", (_png((11, 21, 31)),))
+        hub.pump()
+        bob.inbox.clear()
+
+        hub.split_messages = True
+        secret = "拆开也要能拼回来"
+        alice.send_covert_in_images("10002", secret,
+                                    (_png((1, 2, 3)), _png((4, 5, 6)), _png((7, 8, 9))))
+        hub.pump()
+
+        got = [text for item in bob.inbox for text in item.covert]
+        self.assertEqual(got, [secret], "被拆成三条消息后仍应按序号拼回原文")
+
     def test_ordinary_chat_never_reaches_the_covert_window(self):
         """The security claim, over the real transport.
 
@@ -425,10 +486,10 @@ class TwoSidesOverOneBotTest(unittest.TestCase):
         first, second = _png((1, 1, 1)), _png((2, 2, 2))
         net_a.send("10001", "10002", _encode_packet(
             Packet(images=(first, second), text="两张图")))
-        self.assertEqual(len(hub.pending), 2, "两张图必须是两条独立消息")
+        self.assertEqual(len(hub.pending), 1, "两张图一条消息发完")
         hub.pump()
 
-        self.assertEqual(len(bob.inbox), 1, "两条消息应拼成一个包")
+        self.assertEqual(len(bob.inbox), 1, "应当是一个包")
         inbound = bob.inbox[0]
         self.assertEqual(inbound.chat_text, "两张图")
         self.assertEqual(len(inbound.chat_images), 2)

@@ -11,6 +11,10 @@
     run-snowluma.ps1     起 SnowLuma 并等 OneBot 端口
     probe.ps1            发一张图，验 OneBot 通不通
     chat.ps1             两个 QQ 号互联：开终端 UI，握手 + 密文都走真 QQ
+
+包里 `wheels/` 内的 markovcryptor wheel 自带 `covers/*.jpg`（两张由本项目
+`data/` 真实测试照片缩成的 JPEG），供 QQ 模式下自动握手回包当底图。
+不要换成程序生成的渐变噪声图：QQ 风控会盯上那种形态。
     CHECKLIST.md         手工步骤与预期结果
     manifest.json        版本、md5、端口分配
 

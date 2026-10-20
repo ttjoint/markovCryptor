@@ -49,7 +49,7 @@ include = ["markovcryptor*"]
 # The Web UI is a single static file served by ``webui.py``; without this it is
 # left out of the wheel and every installed copy returns 404 on ``/``.
 [tool.setuptools.package-data]
-markovcryptor = ["webui/*.html"]
+markovcryptor = ["webui/*.html", "covers/*.jpg"]
 
 # The suite is stdlib unittest, so configure nothing for pytest beyond the path:
 # it is optional (see [project.optional-dependencies].dev) for anyone who wants it.

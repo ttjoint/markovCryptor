@@ -47,6 +47,7 @@ _utf8_stdout()
 
 from PIL import Image  # noqa: E402
 
+from markovcryptor import covers as covers_pkg
 from markovcryptor.observability import configure  # noqa: E402
 from markovcryptor.terminal import Terminal  # noqa: E402
 from markovcryptor.terminal.onebot import OneBotNetwork  # noqa: E402
@@ -55,49 +56,43 @@ from markovcryptor.terminal.onebot import OneBotNetwork  # noqa: E402
 # --------------------------------------------------------------------- covers
 
 
-def synthetic_cover(seed: int = 0, size: int = 512) -> bytes:
-    """一张"看起来像照片"的载体。
-
-    真的照片当然更好——越像随手拍的越好。但一个能自己造载体的工具才跑得起来，
-    而且它的用途是**验证链路**，不是发出去骗人。渐变 + 噪声让 QIM 有足够的
-    块可改，也让图不至于是一块纯色（纯色图会被一眼看出是生成的）。
-    """
-    import numpy as np
-
-    rng = np.random.default_rng(seed)
-    height = width = size
-    # 两个方向都广播到 (H, W)，否则 stack 会因为 (1,W) 和 (H,1) 形状不同而报错。
-    y = np.broadcast_to(np.linspace(0, 1, height)[:, None], (height, width))
-    x = np.broadcast_to(np.linspace(0, 1, width)[None, :], (height, width))
-    base = np.stack([
-        120 + 60 * np.sin(3.1 * x + seed),
-        110 + 50 * np.cos(2.7 * y + seed),
-        100 + 70 * np.sin(2.2 * (x + y)),
-    ], axis=-1)
-    noise = rng.normal(0, 6, (height, width, 3))
-    pixels = np.clip(base + noise, 0, 255).astype(np.uint8)
-    buffer = io.BytesIO()
-    Image.fromarray(pixels, "RGB").save(buffer, "PNG")
-    return buffer.getvalue()
-
-
 def load_covers(directory: Path | None, count: int = 4) -> list[bytes]:
-    """Use real photos when given, else make our own."""
-    covers: list[bytes] = []
+    """载入底图，优先用用户给的目录，否则用包里自带的真实照片。
+
+    为什么不现场生成图：QQ 有风控，而程序生成的渐变噪声图在过滤器眼里就是
+    "机器造的东西"——正是会被挑出来的形态。包里那两张是从本项目 `data/`
+    的真实测试照片缩出来存成 JPEG 的，看起来就是普通人会发的图
+    （说明见 `markovcryptor/covers.py`）。
+
+    真照片永远比内置的好：越像随手拍越自然。`--cover` 就是给这件事用的。
+    """
     if directory is not None:
         if not directory.is_dir():
             raise SystemExit(f"不是目录：{directory}")
+        covers: list[bytes] = []
         for path in sorted(directory.iterdir()):
-            if path.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+            if path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+                continue
+            if path.suffix.lower() in (".png", ".jpg", ".jpeg"):
+                # 已经是隐写核直接吃的格式，原样用，别多一层重编码。
+                covers.append(path.read_bytes())
+            else:
                 with Image.open(path) as image:
                     buffer = io.BytesIO()
                     image.convert("RGB").save(buffer, "PNG")
                     covers.append(buffer.getvalue())
         if not covers:
             raise SystemExit(f"{directory} 里没有图片")
-    while len(covers) < count:
-        covers.append(synthetic_cover(seed=len(covers)))
-    return covers
+        return covers
+
+    builtin = covers_pkg.load()
+    if not builtin:
+        raise SystemExit(
+            "包里没找到自带底图（markovcryptor/covers/*.jpg）。"
+            "用 --cover <目录> 指定你自己的照片。"
+        )
+    # 循环补齐，让调用方拿到固定张数；底图可重复使用，不是消耗品。
+    return [builtin[index % len(builtin)] for index in range(max(count, len(builtin)))]
 
 
 # ----------------------------------------------------------------------- side
@@ -203,7 +198,7 @@ def run_selftest(psk: str, verbose: bool = True) -> int:
     from markovcryptor.terminal.onebot import InProcessOneBot
 
     hub = InProcessOneBot()
-    covers = [synthetic_cover(seed=i) for i in range(3)]
+    covers = load_covers(None, count=3)
     sides = []
     for label, uin, peer in (("alice", "10001", "10002"),
                              ("bob", "10002", "10001")):

@@ -37,6 +37,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from .channels import Carrier, CarrierKind
+from . import covers as covers_pkg
 from .core.errors import InvalidInput, StegoError
 from .engine import Config, Engine
 from .observability import METRICS, event as log_event
@@ -480,40 +481,22 @@ def _onebot_hub(settings: ApiConfig, text_channel):
         uins[name] = str(uin)
 
     network = RoutedNetwork(routes)
-    covers = {name: [_generated_cover(seed=index) for index in range(2)]
-              for index, name in enumerate(names)}
+    # 底图用包里自带的真实照片，不现场造图。
+    # 造出来的噪声图在 QQ 看就是"程序生成的东西"，正是风控会挑的形态；
+    # 用户随手会发的那种图才不惹眼。见 covers.py 的说明。
+    shared_covers = covers_pkg.load_or_none(2)
+    if not shared_covers:
+        raise InvalidInput(
+            "包里没有自带底图，接 QQ 无法自动回应握手",
+            hints=("重新安装本包（covers/*.jpg 应当随包安装）",),
+        )
+    cover_pool = {name: list(shared_covers) for name in names}
     hub = TerminalHub(text_channel=text_channel, network=network,
-                      names=names, fallback_covers=covers, psk=settings.psk)
+                      names=names, fallback_covers=cover_pool, psk=settings.psk)
     #: 让 UI 能显示"alice 其实是哪个 QQ 号"，而不只是位置名。
     hub.uins = uins
     network.start()
     return hub, network
-
-
-def _generated_cover(seed: int = 0, size: int = 512) -> bytes:
-    """A carrier we can make ourselves when the user supplied none.
-
-    Only used for the *handshake reply*, whose 38-byte payload needs far less
-    room than a message body. It is a real picture the QIM kernel can write
-    into, not a placeholder that would fail at embed time.
-    """
-    import io
-
-    import numpy as np
-    from PIL import Image
-
-    rng = np.random.default_rng(seed)
-    y = np.broadcast_to(np.linspace(0, 1, size)[:, None], (size, size))
-    x = np.broadcast_to(np.linspace(0, 1, size)[None, :], (size, size))
-    base = np.stack([
-        120 + 60 * np.sin(3.1 * x + seed),
-        110 + 50 * np.cos(2.7 * y + seed),
-        100 + 70 * np.sin(2.2 * (x + y)),
-    ], axis=-1)
-    pixels = np.clip(base + rng.normal(0, 6, (size, size, 3)), 0, 255).astype(np.uint8)
-    buffer = io.BytesIO()
-    Image.fromarray(pixels, "RGB").save(buffer, "PNG")
-    return buffer.getvalue()
 
 
 def _parse_options(raw: str | None) -> dict[str, Any] | None:
