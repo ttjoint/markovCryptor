@@ -154,7 +154,10 @@ param(
   [int]$HttpPort = 0,
   [int]$TimeoutSec = 120
 )
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+# 控制台编码：失败必须忽略。cmd 里 chcp 65001 之后再设 OutputEncoding，
+# PS 5.1 有时会抛"句柄无效"；若 ErrorActionPreference 已是 Stop，
+# 整个脚本会静默退出 —— 屏幕上什么都不剩，看起来像没运行。
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $ErrorActionPreference = "Stop"
 $here = $PSScriptRoot
 
@@ -309,20 +312,34 @@ REM because SnowLuma picks them randomly on first run.
 if "%~1"=="" (
   echo Usage: probe.bat PEER_QQ
   echo Example: probe.bat 1741473279
-  echo Optional: probe.bat PEER_QQ UIN     (pick config explicitly)
+  echo Optional: probe.bat PEER_QQ UIN     ^(pick config explicitly^)
   pause
   exit /b 1
 )
 set UINOPT=
 if not "%~2"=="" set UINOPT=-Uin "%~2"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0probe.ps1" -Peer "%~1" %UINOPT%
+REM .bat must stay pure ASCII: cmd decodes it with the OEM codepage
+REM (936 on a Chinese Windows), so Chinese here turns into garbage.
+REM But it still has to SAY something when probe fails. Before this,
+REM a silently-dying script left only "Press any key" on screen and
+REM looked like probe did nothing at all.
+if errorlevel 1 (
+  echo.
+  echo   probe FAILED ^(exit code %ERRORLEVEL%^). The output above says why.
+  echo   If you still see nothing, capture the full log with:
+  echo     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0probe.ps1" -Peer %~1 ^> probe.log 2^>^&1
+)
 echo.
 pause
 """
 
 
 INSTALL_PS1 = r"""# 在 guest 上运行：离线安装依赖并自检。
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+# 控制台编码：失败必须忽略。cmd 里 chcp 65001 之后再设 OutputEncoding，
+# PS 5.1 有时会抛"句柄无效"；若 ErrorActionPreference 已是 Stop，
+# 整个脚本会静默退出 —— 屏幕上什么都不剩，看起来像没运行。
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 # 这个文件由 tools/make_bundle.py 生成。
 $ErrorActionPreference = "Stop"
 $here = $PSScriptRoot
@@ -403,7 +420,10 @@ param(
   [int]$TimeoutSec = 90,
   [string]$WebuiPassword = "mkx-webui-1"
 )
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+# 控制台编码：失败必须忽略。cmd 里 chcp 65001 之后再设 OutputEncoding，
+# PS 5.1 有时会抛"句柄无效"；若 ErrorActionPreference 已是 Stop，
+# 整个脚本会静默退出 —— 屏幕上什么都不剩，看起来像没运行。
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $ErrorActionPreference = "Stop"
 
 if (-not (Test-Path (Join-Path $Snowluma "index.mjs"))) {
@@ -495,20 +515,32 @@ PROBE_PS1 = r"""# 发一张图，验 OneBot 通不通。由 tools/make_bundle.py
 # 用法：.\probe.ps1 -Peer <对端QQ号> [-Uin <本机QQ号>] [-WsPort N] [-Token T]
 # 不给 Uin/Token/WsPort 时自动读 snowluma\config\onebot_<UIN>.json ——
 # SnowLuma 自己生成的配置端口和 token 都是随机的，手抄必错。
+#
+# 两条硬规矩，都是踩出来的：
+#   1. param() 之前只能是注释 —— 放一条可执行语句进去，整个 param 块
+#      会被当成普通语句解析，报 "The assignment expression is not valid"。
+#   2. 绝不能一上来就 $ErrorActionPreference = "Stop"。连不上 OneBot 是
+#      常态（SnowLuma 没起、端口不对），这时 PowerShell 会静默终止脚本，
+#      屏幕上只剩 cmd 的 "Press any key" —— 看起来像 probe 什么都没做。
 param(
   [Parameter(Mandatory = $true)][long]$Peer,
   [long]$Uin = 0,
   [int]$WsPort = 0,
   [string]$Token = ""
 )
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$ErrorActionPreference = "Stop"
+
+# 控制台编码只在真控制台上动，且失败必须忽略。
+# cmd 里 chcp 65001 之后再设 OutputEncoding，PS 5.1 有时会抛
+# "句柄无效" —— 那不该让整个探测挂掉。
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
+# 先说话，再干活。哪怕后面一行代码都跑不动，用户也知道脚本进来了。
+Write-Host "probe 启动（对端 $Peer）" -ForegroundColor Cyan
 
 # python 不一定在 PATH 里（只装 py 启动器、或没勾 Add to PATH 都很常见）。
 # install.ps1 能跑不代表这里能跑 —— 两边都要自己找。
 # 优先 py 启动器：它总能找到真正装好的 Python。直接找 python 有时会
 # 撞上 Microsoft Store 的占位符（运行后跳应用商店，不可用）。
-# 这也解释了"install 能跑但 python 不在 PATH"——那种机器上只有 py。
 $py = Get-Command py -ErrorAction SilentlyContinue
 if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
 if (-not $py) {
@@ -545,36 +577,86 @@ if (-not $Token -or $WsPort -eq 0) {
 if ($WsPort -eq 0) { $WsPort = 9721 }
 if (-not $Token) {
   Write-Host "找不到配置里的 token，也没有 -Token。" -ForegroundColor Red
-  Write-Host "先跑 qq-init，或直接 -Token <wsServers[0].accessToken>。"
+  Write-Host r"先跑 .\start.bat（它会生成配置），或直接 -Token <wsServers[0].accessToken>。"
   exit 1
 }
 Write-Host ("连接 ws://127.0.0.1:$WsPort/  token 长度 " + $Token.Length)
 
+# 嵌入的探测脚本。单引号 here-string：$ 和 % 都不展开。
+# 每条失败路径都翻译成一句人话，绝不留裸 traceback ——
+# 用户看不懂 traceback，只会说"probe 无效"。
 $code = @'
 import asyncio, base64, hashlib, io, json, sys
 sys.stdout.reconfigure(encoding="utf-8")   # 中文输出，别依赖控制台代码页
 import numpy as np
 from PIL import Image
-from markovcryptor.onebot_ws import connect
 
 def png(size, seed):
     arr = np.random.default_rng(seed).integers(0, 256, (size, size, 3), dtype=np.uint8)
     b = io.BytesIO(); Image.fromarray(arr, "RGB").save(b, "PNG"); return b.getvalue()
 
+def die(msg, hint=""):
+    print("失败：" + msg)
+    if hint:
+        print("  怎么办：" + hint)
+    sys.exit(1)
+
 async def main():
     port, token, peer = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+
+    try:
+        from markovcryptor.onebot_ws import connect
+    except Exception as e:
+        die("导入 markovcryptor 失败（%s: %s）" % (type(e).__name__, e),
+            r"先跑 .\install.bat。")
+
     blob = png(200, 3)
     print("发送 %d bytes md5=%s" % (len(blob), hashlib.md5(blob).hexdigest()))
-    async with connect("ws://127.0.0.1:%d/" % port, token) as ws:
+
+    try:
+        ws = await asyncio.wait_for(
+            connect("ws://127.0.0.1:%d/" % port, token).__aenter__(), timeout=15)
+    except (ConnectionRefusedError, OSError) as e:
+        die("连不上 ws://127.0.0.1:%d/（%s）" % (port, type(e).__name__),
+            r"SnowLuma 没起，或端口不对。先看 start.bat 打印的 OneBot WS 端口，"
+            r"或跑 .\run-snowluma.ps1 看日志。")
+    except asyncio.TimeoutError:
+        die("连 ws://127.0.0.1:%d/ 超时" % port,
+            r"SnowLuma 可能卡住，查 snowluma\logs\qqtest.log。")
+    except Exception as e:
+        name = type(e).__name__
+        if "401" in str(e) or "Unauthorized" in str(e) or name == "InvalidStatus":
+            die("OneBot 拒绝了 token（%s）" % e,
+                r"配置里的 accessToken 和 SnowLuma 实际用的不一致。重跑 .\start.bat，"
+                r"或删掉 snowluma\config\onebot_*.json 让它重新生成。")
+        die("连接出错（%s: %s）" % (name, e))
+
+    try:
         await ws.send(json.dumps({"action": "send_private_msg", "echo": "p",
             "params": {"user_id": peer, "message": [{"type": "image",
             "data": {"file": "base64://" + base64.b64encode(blob).decode()}}]}}))
         while True:
-            m = json.loads(await asyncio.wait_for(ws.recv(), timeout=60))
-            if m.get("echo") == "p":
-                if m.get("status") != "ok":
-                    print("发送失败:", m); return 1
-                print("已发出:", m.get("data")); return 0
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=60)
+            except asyncio.TimeoutError:
+                die("60 秒没等到回包",
+                    r"OneBot 连上了但不回应，看 snowluma\logs\qqtest.log 有没有报错。")
+            m = json.loads(raw)
+            if m.get("echo") != "p":
+                continue          # 事件推送，不是我们的回包
+            if m.get("status") == "ok":
+                print("已发出：message_id =", (m.get("data") or {}).get("message_id"))
+                print("请确认对端 QQ 是否收到图片。收不到多半不是好友、或对端不在线。")
+                return 0
+            die("OneBot 返回失败：retcode=%s %s" % (m.get("retcode"), m.get("message") or m.get("wording") or ""),
+                "常见原因：对端不是你好友、是机器人、或 QQ 号输错了。")
+    except Exception as e:
+        die("发送过程出错（%s: %s）" % (type(e).__name__, e))
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
 sys.exit(asyncio.run(main()) or 0)
 '@

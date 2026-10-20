@@ -145,7 +145,21 @@ def _report(results: dict[str, bool]) -> int:
     return 1
 
 
+def _utf8_stdout() -> None:
+    """中文控制台默认 GBK，打印 ``✓``/``►`` 这类字符会抛 UnicodeEncodeError。
+
+    这个脚本的输出本来就是给人看的，固定成 UTF-8 比让它在中文 Windows
+    上崩掉强。``reconfigure`` 失败（被重定向到非文本流）就算了。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:                                # noqa: BLE001 - 尽力而为
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_stdout()
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--a-uin", required=True, help="发送方 QQ 号（对方的 OneBot 端口在 b-*）")

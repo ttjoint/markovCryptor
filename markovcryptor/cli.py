@@ -248,7 +248,24 @@ def _describe(model: MarkovModel, path: Path) -> str:
     return f"{model.model_id}  {model.name or path.stem}  ({path})"
 
 
+def _utf8_stdout() -> None:
+    """把 stdout/stderr 固定成 UTF-8。
+
+    中文 Windows 的控制台是 GBK（cp936），打印中文进度条会抛
+    ``UnicodeEncodeError`` 而崩掉，或者被 ``errors="replace"`` 换成
+    ``\ufffd`` 变得不可读。两种都让用户在命令行里什么也看不懂。
+
+    重定向到管道/文件时 ``reconfigure`` 可能失败，那时保持原样就好。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:                                # noqa: BLE001 - 尽力而为
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_stdout()
     parser = build_parser()
     args = parser.parse_args(argv)
     from . import observability

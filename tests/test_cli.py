@@ -65,6 +65,21 @@ class CliTest(unittest.TestCase):
         for command in ("train", "encode", "decode", "models", "identify"):
             self.assertIn(command, result.stdout)
 
+    def test_output_survives_a_gbk_console(self):
+        """中文控制台（cp936）下也不能把中文输出变成乱码。
+
+        踩过的坑：Win10 的 cmd 是 GBK，``print("可承载")`` 会抛
+        ``UnicodeEncodeError``；即便加了 ``errors="replace"``，输出也
+        会变成一串 ``�``，测试里断言中文就永远失败。
+        CLI 入口现在自己把 stdout 切成 UTF-8，这条测试守住它。
+        """
+        result = _run("channels")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("�", result.stdout, "输出里有替换字符，中文被吞了")
+        # 任意一段中文能读出来，就说明编码对了
+        self.assertTrue(any("一" <= ch <= "鿿" for ch in result.stdout),
+                        f"stdout 里一个汉字都没有：{result.stdout!r}")
+
     def test_models_lists_trained_model(self):
         result = _run("models", "--model", str(self.model_dir))
         self.assertEqual(result.returncode, 0)

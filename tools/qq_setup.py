@@ -195,7 +195,17 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0 if all(row[2] for row in rows) else 1
 
 
+def _utf8_stdout() -> None:
+    """中文控制台默认 GBK，打印 ``►`` 这类字符会抛 UnicodeEncodeError。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:                                # noqa: BLE001 - 尽力而为
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_stdout()
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)

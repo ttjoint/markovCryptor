@@ -335,6 +335,136 @@ class PackagingTest(unittest.TestCase):
                     "PowerShell 要求 param 之前只能是注释")
         self.assertGreaterEqual(checked, 2, "应至少检查到 probe 和 run-snowluma")
 
+    def test_console_encoding_failure_is_ignored(self) -> None:
+        """``[Console]::OutputEncoding`` 失败必须被吞掉。
+
+        踩过的坑：cmd 里 ``chcp 65001`` 之后再设 OutputEncoding，PS 5.1
+        会抛「句柄无效」。若此时 ``$ErrorActionPreference`` 已经是
+        ``"Stop"``，脚本会在打印第一行之前静默退出 —— 屏幕上只剩 cmd 的
+        ``Press any key to continue``，看着像 probe 什么都没做。
+        """
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        scripts = re.findall(r'(\w+_PS1) = r"""(.*?)"""', source, re.S)
+        self.assertTrue(scripts)
+        for name, body in scripts:
+            if "OutputEncoding" not in body:
+                continue
+            for line in body.splitlines():
+                stripped = line.strip()
+                # 注释里也会提到 OutputEncoding，只看真正执行的语句
+                if stripped.startswith("#") or "OutputEncoding" not in stripped:
+                    continue
+                self.assertIn("try {", line,
+                              f"{name}: OutputEncoding 必须包在 try/catch 里")
+                self.assertIn("catch { }", line,
+                              f"{name}: OutputEncoding 失败必须被忽略")
+            # 不能在 OutputEncoding 之前就把 ErrorActionPreference 设成 Stop
+            lines = [ln.strip() for ln in body.splitlines()]
+            enc_at = next(i for i, ln in enumerate(lines) if "OutputEncoding" in ln)
+            for earlier in lines[:enc_at]:
+                if earlier.startswith("#"):
+                    continue          # 注释里提到不算
+                self.assertNotIn('$ErrorActionPreference = "Stop"', earlier,
+                                 f"{name}: ErrorActionPreference=Stop 出现在 "
+                                 "OutputEncoding 之前，设编码一失败就静默退出")
+
+    def test_probe_reports_failures_in_plain_words(self) -> None:
+        """probe 失败不能甩 traceback。
+
+        用户看不懂 traceback，只会说「probe 无效」。每条失败路径都要
+        翻成一句人话 + 一句怎么办。
+        """
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        m = re.search(r'PROBE_PS1 = r"""(.*?)"""', source, re.S)
+        body = m.group(1)
+        # 三类最可能的失败都要有自己的判断
+        self.assertIn("ConnectionRefusedError", body, "没区分「端口不通」")
+        self.assertIn("401", body, "没区分「token 被拒」")
+        self.assertIn("retcode", body, "没看 OneBot 的 retcode")
+        # 失败出口必须带「怎么办」
+        self.assertIn("怎么办", body)
+        # 先说话再干活：任何情况下都该看到 probe 启动了
+        head = body.split("$py = Get-Command py")[0]
+        self.assertIn("probe 启动", head,
+                      "probe 必须在做任何可能失败的事之前先打印一行，"
+                      "否则静默退出时用户什么都看不到")
+
+    def test_bat_templates_stay_ascii(self) -> None:
+        """.bat 必须纯 ASCII —— cmd 按 OEM 代码页（中文机 936）解码。
+
+        往 .bat 里写中文，cmd 下会变成乱码；打包时 ``encode("ascii")``
+        也会直接抛 UnicodeEncodeError，整个打包挂掉。
+        """
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        bats = re.findall(r'(\w+_BAT) = r"""(.*?)"""', source, re.S)
+        self.assertTrue(bats, "没找到 .bat 模板")
+        for name, body in bats:
+            try:
+                body.encode("ascii")
+            except UnicodeEncodeError as error:
+                bad = body[error.start:error.end]
+                self.fail(f"{name} 含非 ASCII 字符 {bad!r}；"
+                          ".bat 只能写英文，cmd 按 OEM 代码页解码")
+
+    def test_bat_blocks_have_no_stray_parens(self) -> None:
+        """``if (...)`` 块内的行不能出现未转义的括号。
+
+        踩过的坑（probe.bat 一个字都不打印，只剩 cmd 的
+        ``Press any key``）：用法提示写在块里，
+
+            if "%~1"=="" (
+              echo Optional: probe.bat PEER_QQ UIN  (pick config explicitly)
+              exit /b 1
+            )
+
+        那个 ``)`` 会提前闭合整块 —— cmd 在解析阶段就把块切坏，
+        后面的 ``powershell ...`` 根本不会执行。传了参数时更隐蔽：
+        块被跳过，但解析已经出错，脚本直接退出，屏幕上什么都没有。
+        所以：echo 里的括号一律写成 ``^)`` ``^(``。
+        """
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        bats = re.findall(r'(\w+_BAT) = r"""(.*?)"""', source, re.S)
+        self.assertTrue(bats)
+        checked = 0
+        for name, body in bats:
+            in_block = False
+            for number, line in enumerate(body.splitlines(), 1):
+                stripped = line.strip()
+                if stripped.upper().startswith("REM"):
+                    continue
+                code = stripped
+                # 去掉转义对，剩下的括号才参与块结构
+                while True:
+                    new_code = code.replace("^(", "").replace("^)", "")
+                    if new_code == code:
+                        break
+                    code = new_code
+                if in_block:
+                    # 块内只允许作为整个块边界出现的括号
+                    inner = code
+                    if inner.startswith(")"):
+                        inner = inner[1:]
+                    self.assertNotIn(")", inner,
+                                     f"{name}:{number} if 块内出现未转义的 ')'："
+                                     f"{stripped!r}；cmd 会提前结束这个块")
+                    self.assertNotIn("(", inner,
+                                     f"{name}:{number} if 块内出现未转义的 '('："
+                                     f"{stripped!r}")
+                    if code.endswith(")"):
+                        in_block = False
+                elif code.endswith("("):
+                    in_block = True
+                    checked += 1
+        self.assertGreater(checked, 0, "没扫到任何多行 if 块，测试没意义")
+
+    def test_probe_bat_says_something_on_failure(self) -> None:
+        """``probe.bat`` 失败时不能只留一个 ``pause``。"""
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        m = re.search(r'PROBE_BAT = r"""(.*?)"""', source, re.S)
+        body = m.group(1)
+        self.assertIn("if errorlevel 1", body,
+                      "probe.bat 失败后直接 pause，屏幕上看不出出过错")
+
     def test_generated_wheels_cover_declared_targets(self) -> None:
         """真打一个包（不含 SnowLuma），检查每个组合都有 numpy 和 pillow。"""
         import re
