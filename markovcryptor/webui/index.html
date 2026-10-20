@@ -38,7 +38,11 @@
   nav button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
   /* 终端页要四窗并排，所以主区不再是固定 900px 的窄栏。 */
   main { padding: 20px; max-width: 1800px; margin: 0 auto; }
-  section[hidden] { display: none; }
+  /* `hidden` 属性只值一个 UA 默认样式，任何自己写的 display 都会盖掉它。
+     .client 是 display:grid、.await 是 flex —— 所以每加一个"可隐藏的东西"
+     都得在这里写一条，否则 hidden="true" 在 DOM 里成立、屏幕上照样显示。
+     单账号部署时 bob 窗口就是这么漏出来的。 */
+  section[hidden], div[hidden], p[hidden], label[hidden] { display: none !important; }
   fieldset {
     border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px;
     margin: 0 0 14px; background: var(--panel);
@@ -93,6 +97,12 @@
     align-items: start;
     width: 100%;
   }
+  /* 只有一台设备（一个 QQ 号）时，中间那条"网线"没有意义：它不是
+     两个本机客户端之间的示意，而是跨机器的那条 QQ 信道，画不出来。 */
+  .net-stage.single {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .net-stage.single .wire { display: none; }
   @media (max-width: 1180px) {
     .net-stage {
       grid-template-columns: minmax(0, 1fr);
@@ -876,7 +886,14 @@ $("b-run").onclick = submitBatch;
 // Each client's transcript holds both directions (what it sent and what it
 // received), like any chat app. The server keeps one transcript per terminal.
 
-const SIDES = ["alice", "bob"];
+// Which sides exist is a server answer, not a constant. 一台设备一个号时
+// 只有 alice —— 这时对端在另一台机器上，本机没有 bob 的终端，硬画一个 bob
+// 窗口只会是个永远空着的假窗口（而且它的每个请求都会 4xx）。
+// 本地双窗演练 / 同机双号才是两个。默认两个，保持老行为。
+let SIDES = ["alice", "bob"];
+
+//: 每一侧对端该显示什么。同机时是另一个窗口名；跨机时是对方的 QQ 号。
+let PEER_LABEL = { alice: "bob", bob: "alice" };
 
 // Per-client editor state: queue, sent, inbox cursor, attachment preview.
 const clients = {
@@ -886,7 +903,14 @@ const clients = {
            established: false, stateLabel: "未建立", textReady: true },
 };
 
-const peerOf = (me) => (me === "alice" ? "bob" : "alice");
+// 本机有没有"另一个窗口"可查。跨机部署时对端不在这台机器上，所以不能拿
+// peerOf() 的结果去请求 /terminal/<name>/inbox —— 那个名字不存在。
+const localPeerOf = (me) => {
+  const others = SIDES.filter((name) => name !== me);
+  return others.length ? others[0] : null;
+};
+// 标签用：显示给用户看的对端名（可能是 QQ 号）。
+const peerOf = (me) => PEER_LABEL[me] || localPeerOf(me) || "?";
 
 // 元素 id 用单字母前缀（a-/b-），逻辑里用完整名字，避免满屏 alice-/bob-。
 const el = (me, suffix) => $(me[0] + "-" + suffix);
@@ -923,9 +947,38 @@ function applyAvailability(me) {
 
 // --- 会话状态 ---
 
+// 服务端说有哪些侧：一台设备一个号时只有一个。只在第一次问的时候应用，
+// 之后每 1.5 秒的轮询不该反复重排 DOM。
+let sidesApplied = false;
+function applySides(data) {
+  if (sidesApplied) return;
+  const names = Object.keys(data.terminals || {});
+  if (!names.length) return;
+  sidesApplied = true;
+  SIDES = names;
+
+  // 对端标签：本机还有另一侧就用它的名字，否则用服务端给的对端 QQ 号。
+  const peerUin = data.peer_uin || "";
+  PEER_LABEL = {};
+  for (const me of SIDES) {
+    const other = SIDES.find((name) => name !== me);
+    PEER_LABEL[me] = other || peerUin || "?";
+  }
+
+  // 不存在的侧整块隐藏。留着就是一个永远空着、点什么都报错的假窗口。
+  document.querySelectorAll(".client[data-side]").forEach((node) => {
+    node.hidden = !SIDES.includes(node.getAttribute("data-side"));
+  });
+  // 只有一个客户端时不必画"两台机器中间的网线"，那是本地演练的示意。
+  const stage = document.querySelector(".net-stage");
+  if (stage) stage.classList.toggle("single", SIDES.length === 1);
+}
+
 async function refreshState(me) {
   const data = await api("/terminal/state");
+  applySides(data);
   const info = data.terminals[me];
+  if (!info) return;   // 这一侧不存在（服务端已按 SIDES 收敛过）
   const c = clients[me];
   c.established = info.established;
   c.stateLabel = info.state_label;
@@ -1185,9 +1238,12 @@ async function handshake(me) {
     flashWire(me, 1);
     await consume(me, 1);
     await refreshState(me);
-    await refreshState(peerOf(me));
     await poll(me);
-    await poll(peerOf(me));
+    const other = localPeerOf(me);
+    if (other) {
+      await refreshState(other);
+      await poll(other);
+    }
   } catch (error) { alert(describeError(error)); }
 }
 

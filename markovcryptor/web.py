@@ -65,6 +65,9 @@ class ApiConfig:
     #: same terminals on real QQ -- the ``Network`` seam is the only thing that
     #: changes (see docs/QQ_TRANSPORT.md §3).
     onebot: dict[str, str] = field(default_factory=dict)
+    #: 单账号模式下的对端 QQ 号。本机只登录一个号时，终端靠它知道该发给谁，
+    #: 从而能主动发起握手，而不是干等对方先开口。双账号模式下留空即可。
+    peer: str = ""
     #: Shared secret for the *stego* layer. Both sides must agree or the frames
     #: do not authenticate and every picture looks like an ordinary photo.
     psk: str = "pbx1"
@@ -462,24 +465,31 @@ def _onebot_hub(settings: ApiConfig, text_channel):
     from .terminal.onebot import OneBotNetwork, RoutedNetwork
     from .web_terminal import TerminalHub
 
-    if len(settings.onebot) != 2:
+    if not settings.onebot:
         raise InvalidInput(
-            f"接 QQ 需要正好两个账号，收到 {len(settings.onebot)} 个："
-            f"{sorted(settings.onebot)}",
-            hints=("用 --onebot <uin>=<url> 给两侧各配一条 OneBot 连接",),
+            "没有给任何 OneBot 账号",
+            hints=("用 --onebot <uin>=<url> 标出本机登录的 QQ",),
+        )
+    if len(settings.onebot) > 2:
+        raise InvalidInput(
+            f"最多两个账号，收到 {len(settings.onebot)} 个：{sorted(settings.onebot)}",
+            hints=("本机一个号 + 远端一个号就够；同机双号才需要两个",),
         )
 
-    # 位置决定身份：第一个是 alice，第二个是 bob。顺序来自命令行顺序，
-    # 所以 --onebot 写了两次的顺序就是谁坐左边。
+    # 位置决定身份：第一个是 alice，第二个是 bob（如果有）。顺序来自命令行
+    # 顺序，所以 --onebot 写了两次的顺序就是谁坐左边。
+    #
+    # 一个账号也是完整的一侧：本机只登录了一个 QQ 才是常态，对端在另一台
+    # 机器上。这时只有一个本地终端，对端地址由 terminal 从入站消息里学到，
+    # 或者由 --peer 预置 —— 不需要为了"凑两个"而多挂一个空终端。
     sides = list(settings.onebot.items())
-    names = ("alice", "bob")
+    names = tuple(["alice", "bob"][: len(sides)])
     routes: dict[str, OneBotNetwork] = {}
     uins: dict[str, str] = {}
     for name, (uin, spec) in zip(names, sides):
         url, _, token = str(spec).partition(";")
         routes[name] = OneBotNetwork(url.strip(), str(uin), token=token.strip())
         uins[name] = str(uin)
-
     network = RoutedNetwork(routes)
     # 底图用包里自带的真实照片，不现场造图。
     # 造出来的噪声图在 QQ 看就是"程序生成的东西"，正是风控会挑的形态；
@@ -494,7 +504,11 @@ def _onebot_hub(settings: ApiConfig, text_channel):
     hub = TerminalHub(text_channel=text_channel, network=network,
                       names=names, fallback_covers=cover_pool, psk=settings.psk)
     #: 让 UI 能显示"alice 其实是哪个 QQ 号"，而不只是位置名。
+    #: 只放本机账号 —— 把对端也塞进来会让 name_of() 把对方的 QQ 号翻译成
+    #: 内部占位名，聊天记录里就看不到真实号码了。
     hub.uins = uins
+    #: 单账号模式的对端号，发送时用它当收件地址。
+    hub.peer_uin = str(settings.peer) if settings.peer else ""
     network.start()
     return hub, network
 

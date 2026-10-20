@@ -141,6 +141,14 @@ class Side:
     def _on_inbound(self, inbound) -> None:
         """Print what arrived, in the two-window spirit but on one console."""
         prefix = f"[{self.label}] "
+        if inbound.chat_images:
+            # 普通照片必须在界面上出现。隐写层对"图里没有密文"故意不出声
+            # （那是最常见的情况，每次都报警等于没有报警），但**图本身**是
+            # 用户发的，终端不显示它，用户就会以为消息丢了 —— 实测联调时
+            # 就是这样误判成"没收到"的。
+            shown = "、".join(f"{image.width}×{image.height}" for image in inbound.chat_images)
+            self.say(f"{prefix}⇐ 图：{shown}"
+                     f"（{len(inbound.chat_images)} 张）")
         if inbound.handshake:
             self.say(f"{prefix}⇐ 握手：{inbound.handshake}")
         if inbound.covert:
@@ -150,6 +158,10 @@ class Side:
             self.say(f"{prefix}⇐ 明文：{inbound.chat_text}")
         for note in inbound.notes:
             self.say(f"{prefix}⇐ 注意：{note}")
+        if not (inbound.chat_images or inbound.handshake or inbound.covert
+                or inbound.chat_text or inbound.notes):
+            # 什么都没有也说出来，否则"收到了但没内容"和"根本没收到"长得一样。
+            self.say(f"{prefix}⇐ 收到一个空包")
 
     @staticmethod
     def say(line: str) -> None:

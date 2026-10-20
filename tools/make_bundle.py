@@ -382,9 +382,17 @@ Write-Host "`n[1/3] 离线安装依赖…" -ForegroundColor Yellow
 # 逐项显式安装，而不是靠 "markovcryptor[web]" 的依赖解析：
 # 那样会强制要求 uvicorn[standard]，而它的 C 扩展在很新的 Python 上
 # 可能还没编好，整个安装就会失败。这里 uvicorn 只用纯 Python 版。
+# 本包版本号固定（0.3.0），新包和旧包长得一样。pip 看到"已装 0.3.0"就
+# 会跳过，于是 guest 上一直跑的是**第一次装的那份**代码 —— 表现为
+# `chat.bat` 报 "unrecognized arguments: --onebot"，看着像脚本 bug，
+# 其实是库没更新。--force-reinstall 保证每次都换成包里这份。
+# 依赖跟着一起重装是它的副作用，离线 wheels 目录里都有，不额外联网。
 & $py -m pip install --no-index --find-links "$here\wheels" --upgrade `
+  --force-reinstall --no-deps `
   numpy pillow reedsolo cryptography `
-  fastapi uvicorn python-multipart websockets markovcryptor
+  fastapi uvicorn python-multipart websockets
+& $py -m pip install --no-index --find-links "$here\wheels" `
+  --upgrade --force-reinstall --no-deps markovcryptor
 if ($LASTEXITCODE -ne 0) {
   Write-Host "`n依赖安装失败。" -ForegroundColor Red
   Write-Host "本机 Python 是 $ver / $bits 位。包里有哪些 wheel：" -ForegroundColor Yellow
@@ -518,12 +526,17 @@ exit 1
 """
 
 
-CHAT_PS1 = r"""# 双方互联：把两个 QQ 号挂上终端，开 Web UI。由 tools/make_bundle.py 生成。
-# 用法：.\chat.ps1 [-Port 8731] [-Psk 共享口令-123]
+CHAT_PS1 = r"""# 挂上本机的 QQ,开终端界面。由 tools/make_bundle.py 生成。
+# 用法：.\chat.ps1 -Peer 3925697820 [-Port 8731] [-Psk 共享口令-123]
 #
-# 为什么需要两个号：QQ 上的"两端"是两个账号，各有一条自己的 OneBot 连接。
-# 一个号只能自说自话 —— 所以这里要求 snowluma\config 下正好两份配置。
+# 部署形态：一台设备 = 一个 QQ 号 + 一份本系统。本系统作为该 QQ 的混淆端,
+# 把密文藏在私聊图片里发出去。所以这里**只需要本机那一份配置**,对端是
+# 另一台设备上的号 —— 由 -Peer 指明。
+#
+# 同一台机器上挂了两个号时(只用于自己跟自己试),会自动把两份都接上,
+# 这时不需要 -Peer。
 param(
+  [string]$Peer = "",
   [int]$Port = 8731,
   [string]$Psk = "共享口令-123"
 )
@@ -539,45 +552,72 @@ if (-not $py) {
   exit 1
 }
 
+# 库里没有 --onebot 说明装的是旧版（pip 会以为"0.3.0 已满足"而跳过）。
+# 不先查这一下，症状是 argparse 报 "unrecognized arguments"，看着像脚本
+# 传错了参数，实际是库没换新 —— 这个坑已经踩过一次，别再让人猜。
+$canOnebot = & $py -c "import sys; from markovcryptor import cli; sys.exit(0 if '--onebot' in open(cli.__file__, encoding='utf-8').read() else 1)" 2>$null
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "装着的 markovcryptor 是旧版（不认识 --onebot）。" -ForegroundColor Red
+  Write-Host "  重跑 .\install.bat 换成包里这份，然后再来。" -ForegroundColor Yellow
+  exit 1
+}
+
 $cfgDir = Join-Path $PSScriptRoot "snowluma\config"
 if (-not (Test-Path $cfgDir)) {
   Write-Host "没有 $cfgDir —— 先跑 .\start.bat 让 SnowLuma 生成配置。" -ForegroundColor Red
   exit 1
 }
 $files = @(Get-ChildItem $cfgDir -Filter "onebot_*.json" | Sort-Object Name)
-if ($files.Count -lt 2) {
-  Write-Host ("只找到 " + $files.Count + " 份配置；互联需要两个 QQ 号。") -ForegroundColor Yellow
-  if ($files.Count -eq 1) {
-    Write-Host "  给第二个号写配置： .\start.bat <第二个QQ号>" -ForegroundColor Yellow
-  }
+if ($files.Count -eq 0) {
+  Write-Host "snowluma\config 里没有 onebot_*.json —— 先跑 .\start.bat 把 QQ 挂上。" -ForegroundColor Yellow
   exit 1
 }
 if ($files.Count -gt 2) {
-  Write-Host "配置多于两份，无法自动选。删掉多余的，或用 serve --onebot 手动指定：" -ForegroundColor Yellow
+  Write-Host ("找到 " + $files.Count + " 份配置,无法自动选。删掉多余的,或用 serve --onebot 手动指定：") -ForegroundColor Yellow
   $files | ForEach-Object { Write-Host ("    " + $_.Name) }
   exit 1
 }
 
-# 从两份配置里各取 端口 + Token + UIN，拼成 --onebot 参数。
-# 不叫 $args：那是 PowerShell 的自动变量，随手赋值会炸。
+# 从配置里取 端口 + Token + UIN,拼成 --onebot 参数。
+# 不叫 $args：那是 PowerShell 的自动变量,随手赋值会炸。
 $cliArgs = @()
+$uins = @()
 foreach ($f in $files) {
   $cfg = Get-Content -Raw $f.FullName | ConvertFrom-Json
   $ws = @($cfg.networks.wsServers)[0]
   if (-not $ws) {
-    Write-Host ($f.Name + " 里没有 wsServers，配置不完整。") -ForegroundColor Red
+    Write-Host ($f.Name + " 里没有 wsServers,配置不完整。") -ForegroundColor Red
     exit 1
   }
   # 文件名 onebot_<UIN>.json 里的 UIN 就是账号。
   $uin = $f.BaseName -replace "^onebot_", ""
   $url = "ws://127.0.0.1:" + $ws.port + "/"
   $cliArgs += @("--onebot", ($uin + "=" + $url + ";" + $ws.accessToken))
-  Write-Host ("  " + $uin + " -> " + $url)
+  $uins += $uin
+  Write-Host ("  本机 " + $uin + " -> " + $url)
+}
+
+# 单号模式必须知道对端是谁,否则第一条消息没有收件人。
+if ($uins.Count -eq 1) {
+  if (-not $Peer) {
+    Write-Host "`n本机只挂了一个 QQ 号,还需要知道对端:" -ForegroundColor Yellow
+    Write-Host ("    .\chat.ps1 -Peer <对端QQ号>") -ForegroundColor Yellow
+    Write-Host "  (对端是另一台设备上运行本系统的那个号)" -ForegroundColor Yellow
+    exit 1
+  }
+  if ($Peer -eq $uins[0]) {
+    Write-Host ("`n-Peer 不能是本机自己的号 " + $Peer) -ForegroundColor Red
+    exit 1
+  }
+  $cliArgs += @("--peer", $Peer)
+  Write-Host ("  对端 " + $Peer + " (另一台设备)") -ForegroundColor Gray
+} elseif ($Peer) {
+  Write-Host "`n本机挂了两份配置,-Peer 用不上(对端就是本机另一个号),已忽略。" -ForegroundColor Yellow
 }
 
 Write-Host "`n打开 http://127.0.0.1:$Port/ 选「终端」页签开始。" -ForegroundColor Green
-Write-Host "两侧隐写口令必须一致，本次是：$Psk" -ForegroundColor Green
-Write-Host "（另一台机器要用同样的 -Psk，否则发出去的图对方解不出来）`n"
+Write-Host "两侧隐写口令必须一致,本次是：$Psk" -ForegroundColor Green
+Write-Host "(另一台机器要用同样的 -Psk,否则发出去的图对方解不出来)`n"
 
 & $py -m markovcryptor.cli serve --port $Port --psk $Psk @cliArgs
 exit $LASTEXITCODE
@@ -585,8 +625,9 @@ exit $LASTEXITCODE
 
 
 CHAT_BAT = r"""@echo off
-REM Two-QQ interconnection: open the terminal UI wired to real OneBot.
-REM Needs two accounts (two onebot_<UIN>.json files under snowluma\config).
+REM Attach this machine's QQ and open the terminal UI. One QQ per device:
+REM   chat.bat -Peer 3925697820
+REM (Two local accounts also work; then -Peer is not needed.)
 setlocal
 REM Chinese console defaults to codepage 936; force UTF-8 for readable output.
 chcp 65001 >nul

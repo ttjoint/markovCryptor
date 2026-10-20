@@ -94,8 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help=f"端口，默认 {DEFAULT_PORT}（也可用环境变量 MKX1_PORT）")
     serve.add_argument("--model-dir", type=Path, default=default_model_dir())
     serve.add_argument("--onebot", action="append", default=[], metavar="UIN=WS[;TOKEN]",
-                       help="把这个 QQ 号的终端接到 OneBot（可重复，需两个）；"
-                            "不给就是本地双窗演练")
+                       help="把这个 QQ 号的终端接到 OneBot（可重复）；本机只登录一个号"
+                            "时给一次就行，不给就是本地双窗演练")
+    serve.add_argument("--peer", default="",
+                       help="单账号模式下对端的 QQ 号；给了就不用等对方先开口")
     serve.add_argument("--psk", default="pbx1",
                        help="隐写层共享口令，两侧必须一致；默认 pbx1")
 
@@ -335,7 +337,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         port = int(os.environ.get("MKX1_PORT") or args.port)
         try:
             run_server(ApiConfig(host=args.host, port=port, model_dir=args.model_dir,
-                                 onebot=_parse_onebot(args.onebot), psk=args.psk))
+                                 onebot=_parse_onebot(args.onebot), psk=args.psk,
+                                 peer=args.peer))
         except StegoError as exc:
             print(exc, file=sys.stderr)
             for hint in exc.hints:

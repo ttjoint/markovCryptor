@@ -234,6 +234,31 @@ class TerminalHub:
     #: 名字 -> 线上地址（接 QQ 时是 QQ 号）。本地演练为空，名字就是地址。
     uins: dict[str, str] = {}
 
+    #: 单账号模式下的对端 QQ 号（本机只登录了一个号时，对端在另一台设备上）。
+    peer_uin: str = ""
+
+    def peer_address_of(self, name: str) -> str:
+        """Where this local terminal should send: the peer's wire address.
+
+        Two shapes exist and they must not be confused:
+
+        * 同机双号 -- 对端就是本机另一个终端，用它的地址；
+        * 一台设备一个号 -- 对端在另一台设备上，本机只知道它的 QQ 号，
+          由 ``--peer`` 给出。此时 ``_other`` 无解，硬要两个终端只会凭空
+          多出一个永远收不到东西的空窗口。
+        """
+        others = [n for n in self.terminals if n != name]
+        if others:
+            return self.address_of(others[0])
+        if self.peer_uin:
+            return self.peer_uin
+        from .core.errors import InvalidInput
+
+        raise InvalidInput(
+            "本机只有一个 QQ 号，也不知道对端是谁",
+            hints=("启动时加 --peer <对端QQ号>",),
+        )
+
     def address_of(self, name: str) -> str:
         """The address to put on the wire for a local terminal name.
 
@@ -316,6 +341,9 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
             # 名字（alice/bob）是位置，QQ 号才是身份。接 QQ 时前端要能说清
             # "左边这个窗口其实是 3925697820"。
             "uins": dict(getattr(hub, "uins", {})),
+            # 单账号部署时，对端不在这台机器上，只有一个 QQ 号可显示。
+            # 前端据此把"对端"标成那个号，而不是画一个不存在的 bob。
+            "peer_uin": getattr(hub, "peer_uin", ""),
             "terminals": {
                 name: {
                     "state": terminal.state.value,
@@ -378,7 +406,7 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
                    files: FileList = File(default=[])):
         terminal = _terminal(hub, name)
         # 线上地址，不是本地名字：接 QQ 时这里是 QQ 号。
-        peer = hub.address_of(_other(hub, name))
+        peer = hub.peer_address_of(name)
         raws, _names = await _images(files)
         # The images are exactly what the user selected, in the order they
         # selected them. Nothing here reorders, substitutes or invents a cover:
@@ -463,26 +491,31 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
 
     @app.get("/terminal/network/history")
     def network_history() -> JSONResponse:
-        return JSONResponse({
-            "ok": True,
-            "packets": [
-                {"sender": sender, "target": target, "bytes": len(payload)}
-                for sender, target, payload in hub.network.history
-            ],
-        })
-
-
-def _other(hub: TerminalHub, name: str) -> str:
-    from .core.errors import InvalidInput
-
-    others = [n for n in hub.terminals if n != name]
-    if not others:
-        raise InvalidInput("只有一个终端，没有可发送的对端")
-    return others[0]
+        return JSONResponse(network_history_payload(hub.network))
 
 
 MAGIC_PNG = b"\x89PNG\r\n\x1a\n"
 MAGIC_JPEG = b"\xff\xd8\xff"
+
+
+def network_history_payload(network) -> dict:
+    """What crossed the wire, when the transport can say.
+
+    Only the in-memory 演示 line keeps a transcript. A real transport has no
+    business retaining every packet it relays -- and ``RoutedNetwork`` has no
+    such attribute at all, which used to surface as a 500 on an endpoint the UI
+    polls. An empty list plus ``available: false`` is the honest answer there.
+    """
+    history = getattr(network, "history", ())
+    return {
+        "ok": True,
+        # 分不清"没有记录"和"记录是空的"会让界面把真实链路显示成"什么都没发生"。
+        "available": hasattr(network, "history"),
+        "packets": [
+            {"sender": sender, "target": target, "bytes": len(payload)}
+            for sender, target, payload in history
+        ],
+    }
 
 
 def _sniff(data: bytes) -> str:

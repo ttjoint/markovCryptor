@@ -134,6 +134,85 @@ class CommandLineTest(unittest.TestCase):
             self.assertIn("两个账号", str(caught.exception.code))
 
 
+class ChatWindowTest(unittest.TestCase):
+    """终端界面必须让人看见"收到了什么"。
+
+    联调时踩过：对端发来一张普通照片，隐写层按设计不出声（图里没有密文是
+    最常见的情况），结果界面上什么都没有，看起来和"根本没收到"一模一样，
+    于是白排查了一轮。
+    """
+
+    def _side(self):
+        import qq_chat
+        from markovcryptor.terminal.terminal import Inbound
+
+        side = qq_chat.Side.__new__(qq_chat.Side)
+        side.label = "me"
+        side.lines = []
+        side.say = staticmethod(lambda line: side.lines.append(line))
+        return qq_chat, Inbound, side
+
+    def test_plain_photo_is_shown(self) -> None:
+        from PIL import Image
+
+        qq_chat, Inbound, side = self._side()
+        inbound = Inbound(
+            sender="10002",
+            chat_images=(Image.new("RGB", (512, 512)), Image.new("RGB", (300, 200))),
+        )
+        qq_chat.Side._on_inbound(side, inbound)
+        shown = chr(10).join(side.lines)
+        self.assertIn("图", shown, "普通照片必须显示出来")
+        self.assertIn("512×512", shown)
+
+    def test_empty_packet_still_says_something(self) -> None:
+        """收到但没内容，也要说一句；否则两种情形无法区分。"""
+        qq_chat, Inbound, side = self._side()
+        qq_chat.Side._on_inbound(side, Inbound(sender="10002"))
+        self.assertTrue(side.lines, "空包也必须留下一行输出")
+
+    def test_covert_and_handshake_still_shown(self) -> None:
+        qq_chat, Inbound, side = self._side()
+        qq_chat.Side._on_inbound(side, Inbound(
+            sender="10002", covert=("密文内容",), handshake="peer-key"))
+        shown = chr(10).join(side.lines)
+        self.assertIn("密文内容", shown)
+        self.assertIn("peer-key", shown)
+
+
+class UpgradeTest(unittest.TestCase):
+    """新包必须真的换掉旧代码。
+
+    踩过：wheel 版本号一直是 0.3.0，`pip install --upgrade` 看到"已装
+    0.3.0"就跳过，于是 guest 上跑的还是第一次装的那份。症状是
+    `chat.bat` 报 "unrecognized arguments: --onebot"，看着像脚本 bug。
+    """
+
+    def test_install_ps1_forces_the_bundled_wheel(self) -> None:
+        from make_bundle import INSTALL_PS1
+
+        self.assertIn("--force-reinstall", INSTALL_PS1,
+                      "版本号不变，不加 --force-reinstall 就永远装不上新代码")
+        self.assertIn("markovcryptor", INSTALL_PS1)
+
+    def test_install_ps1_installs_markovcryptor_after_deps(self) -> None:
+        """依赖先装、本包后装：本包的元数据依赖别让离线解析卡住。"""
+        from make_bundle import INSTALL_PS1
+
+        deps_at = INSTALL_PS1.index("fastapi uvicorn python-multipart websockets")
+        api_at = INSTALL_PS1.index("--force-reinstall --no-deps markovcryptor")
+        self.assertGreater(api_at, deps_at)
+
+    def test_chat_refuses_to_run_an_old_library(self) -> None:
+        """旧库里没有 --onebot；先查一句，别让 argparse 把话说得像参数写错了。"""
+        from make_bundle import CHAT_PS1
+
+        self.assertIn("--onebot", CHAT_PS1)
+        self.assertIn("install.bat", CHAT_PS1,
+                      "必须明确告诉用户去重跑 install.bat")
+        self.assertIn("旧版", CHAT_PS1)
+
+
 class OneBotConfigTest(unittest.TestCase):
     """``markovcryptor.onebot_config`` 是 CLI 与 tools 的共同真源。"""
 

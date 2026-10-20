@@ -109,6 +109,26 @@ class ContractTest(unittest.TestCase):
                           for p in paths)
             self.assertTrue(matched, f"页面调用了不存在的接口：{endpoint}")
 
+    def test_hidden_attribute_actually_hides(self):
+        """`hidden` 只有在没人给它写 display 的时候才管用。
+
+        页面里 `.client` 是 grid、`.await` 是 flex —— 这些都压过 `hidden`
+        自带的 UA 样式。于是 `node.hidden = true` 在 DOM 里成立、屏幕上照
+        样显示。单账号部署隐藏 bob 窗口时就是这么漏的：JS 断言都对，截图
+        里却有两个客户端。要么每处都补一条 `[hidden]` 规则，要么就别写
+        display。这里要求存在一条带 `!important` 的兜底规则。
+        """
+        page = INDEX.read_text(encoding="utf-8")
+        rules = re.findall(r"([^{}]*\[hidden\][^{}]*)\{([^}]*)\}", page)
+        self.assertTrue(rules, "页面里一条 [hidden] 规则都没有")
+        strong = [sel for sel, body in rules
+                  if "display: none" in body.replace("  ", " ") and "!important" in body]
+        self.assertTrue(
+            strong,
+            "没有一条 [hidden] 规则用 !important —— 只要元素自己写了 "
+            "display:grid/flex，hidden 就会被压掉：" + repr([s for s, _ in rules]),
+        )
+
     def test_form_generator_handles_every_schema_shape(self):
         """The generator only knows a few JSON Schema shapes.
 

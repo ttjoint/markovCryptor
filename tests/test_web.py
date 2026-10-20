@@ -69,6 +69,44 @@ class OneBotHubWiringTest(unittest.TestCase):
         self.assertEqual(hub.address_of("bob"), "10002")
         self.assertEqual(hub.address_of("alice"), "10001")
 
+    def test_single_account_knows_its_peer(self):
+        """一台设备一个号:本地只有一个终端,对端在另一台设备上。
+
+        真实部署就是这样(每台设备 1 个 QQ + 1 份本系统)。此时不能靠
+        ``_other()`` 找对端 —— 本机没有第二个终端 —— 必须用 --peer 给的号。
+        """
+        from markovcryptor.terminal.onebot import InProcessOneBot, RoutedNetwork
+        from markovcryptor.web_terminal import TerminalHub
+
+        bot = InProcessOneBot()
+        routes = {"alice": bot.connect("10001")}
+        hub = TerminalHub(network=RoutedNetwork(routes), names=("alice",))
+        hub.uins = {"alice": "10001"}
+        hub.peer_uin = "10002"
+
+        self.assertEqual(hub.peer_address_of("alice"), "10002",
+                         "单账号时对端地址来自 --peer")
+
+    def test_single_account_without_peer_says_what_is_missing(self):
+        from markovcryptor.core.errors import InvalidInput
+        from markovcryptor.terminal.onebot import InProcessOneBot, RoutedNetwork
+        from markovcryptor.web_terminal import TerminalHub
+
+        bot = InProcessOneBot()
+        hub = TerminalHub(network=RoutedNetwork({"alice": bot.connect("10001")}),
+                          names=("alice",))
+        hub.uins = {"alice": "10001"}
+
+        with self.assertRaises(InvalidInput) as caught:
+            hub.peer_address_of("alice")
+        self.assertIn("--peer", " ".join(caught.exception.hints))
+
+    def test_two_local_accounts_ignore_peer_uin(self):
+        """同机双号时对端是本机另一个终端,不该被 --peer 带偏。"""
+        hub, _ = self._hub()
+        hub.peer_uin = "99999"
+        self.assertEqual(hub.peer_address_of("alice"), "10002")
+
     def test_name_of_maps_uin_back_to_name(self):
         hub, _ = self._hub()
         self.assertEqual(hub.name_of("10002"), "bob")
@@ -83,6 +121,47 @@ class OneBotHubWiringTest(unittest.TestCase):
         self.assertEqual(hub.address_of("alice"), "alice")
         self.assertEqual(hub.name_of("alice"), "alice")
         self.assertEqual(hub.transport_name, "local")
+
+    def test_state_reports_peer_uin_for_single_account(self):
+        """界面靠 peer_uin 说出对端是谁，否则只能画一个不存在的 bob。"""
+        from markovcryptor.terminal.onebot import InProcessOneBot, RoutedNetwork
+        from markovcryptor.web_terminal import TerminalHub
+
+        bot = InProcessOneBot()
+        hub = TerminalHub(network=RoutedNetwork({"alice": bot.connect("10001")}),
+                          names=("alice",))
+        hub.uins = {"alice": "10001"}
+        hub.peer_uin = "10002"
+        self.assertEqual(getattr(hub, "peer_uin", ""), "10002")
+
+    def test_network_history_does_not_blow_up_on_real_transport(self):
+        """RoutedNetwork 不保留每个包的记录，接口得如实回答而不是 500。
+
+        UI 每次轮询都会打这个端点；一个 500 会让整页看起来坏了。
+        """
+        from markovcryptor.terminal.onebot import InProcessOneBot, RoutedNetwork
+        from markovcryptor.web_terminal import network_history_payload
+
+        bot = InProcessOneBot()
+        network = RoutedNetwork({"alice": bot.connect("10001")})
+        self.assertFalse(hasattr(network, "history"),
+                         "前提：真实传输层本来就没有 history")
+
+        payload = network_history_payload(network)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["packets"], [])
+        self.assertFalse(payload["available"],
+                         "要能说清：这条链路不记账，而不是假装记了空账")
+
+    def test_network_history_still_reports_the_demo_line(self):
+        """本地演练那条内存线有记录，不能被顺手改坏。"""
+        from markovcryptor.terminal.transport import LoopbackNetwork
+        from markovcryptor.web_terminal import network_history_payload
+
+        network = LoopbackNetwork()
+        payload = network_history_payload(network)
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["packets"], [])
 
     def test_transport_name_says_onebot_when_wired(self):
         hub, _ = self._hub()
