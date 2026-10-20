@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse, Response
 
 from .channels.base import Carrier
 from .observability import METRICS
-from .terminal import LoopbackNetwork, Packet, Terminal
+from .terminal import LoopbackNetwork, Network, Packet, Terminal
 from .terminal.terminal import Inbound, _decode_packet
 
 #: Module-level alias: with ``from __future__ import annotations`` every
@@ -59,12 +59,25 @@ class TextChannelAdapter:
 
 
 class TerminalHub:
-    """One pair of terminals sharing one loopback network, plus their history."""
+    """One pair of terminals sharing one network, plus their history.
 
-    def __init__(self, psk: str = "pbx1", text_channel=None) -> None:
-        self.network = LoopbackNetwork()
+    By default the network is :class:`LoopbackNetwork` -- two windows on this
+    machine, the "本地演练" mode. Pass ``network=`` to put the same terminals on
+    a real transport (``terminal/onebot.py``); nothing below this line changes,
+    which is the whole point of the ``Network`` seam.
+
+    ``names`` lets the two sides be called something other than alice/bob -- on
+    QQ they are the two UINs, and every log line, route path and UI label
+    should say so.
+    """
+
+    def __init__(self, psk: str = "pbx1", text_channel=None, *,
+                 network: Network | None = None,
+                 names: tuple[str, str] = ("alice", "bob"),
+                 fallback_covers: dict[str, list[bytes]] | None = None) -> None:
+        self.network = network if network is not None else LoopbackNetwork()
         self.terminals: dict[str, Terminal] = {}
-        for name in ("alice", "bob"):
+        for name in names:
             terminal = Terminal(name, self.network, psk=psk).attach()
             if text_channel is not None:
                 # 文本混淆走中文信道；模型由调用方注入，没有就诚实地不可用。
@@ -87,6 +100,14 @@ class TerminalHub:
         #: 每个终端"手头现成可用的图"的队首。浏览器队列在前端，服务端看不见；
         #: 前端在用户加图时把它推上来，自动握手回包就从这里取头一张。
         self.cover_queue: dict[str, list[bytes]] = {name: [] for name in self.terminals}
+        #: 兜底底图：接 QQ 时没有浏览器在前面推图，而握手回包必须先有一张
+        #: 自己的图才能发（不能拿对方那张重写）。没有兜底的话，对端发来的
+        #: 握手会一直压在 ``pending_request`` 里，用户看不到任何提示。
+        self.fallback_covers: dict[str, list[bytes]] = {
+            name: list(fallback_covers.get(name, ())) if fallback_covers else []
+            for name in self.terminals
+        }
+        self._fallback_cursor: dict[str, int] = {name: 0 for name in self.terminals}
         for name, terminal in self.terminals.items():
             terminal.take_cover = (lambda n=name: self._take_cover(n))
             terminal.on_packet = (
@@ -95,9 +116,22 @@ class TerminalHub:
             terminal.subscribe(self._collector(name))
 
     def _take_cover(self, name: str) -> bytes | None:
-        """Hand out this side's first queued picture, or None if it has none."""
+        """Hand out a cover for an automatic handshake reply.
+
+        The browser queue first (it holds exactly the pictures the user chose),
+        then the fallback pool. The fallback **cycles** rather than pops: a
+        cover is not consumed by being used, and a second handshake later in the
+        session should not fail just because the first one spent the only one.
+        """
         queue = self.cover_queue[name]
-        return queue.pop(0) if queue else None
+        if queue:
+            return queue.pop(0)
+        pool = self.fallback_covers.get(name) or []
+        if not pool:
+            return None
+        cursor = self._fallback_cursor[name]
+        self._fallback_cursor[name] = cursor + 1
+        return pool[cursor % len(pool)]
 
     def set_covers(self, name: str, images: list[bytes]) -> bool:
         """Replace what this side has on hand, then answer any held handshake.
@@ -111,6 +145,20 @@ class TerminalHub:
             self.pump()
         return released
 
+    def name_of(self, address: str) -> str:
+        """The local name for a wire address, when it is one of ours.
+
+        The transcript must read the same whichever mode it is in: locally the
+        address was already ``bob``; on QQ it is a UIN, and showing ``10002`` in
+        a window titled "bob" makes the user wonder if two different peers are
+        talking. Anything unknown is left as-is -- an unregistered sender is a
+        real third party and their address is the honest label.
+        """
+        for name, uin in self.uins.items():
+            if uin == address:
+                return name
+        return address
+
     def _collector(self, name: str):
         def sink(inbound: Inbound) -> None:
             bucket = self.history[name]
@@ -120,7 +168,7 @@ class TerminalHub:
                 del bucket[: len(bucket) - HISTORY_LIMIT]
             self._record(name, {
                 "direction": "in",
-                "sender": inbound.sender,
+                "sender": self.name_of(inbound.sender),
                 "chat_text": inbound.chat_text,
                 "chat_image_count": len(inbound.chat_images),
                 "covert": list(inbound.covert),
@@ -183,8 +231,33 @@ class TerminalHub:
     def text_channel_ready(self) -> bool:
         return any(t.text_channel is not None for t in self.terminals.values())
 
+    #: 名字 -> 线上地址（接 QQ 时是 QQ 号）。本地演练为空，名字就是地址。
+    uins: dict[str, str] = {}
+
+    def address_of(self, name: str) -> str:
+        """The address to put on the wire for a local terminal name.
+
+        Locally the name *is* the address (``alice`` -> ``alice``). On QQ the
+        name stays ``alice`` for the sake of every route and the whole UI, while
+        the wire needs the UIN -- sending to ``"bob"`` would be rejected by the
+        transport, correctly, because there is no QQ number ``bob``.
+        """
+        return self.uins.get(name, name)
+
+    @property
+    def transport_name(self) -> str:
+        """What the UI should call the current transport."""
+        return "local" if isinstance(self.network, LoopbackNetwork) else "onebot"
+
     def pump(self) -> int:
-        return self.network.pump()
+        """Let a loopback network deliver what is queued.
+
+        A real transport has nothing to pump -- its own thread delivers -- so
+        this is a no-op there rather than an error: the UI calls it after every
+        send without caring which mode it is in.
+        """
+        pump = getattr(self.network, "pump", None)
+        return pump() if pump is not None else 0
 
     def reset(self) -> None:
         """清空会话与历史，回到“从未联系过”的状态。
@@ -201,7 +274,9 @@ class TerminalHub:
             self.outgoing[name].clear()
             self.cover_queue[name].clear()
             terminal.pending_request = None
-        self.network.history.clear()
+        history = getattr(self.network, "history", None)
+        if history is not None:
+            history.clear()
 
 
 def _terminal(hub: TerminalHub, name: str) -> Terminal:
@@ -235,6 +310,12 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
             "ok": True,
             # 文本混淆走中文信道，没有模型时那条路径不可用；前端据此禁用按钮。
             "text_channel_ready": hub.text_channel_ready,
+            # "local" = 两个窗口共用内存队列；"onebot" = 真的走 QQ。
+            # 前端据此把标题从 alice/bob 换成两个 QQ 号。
+            "transport": hub.transport_name,
+            # 名字（alice/bob）是位置，QQ 号才是身份。接 QQ 时前端要能说清
+            # "左边这个窗口其实是 3925697820"。
+            "uins": dict(getattr(hub, "uins", {})),
             "terminals": {
                 name: {
                     "state": terminal.state.value,
@@ -296,7 +377,8 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
                    mode: str = Form(default="plain"),
                    files: FileList = File(default=[])):
         terminal = _terminal(hub, name)
-        peer = _other(hub, name)
+        # 线上地址，不是本地名字：接 QQ 时这里是 QQ 号。
+        peer = hub.address_of(_other(hub, name))
         raws, _names = await _images(files)
         # The images are exactly what the user selected, in the order they
         # selected them. Nothing here reorders, substitutes or invents a cover:

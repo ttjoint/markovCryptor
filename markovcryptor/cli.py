@@ -93,6 +93,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=DEFAULT_PORT,
                        help=f"端口，默认 {DEFAULT_PORT}（也可用环境变量 MKX1_PORT）")
     serve.add_argument("--model-dir", type=Path, default=default_model_dir())
+    serve.add_argument("--onebot", action="append", default=[], metavar="UIN=WS[;TOKEN]",
+                       help="把这个 QQ 号的终端接到 OneBot（可重复，需两个）；"
+                            "不给就是本地双窗演练")
+    serve.add_argument("--psk", default="pbx1",
+                       help="隐写层共享口令，两侧必须一致；默认 pbx1")
 
     qq_init = sub.add_parser(
         "qq-init", help="给 SnowLuma 写一个 QQ 号的 OneBot 配置")
@@ -264,6 +269,25 @@ def _utf8_stdout() -> None:
             pass
 
 
+def _parse_onebot(raw: list[str]) -> dict[str, str]:
+    """``["3925697820=ws://127.0.0.1:9711/;mkx-..."]`` -> ``{uin: "url;token"}``.
+
+    One flag per account rather than two flags per account: the id, the URL and
+    the token are one fact ("where this account's OneBot is"), and splitting it
+    across three parallel lists invites an off-by-one nobody would notice until
+    the wrong token was used.
+    """
+    parsed: dict[str, str] = {}
+    for item in raw:
+        uin, sep, spec = item.partition("=")
+        if not sep or not uin.strip() or not spec.strip():
+            raise SystemExit(
+                f"--onebot 需要 UIN=WS[;TOKEN]，收到 {item!r}；"
+                "例如 3925697820=ws://127.0.0.1:9711/;mkx-3925697820")
+        parsed[uin.strip()] = spec.strip()
+    return parsed
+
+
 def main(argv: list[str] | None = None) -> int:
     _utf8_stdout()
     parser = build_parser()
@@ -310,7 +334,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
 
         port = int(os.environ.get("MKX1_PORT") or args.port)
         try:
-            run_server(ApiConfig(host=args.host, port=port, model_dir=args.model_dir))
+            run_server(ApiConfig(host=args.host, port=port, model_dir=args.model_dir,
+                                 onebot=_parse_onebot(args.onebot), psk=args.psk))
         except StegoError as exc:
             print(exc, file=sys.stderr)
             for hint in exc.hints:

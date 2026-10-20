@@ -336,3 +336,116 @@ python tools/qq_probe.py \
 改名为 `additional_headers`。项目里所有连 OneBot 的地方统一走
 `markovcryptor.onebot_ws.connect()`，它会按装着的版本挑参数名。
 有测试（`OneBotWebSocketTest`）盯着，禁止再手写 `extra_headers=`。
+
+---
+
+## 8. 打通双方互联：把终端挂到真 QQ 上
+
+前面几节验证的是「QQ 会不会破坏图片」，结论是**不会**。这一节是把它真正
+用起来：两个终端各自挂一个 QQ 号，握手和密文都走 QQ。
+
+### 8.1 一条命令
+
+```bash
+python -m markovcryptor.cli serve --port 8731 \
+  --onebot "3925697820=ws://127.0.0.1:9711/;mkx-3925697820" \
+  --onebot "1741473279=ws://127.0.0.1:9721/;mkx-1741473279"
+```
+
+不给 `--onebot` 就是原来的**本地双窗演练**（一条内存队列，一定送达）。
+给了就换成真的 QQ，而 `Terminal` / `Session` / 协议层**一行没改** —— 这正是
+[QQ_TRANSPORT.md](QQ_TRANSPORT.md) §3 那个分层当初留口子的目的。
+
+`--psk` 是**隐写层**的共享口令，两侧必须一致。不一致不会报错，只会表现为
+「发出去的图看起来是普通照片」——因为帧根本没通过认证。默认 `pbx1`。
+
+打开 `http://127.0.0.1:8731/` 就是同一套界面，`/terminal/state` 里的
+`transport` 会变成 `onebot`。
+
+### 8.2 不想开浏览器：命令行直连
+
+`tools/qq_chat.py` 是一个两端的控制台，适合压链路：
+
+```bash
+python tools/qq_chat.py --a-uin 3925697820 --a-port 9711 \
+                        --b-uin 1741473279 --b-port 9721
+```
+
+```
+[alice] handshake            # 发起握手，公钥藏进图里
+[alice] send 今晚八点老地方    # 密文藏进图，明文不上网
+[bob]   ...（自动回包后会打印会话已建立）
+/as bob                      # 切到另一侧
+```
+
+跨机时每台各跑一侧：
+
+```bash
+python tools/qq_chat.py --single a --a-uin <本机号> --a-port 9711 \
+                        --peer <对端号> --a-token mkx-<本机号>
+```
+
+不接 QQ 也能验整条链路：
+
+```bash
+python tools/qq_chat.py --selftest
+```
+
+它会用内存里的假 OneBot 跑完整往返（握手 → 密文 → 反向密文），退出码即结论。
+
+### 8.3 传输层要解决的三件事
+
+都写在 `terminal/onebot.py` 里，因为它们在 QQ 上是真实存在的，不是理论问题。
+
+**（一）一条消息一张图，没有分组**
+
+P0 实测（[QQ_TRANSPORT.md](QQ_TRANSPORT.md) §4 第 2 条）发现多张图**可能**被
+合并推送、也**可能**被拆开。所以一个带 n 张图的包会发成 n 条独立消息，每张图
+带一个小尾巴说明「我是哪个包的第几张」：
+
+```
+magic(4) | packet_id(8) | index(1) | count(1)
+```
+
+这个尾巴**贴在 PNG 的 IEND 之后**，不在 PBX1 信封里。两个理由：
+
+* 信封是认证过的密文，把路由信息塞进去等于让传输层依赖密码学层；
+* IEND 之后的字节所有解码器都会忽略，所以图片的像素**一个都没变**，
+  藏在像素里的隐写载荷自然也不受影响。
+
+收侧按 `packet_id` 攒齐再交付；攒不齐的按超时丢弃并记日志，绝不拿半截去解密。
+
+**（二）没有尾巴的图是正常的**
+
+对端发来的普通照片、别人随手发的图，都没有尾巴。这类图自成一路（单图包），
+**永远不会**被拼进我们正在等的那个包里 —— 否则一张摄影图就能顶替一个缺失分片，
+把密文拼成错误的内容。
+
+**（三）URL 会过期**
+
+QQ 的图片链接有有效期，所以收到事件立刻下载，不缓存 URL。下载失败只计一次
+`dropped` 并继续读下一条，不让一张坏图卡死整个接收循环。
+
+### 8.4 两个容易踩的坑
+
+**自动握手回包需要「自己的图」**
+
+`Terminal._auto_respond` 只用本端自己的图回包（理由见那里的注释）。本地演练时
+图来自浏览器队列；接 QQ 时没有浏览器，所以要服务端兜底生成一张。
+`web.py` 的 `_onebot_hub` 就是这么做的。**没有兜底**的话，对端发来的握手会一直
+压在 `pending_request` 里，界面上什么都不显示 —— 表现为「对方说发了，我这边没反应」。
+
+**`attach()` 已经注册过网络了**
+
+`Terminal.attach()` 内部就调了 `network.register()`。外面再手动
+`network.register(uin, terminal.deliver)` 会让每个包投递两次：握手回两遍、
+同一条密文解出两条。这个坑实际踩到了，现在有测试盯着。
+
+### 8.5 相关文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `terminal/onebot.py` | `Network` 实现、包关联头、重组、`InProcessOneBot`（无 QQ 的替身） |
+| `tools/qq_chat.py` | 两端控制台 / 跨机单侧 / `--selftest` |
+| `tests/test_onebot_transport.py` | 28 项：尾巴、乱序重组、普通图不越界、真双端握手与密文 |
+| `web.py` `_onebot_hub` | 把 hub 挂到 OneBot，并准备兜底底图 |

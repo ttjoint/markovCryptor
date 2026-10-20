@@ -59,6 +59,14 @@ class ApiConfig:
     port: int = DEFAULT_PORT
     model_dir: Path | None = None
     max_upload_bytes: int = MAX_UPLOAD_BYTES
+    #: OneBot endpoints, one per QQ account, as ``{"<uin>": "ws://...;<token>"}``.
+    #: Empty means the local two-window演练. A non-empty mapping puts the very
+    #: same terminals on real QQ -- the ``Network`` seam is the only thing that
+    #: changes (see docs/QQ_TRANSPORT.md §3).
+    onebot: dict[str, str] = field(default_factory=dict)
+    #: Shared secret for the *stego* layer. Both sides must agree or the frames
+    #: do not authenticate and every picture looks like an ordinary photo.
+    psk: str = "pbx1"
 
 
 def _json_error(error: StegoError) -> JSONResponse:
@@ -119,9 +127,14 @@ def create_app(config: ApiConfig | None = None, *, engine: Engine | None = None)
     except StegoError:
         text_channel = None
 
-    app.state.terminal_hub = TerminalHub(text_channel=text_channel)
-    wire_terminal_routes(app, app.state.terminal_hub,
-                         max_upload_bytes=settings.max_upload_bytes)
+    if settings.onebot:
+        hub, transport = _onebot_hub(settings, text_channel)
+        app.state.onebot_transport = transport
+    else:
+        # 本地演练：两个窗口共用一条内存线，一定送达。
+        hub = TerminalHub(text_channel=text_channel, psk=settings.psk)
+    app.state.terminal_hub = hub
+    wire_terminal_routes(app, hub, max_upload_bytes=settings.max_upload_bytes)
 
     @app.exception_handler(StegoError)
     async def _handle_stego_error(request: Request, exc: StegoError) -> JSONResponse:
@@ -426,6 +439,81 @@ async def _read_carrier(kind: str, file: UploadFile | None, text: str | None,
     data = await _read_upload(file, limit)
     return Carrier.of_bytes(data, kind=carrier_kind,
                             media_type=file.content_type, label=file.filename or "")
+
+
+def _onebot_hub(settings: ApiConfig, text_channel):
+    """Put the terminal hub on real QQ.
+
+    Each entry is ``{"<uin>": "ws://host:port/;<token>"}`` -- the token after a
+    semicolon, because a dict of two-value tuples cannot be expressed on a
+    command line without inventing a config file for two strings.
+
+    The two local terminals keep their names ``alice`` / ``bob``. Every route,
+    the history, and the whole web UI address them by that name; renaming them to
+    UINs would mean touching all three for no gain. The UIN is where it belongs:
+    on the wire, inside each ``OneBotNetwork``.
+
+    Covers are generated here. An automatic handshake reply must travel in a
+    picture this side owns (``Terminal._auto_respond``), and in QQ mode there is
+    no browser queue to take one from -- without a fallback the peer's request
+    would sit in ``pending_request`` forever with nothing on screen to explain it.
+    """
+    from .terminal.onebot import OneBotNetwork, RoutedNetwork
+    from .web_terminal import TerminalHub
+
+    if len(settings.onebot) != 2:
+        raise InvalidInput(
+            f"接 QQ 需要正好两个账号，收到 {len(settings.onebot)} 个："
+            f"{sorted(settings.onebot)}",
+            hints=("用 --onebot <uin>=<url> 给两侧各配一条 OneBot 连接",),
+        )
+
+    # 位置决定身份：第一个是 alice，第二个是 bob。顺序来自命令行顺序，
+    # 所以 --onebot 写了两次的顺序就是谁坐左边。
+    sides = list(settings.onebot.items())
+    names = ("alice", "bob")
+    routes: dict[str, OneBotNetwork] = {}
+    uins: dict[str, str] = {}
+    for name, (uin, spec) in zip(names, sides):
+        url, _, token = str(spec).partition(";")
+        routes[name] = OneBotNetwork(url.strip(), str(uin), token=token.strip())
+        uins[name] = str(uin)
+
+    network = RoutedNetwork(routes)
+    covers = {name: [_generated_cover(seed=index) for index in range(2)]
+              for index, name in enumerate(names)}
+    hub = TerminalHub(text_channel=text_channel, network=network,
+                      names=names, fallback_covers=covers, psk=settings.psk)
+    #: 让 UI 能显示"alice 其实是哪个 QQ 号"，而不只是位置名。
+    hub.uins = uins
+    network.start()
+    return hub, network
+
+
+def _generated_cover(seed: int = 0, size: int = 512) -> bytes:
+    """A carrier we can make ourselves when the user supplied none.
+
+    Only used for the *handshake reply*, whose 38-byte payload needs far less
+    room than a message body. It is a real picture the QIM kernel can write
+    into, not a placeholder that would fail at embed time.
+    """
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    rng = np.random.default_rng(seed)
+    y = np.broadcast_to(np.linspace(0, 1, size)[:, None], (size, size))
+    x = np.broadcast_to(np.linspace(0, 1, size)[None, :], (size, size))
+    base = np.stack([
+        120 + 60 * np.sin(3.1 * x + seed),
+        110 + 50 * np.cos(2.7 * y + seed),
+        100 + 70 * np.sin(2.2 * (x + y)),
+    ], axis=-1)
+    pixels = np.clip(base + rng.normal(0, 6, (size, size, 3)), 0, 255).astype(np.uint8)
+    buffer = io.BytesIO()
+    Image.fromarray(pixels, "RGB").save(buffer, "PNG")
+    return buffer.getvalue()
 
 
 def _parse_options(raw: str | None) -> dict[str, Any] | None:

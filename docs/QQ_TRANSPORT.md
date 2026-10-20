@@ -159,27 +159,38 @@ def __init__(self, *, network=None, ...):
 
 搭建与复跑见 [QQ_TESTBED.md](QQ_TESTBED.md)。
 
-### 阶段 B：传输层（假定 A 的结论是有利）
+### 阶段 B：传输层 —— ✅ 已完成
 
-1. `terminal/onebot.py`：OneBot WebSocket 客户端
+1. ✅ `terminal/onebot.py`：`OneBotNetwork`（`Network` 的 QQ 实现）
    - 连 SnowLuma 的 OneBot WS 端口（双号时每号一个，见 QQ_TESTBED.md）
-   - 收 `post_type=message` 事件 → 下载图片 → 攒包 → `sink(sender, packet)`
-   - 发：`send_private_msg`，`image` 段传 base64 或本地文件
-2. 传输层关联头：`packet_id + index + count`（不复用加密信封）。
-3. 测试：一个 `FakeOneBot`（内存里模拟事件与动作），不依赖真 QQ，
-   保证 CI 无网也能全绿。**这条很重要**——测试不能连真 QQ。
+   - 收 `post_type=message` 事件 → 立刻下载图片 → 攒包 → `sink(sender, packet)`
+   - 发：`send_private_msg`，`image` 段传 `base64://`
+2. ✅ 传输层关联头：`MKXT | packet_id(8) | index(1) | count(1)`，
+   贴在 PNG 的 `IEND` 之后。**不在加密信封里**——理由见
+   [QQ_TESTBED.md](QQ_TESTBED.md) §8.3。
+3. ✅ `InProcessOneBot`：内存里模拟 OneBot 服务端，因此 CI 不需要 QQ、
+   也不需要网络。`tests/test_onebot_transport.py` 28 项全绿。
 
-### 阶段 C：接线
+一条实现上必然的取舍：**一个包有 n 张图就发 n 条消息**。P0 说过多图可能合并
+也可能拆开，所以分组不能靠"它们会一起来"，必须自带关联头。
 
-1. `TerminalHub(network=...)` 注入。
-2. CLI：`serve --transport onebot --onebot-url ws://... --qq 123456`。
-3. UI：状态栏显示当前是「本地演练」还是「QQ」。
+### 阶段 C：接线 —— ✅ 已完成
 
-### 阶段 D：真实场景收敛
+1. ✅ `TerminalHub(network=..., names=..., fallback_covers=...)` 注入。
+2. ✅ CLI：`serve --onebot "UIN=WS[;TOKEN]"`（可重复两次）+ `--psk`。
+3. ✅ `/terminal/state` 增加 `transport` 字段（`local` / `onebot`）。
+4. ✅ `tools/qq_chat.py`：两端控制台、跨机单侧、`--selftest`。
 
-1. 丢包/乱序/重复的真实表现 → 传输层补重传或容忍。
-2. 大图/小图混合、图片被 QQ 压缩的情况 → 错误信息必须保留真实原因。
-3. 一键切换回本地演练，方便对比。
+`Terminal` / `Session` / `protocol` **一行未改**，与 §7 的判断一致。
+
+### 阶段 D：真实场景收敛（部分完成）
+
+1. ✅ 乱序：按 `index` 复原，有测试（`pump(reverse=True)`）。
+   ⚠️ 丢包：目前只按超时丢弃半包并记日志，**没有重传**——
+   是否要做取决于真机上的实际丢图率，先量再决定。
+2. ⚠️ 大图/小图混合尚未在真机压过；错误信息已保留真实原因
+   （逐张说明哪张装不下）。
+3. ✅ 不给 `--onebot` 就是本地演练，同一套代码路径。
 
 ## 6. 风险清单
 

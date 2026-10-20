@@ -10,6 +10,7 @@
     install.ps1          guest 端一键安装
     run-snowluma.ps1     起 SnowLuma 并等 OneBot 端口
     probe.ps1            发一张图，验 OneBot 通不通
+    chat.ps1             两个 QQ 号互联：开终端 UI，握手 + 密文都走真 QQ
     CHECKLIST.md         手工步骤与预期结果
     manifest.json        版本、md5、端口分配
 
@@ -231,6 +232,8 @@ Write-Host ("  Token     : " + @($target.networks.wsServers)[0].accessToken)
 Write-Host ("  WebUI     : http://127.0.0.1:5099/  (admin / mkx-webui-1)")
 Write-Host "`n  发一张图验证（参数只有对端 QQ 号）：" -ForegroundColor Cyan
 Write-Host "    .\probe.bat <对端QQ号>"
+Write-Host "`n  两个号都起来之后，开始真正的互联（握手 + 密文都走 QQ）：" -ForegroundColor Cyan
+Write-Host "    .\chat.bat"
 Write-Host ""
 exit 0
 '''
@@ -511,6 +514,99 @@ exit 1
 """
 
 
+CHAT_PS1 = r"""# 双方互联：把两个 QQ 号挂上终端，开 Web UI。由 tools/make_bundle.py 生成。
+# 用法：.\chat.ps1 [-Port 8731] [-Psk 共享口令-123]
+#
+# 为什么需要两个号：QQ 上的"两端"是两个账号，各有一条自己的 OneBot 连接。
+# 一个号只能自说自话 —— 所以这里要求 snowluma\config 下正好两份配置。
+param(
+  [int]$Port = 8731,
+  [string]$Psk = "共享口令-123"
+)
+# 详见 probe.ps1 顶部的说明：编码设置失败必须忽略，否则整脚本静默退出。
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
+Write-Host "chat 启动" -ForegroundColor Cyan
+
+$py = Get-Command py -ErrorAction SilentlyContinue
+if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+if (-not $py) {
+  Write-Host "没有找到 python，也没有 py 启动器。先跑 .\install.bat。" -ForegroundColor Red
+  exit 1
+}
+
+$cfgDir = Join-Path $PSScriptRoot "snowluma\config"
+if (-not (Test-Path $cfgDir)) {
+  Write-Host "没有 $cfgDir —— 先跑 .\start.bat 让 SnowLuma 生成配置。" -ForegroundColor Red
+  exit 1
+}
+$files = @(Get-ChildItem $cfgDir -Filter "onebot_*.json" | Sort-Object Name)
+if ($files.Count -lt 2) {
+  Write-Host ("只找到 " + $files.Count + " 份配置；互联需要两个 QQ 号。") -ForegroundColor Yellow
+  if ($files.Count -eq 1) {
+    Write-Host "  给第二个号写配置： .\start.bat <第二个QQ号>" -ForegroundColor Yellow
+  }
+  exit 1
+}
+if ($files.Count -gt 2) {
+  Write-Host "配置多于两份，无法自动选。删掉多余的，或用 serve --onebot 手动指定：" -ForegroundColor Yellow
+  $files | ForEach-Object { Write-Host ("    " + $_.Name) }
+  exit 1
+}
+
+# 从两份配置里各取 端口 + Token + UIN，拼成 --onebot 参数。
+# 不叫 $args：那是 PowerShell 的自动变量，随手赋值会炸。
+$cliArgs = @()
+foreach ($f in $files) {
+  $cfg = Get-Content -Raw $f.FullName | ConvertFrom-Json
+  $ws = @($cfg.networks.wsServers)[0]
+  if (-not $ws) {
+    Write-Host ($f.Name + " 里没有 wsServers，配置不完整。") -ForegroundColor Red
+    exit 1
+  }
+  # 文件名 onebot_<UIN>.json 里的 UIN 就是账号。
+  $uin = $f.BaseName -replace "^onebot_", ""
+  $url = "ws://127.0.0.1:" + $ws.port + "/"
+  $cliArgs += @("--onebot", ($uin + "=" + $url + ";" + $ws.accessToken))
+  Write-Host ("  " + $uin + " -> " + $url)
+}
+
+Write-Host "`n打开 http://127.0.0.1:$Port/ 选「终端」页签开始。" -ForegroundColor Green
+Write-Host "两侧隐写口令必须一致，本次是：$Psk" -ForegroundColor Green
+Write-Host "（另一台机器要用同样的 -Psk，否则发出去的图对方解不出来）`n"
+
+& $py -m markovcryptor.cli serve --port $Port --psk $Psk @cliArgs
+exit $LASTEXITCODE
+"""
+
+
+CHAT_BAT = r"""@echo off
+REM Two-QQ interconnection: open the terminal UI wired to real OneBot.
+REM Needs two accounts (two onebot_<UIN>.json files under snowluma\config).
+setlocal
+REM Chinese console defaults to codepage 936; force UTF-8 for readable output.
+chcp 65001 >nul
+cd /d "%~dp0"
+where py >nul 2>nul || where python >nul 2>nul
+if errorlevel 1 (
+  echo.
+  echo   Python not found. Install Python 3.11+ first.
+  echo.
+  pause
+  exit /b 1
+)
+REM Note: no unescaped parentheses may appear inside this if-block; cmd
+REM closes the block at the first one and the rest of the script never runs.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0chat.ps1" %*
+if errorlevel 1 (
+  echo.
+  echo   chat failed ^(exit code %ERRORLEVEL%^). The output above says why.
+  echo.
+)
+pause
+"""
+
+
 PROBE_PS1 = r"""# 发一张图，验 OneBot 通不通。由 tools/make_bundle.py 生成。
 # 用法：.\probe.ps1 -Peer <对端QQ号> [-Uin <本机QQ号>] [-WsPort N] [-Token T]
 # 不给 Uin/Token/WsPort 时自动读 snowluma\config\onebot_<UIN>.json ——
@@ -727,9 +823,11 @@ CHECKLIST = r"""# QQ 跨机连通性测试 · 操作清单
 .\install.bat                      # 装依赖，可选：start.bat 会自动装
 .\run-snowluma.bat                 # 只起服务
 .\probe.bat 3925697820             # 发一张图（参数是对端 QQ 号）
+.\chat.bat                         # 两个号互联：握手 + 密文都走真 QQ
 ```
 
 `run-snowluma.bat` 端口从 `snowluma\config\onebot_*.json` 读，不用手工传。
+`chat.bat` 同样自动读两份配置，要求正好两个 QQ 号各有配置。
 
 ---
 
@@ -850,6 +948,8 @@ python -m markovcryptor.cli serve
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | `ConnectionRefused` | SnowLuma 没起 / 端口不对 | 看 `snowluma\logs\qqtest.log`；`start.bat` 会打印真实端口 |
+| `chat.bat` 说"只找到 1 份配置" | 只挂了一个 QQ 号 | 互联要两个号，各跑一次 `start.bat <号>` 生成配置 |
+| 握手完成但密文解不出来 | 两侧 `-Psk` 不一致 | 两边用同一个 `chat.bat -Psk <口令>`；不一致时图看起来是普通照片，不会报错 |
 | `HTTP 401` | token 不匹配 | 用配置文件里的 `wsServers[0].accessToken`，不是 `httpServers` 那个 |
 | 连上了但收不到消息 | 好友关系 / 发的是群聊 | 确认两号互为好友，确认私聊 |
 | 没有 `login detected` | QQ 没登录 | 先登录 QQ，再重跑 `start.bat` |
@@ -924,6 +1024,8 @@ def _write_bundle(root: Path, args: argparse.Namespace, version: str) -> dict:
     for name, text in (("install.ps1", INSTALL_PS1),
                        ("run-snowluma.ps1", RUN_SNOWLUMA_PS1),
                        ("probe.ps1", PROBE_PS1),
+                       ("chat.ps1", CHAT_PS1),
+                       ("chat.bat", CHAT_BAT),
                        ("install.bat", INSTALL_BAT),
                        ("run-snowluma.bat", RUN_BAT),
                        ("probe.bat", PROBE_BAT),

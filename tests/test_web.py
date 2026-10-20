@@ -44,6 +44,51 @@ def _run(coro):
     return anyio.run(_await)
 
 
+class OneBotHubWiringTest(unittest.TestCase):
+    """接 QQ 时，本地名字与线上地址是两件事。
+
+    每个路由、历史、整个前端都用名字（alice/bob）寻址；线上需要的是 QQ 号。
+    把两者混起来会以两种方式炸：发给 "bob" 被传输层拒绝（没有这个 QQ 号），
+    或者聊天记录里一半写 alice 一半写 10002，看起来像两个不同的人。
+    """
+
+    def _hub(self):
+        from markovcryptor.terminal.onebot import (
+            InProcessOneBot, RoutedNetwork,
+        )
+        from markovcryptor.web_terminal import TerminalHub
+
+        bot = InProcessOneBot()
+        routes = {"alice": bot.connect("10001"), "bob": bot.connect("10002")}
+        hub = TerminalHub(network=RoutedNetwork(routes), names=("alice", "bob"))
+        hub.uins = {"alice": "10001", "bob": "10002"}
+        return hub, bot
+
+    def test_address_of_maps_name_to_uin(self):
+        hub, _ = self._hub()
+        self.assertEqual(hub.address_of("bob"), "10002")
+        self.assertEqual(hub.address_of("alice"), "10001")
+
+    def test_name_of_maps_uin_back_to_name(self):
+        hub, _ = self._hub()
+        self.assertEqual(hub.name_of("10002"), "bob")
+        # 陌生号是真实的第三方，照实显示。
+        self.assertEqual(hub.name_of("99999"), "99999")
+
+    def test_local_mode_names_are_their_own_addresses(self):
+        """本地演练没有映射，名字就是地址——否则老路径会全线断掉。"""
+        from markovcryptor.web_terminal import TerminalHub
+
+        hub = TerminalHub()
+        self.assertEqual(hub.address_of("alice"), "alice")
+        self.assertEqual(hub.name_of("alice"), "alice")
+        self.assertEqual(hub.transport_name, "local")
+
+    def test_transport_name_says_onebot_when_wired(self):
+        hub, _ = self._hub()
+        self.assertEqual(hub.transport_name, "onebot")
+
+
 class WebApiTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
