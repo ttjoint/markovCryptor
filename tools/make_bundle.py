@@ -211,8 +211,11 @@ if ($Uin -ne 0 -and -not ($existing.Name -contains "onebot_$Uin.json")) {
   $existing = @(Get-ChildItem $cfgDir -Filter "onebot_*.json" | Sort-Object Name)
 }
 if ($existing.Count -eq 0) {
-  Write-Host "  没有配置。先登录一次 QQ，再跑：start.bat <你的QQ号>" -ForegroundColor Yellow
-  exit 1
+  # 全新设备就是这种情况，而且它是**正常**的：onebot_<QQ号>.json 由
+  # SnowLuma 在 hook 到已登录 QQ 之后自己写，文件名就是那个号。所以这里
+  # 不能要求用户先报号码 —— 让他报了，也只是把这个号写进配置让 SnowLuma
+  # 去匹配，纯属多余的一步。直接起服务，起来之后再读它写出来的东西。
+  Write-Host "  还没有配置 —— 交给 SnowLuma 自动识别本机已登录的 QQ"
 }
 if ($existing.Count -gt 1) {
   # 多个号共用一个 SnowLuma 是支持的，但一键启动只能挑一个。
@@ -220,19 +223,39 @@ if ($existing.Count -gt 1) {
   $existing | ForEach-Object { Write-Host ("    " + $_.Name) }
   exit 1
 }
-$cfgFile = $existing[0].FullName
-$target = Get-Content -Raw $cfgFile | ConvertFrom-Json
-$wantPort = [int]@($target.networks.wsServers)[0].port
-Write-Host ("  使用 " + $existing[0].Name)
+$wantPort = 0
+$target = $null
+if ($existing.Count -eq 1) {
+  $cfgFile = $existing[0].FullName
+  $target = Get-Content -Raw $cfgFile | ConvertFrom-Json
+  $wantPort = [int]@($target.networks.wsServers)[0].port
+  Write-Host ("  使用 " + $existing[0].Name)
+}
 
 # [3/3] 起服务。run-snowluma 自带无人值守环境变量，并会在端口就绪后返回。
 Write-Host "`n[3/3] 启动 SnowLuma（自动 hook QQ、自动同意协议）…" -ForegroundColor Yellow
 & (Join-Path $here "run-snowluma.ps1") -Snowluma $snow -Uin $Uin -TimeoutSec $TimeoutSec
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# SnowLuma 起来了，配置这时候才一定有（首次运行是它刚写出来的）。
+$existing = @()
+if (Test-Path $cfgDir) {
+  $existing = @(Get-ChildItem $cfgDir -Filter "onebot_*.json" | Sort-Object Name)
+}
+if ($existing.Count -ge 1) {
+  $target = Get-Content -Raw $existing[0].FullName | ConvertFrom-Json
+  $wantPort = [int]@($target.networks.wsServers)[0].port
+  $detected = $existing[0].BaseName -replace "^onebot_", ""
+} else {
+  $detected = "?"
+}
+
 Write-Host "`n=== 就绪 ===" -ForegroundColor Green
+Write-Host ("  本机 QQ   : " + $detected)
 Write-Host ("  OneBot WS : 127.0.0.1:" + $wantPort)
-Write-Host ("  Token     : " + @($target.networks.wsServers)[0].accessToken)
+if ($target) {
+  Write-Host ("  Token     : " + @($target.networks.wsServers)[0].accessToken)
+}
 Write-Host ("  WebUI     : http://127.0.0.1:5099/  (admin / mkx-webui-1)")
 Write-Host "`n  发一张图验证（参数只有对端 QQ 号）：" -ForegroundColor Cyan
 Write-Host "    .\probe.bat <对端QQ号>"
@@ -466,7 +489,10 @@ if ($WsPort -eq 0) {
       break
     }
   }
-  if ($WsPort -eq 0) { $WsPort = 9721 }
+  # 注意：这里**不**回退到 9721。全新设备上 `config\onebot_*.json` 是
+  # SnowLuma 起来之后、hook 到已登录 QQ 时才自己写的，文件名就是那个 QQ 号。
+  # 启动前钉死一个"猜的"端口，等于去等一个永远不会来的端口 —— 实测卡满
+  # 超时，屏幕上只剩"超时：9721 没起来"，看着像没装好。
 }
 
 # --- 无人值守三件套 -------------------------------------------------------
@@ -502,6 +528,26 @@ for ($i = 0; $i -lt $TimeoutSec; $i++) {
     Get-Content $log -Tail 20
     exit 1
   }
+  # 端口还不知道就来翻配置：SnowLuma 一 hook 到 QQ 就会写出
+  # onebot_<QQ号>.json，文件名本身就是账号 —— 这就是"免输入识别本机 QQ"
+  # 的全部机制，不需要问用户任何东西。
+  if ($WsPort -eq 0) {
+    $cfgDir = Join-Path $Snowluma "config"
+    if (Test-Path $cfgDir) {
+      foreach ($f in @(Get-ChildItem $cfgDir -Filter "onebot_*.json" |
+                       Sort-Object Name)) {
+        try { $cfg = Get-Content -Raw $f.FullName | ConvertFrom-Json } catch { continue }
+        $ws = @($cfg.networks.wsServers)[0]
+        if ($ws -and [int]$ws.port -gt 0) {
+          $WsPort = [int]$ws.port
+          $discovered = $f.BaseName -replace "^onebot_", ""
+          Write-Host ("发现本机 QQ " + $discovered + "，OneBot WS 端口 " + $WsPort)
+          break
+        }
+      }
+    }
+    if ($WsPort -eq 0) { continue }
+  }
   $open = Test-NetConnection -ComputerName 127.0.0.1 -Port $WsPort -InformationLevel Quiet -WarningAction SilentlyContinue
   if ($open) {
     Write-Host "就绪：OneBot WS 127.0.0.1:$WsPort（PID $($proc.Id)）" -ForegroundColor Green
@@ -509,7 +555,12 @@ for ($i = 0; $i -lt $TimeoutSec; $i++) {
     exit 0
   }
 }
-Write-Host "超时：$WsPort 没起来，看日志 $log" -ForegroundColor Red
+if ($WsPort -eq 0) {
+  Write-Host ("超时：没等到配置。多半是 QQ 没登录 —— SnowLuma 只能 hook " +
+              "已登录的进程，它不能替你输密码。") -ForegroundColor Red
+} else {
+  Write-Host "超时：$WsPort 没起来，看日志 $log" -ForegroundColor Red
+}
 $tail = Get-Content $log -Tail 40
 $tail
 
@@ -598,11 +649,25 @@ foreach ($f in $files) {
 }
 
 # 单号模式必须知道对端是谁,否则第一条消息没有收件人。
+#
+# 对端号**没法自动识别**:它是另一台设备上的 QQ,本机看到的只是 29 个好友
+# 里的某一个,没有任何可靠依据去挑。但只问一次就够了 —— 记住它,之后
+# 双击 chat.bat 不再问。本机号则完全不用问(SnowLuma 写出来的配置文件名
+# 就是它)。
+$peerFile = Join-Path $PSScriptRoot "peer.txt"
 if ($uins.Count -eq 1) {
+  if (-not $Peer -and (Test-Path $peerFile)) {
+    $Peer = (Get-Content -Raw $peerFile).Trim()
+    if ($Peer) { Write-Host ("  对端 " + $Peer + " (上次记住的)") -ForegroundColor Gray }
+  }
+  # 只在真正拿到一个像 QQ 号的串时才记，避免把空值/垃圾写进去
+  if ($Peer -match "^\d{5,12}$") {
+    Set-Content -Path $peerFile -Value $Peer -Encoding ASCII
+  }
   if (-not $Peer) {
     Write-Host "`n本机只挂了一个 QQ 号,还需要知道对端:" -ForegroundColor Yellow
     Write-Host ("    .\chat.ps1 -Peer <对端QQ号>") -ForegroundColor Yellow
-    Write-Host "  (对端是另一台设备上运行本系统的那个号)" -ForegroundColor Yellow
+    Write-Host "  (对端是另一台设备上运行本系统的那个号；只需填这一次，之后会记住)" -ForegroundColor Yellow
     exit 1
   }
   if ($Peer -eq $uins[0]) {
@@ -830,37 +895,44 @@ CHECKLIST = r"""# QQ 跨机连通性测试 · 操作清单
 
 ## 二、一键启动（推荐）
 
-把整个 `qqtest-*` 目录拷进虚拟机，然后**双击 `start.bat`**。
-
-首次运行需要告诉它哪个号：
-
-```powershell
-.\start.bat 1741473279
-```
-
-之后直接双击 `start.bat`（或 `.\start.bat`）即可，端口和 token 自动沿用。
+把整个 `qqtest-*` 目录拷进虚拟机，然后**双击 `start.bat`** —— 不需要
+传任何号码，也不需要先手工建配置。
 
 它会依次做：
 
 1. 检查依赖（装过就跳过，几秒钟）
-2. 没有配置就用 `qq-init` 生成一份
-3. 后台起 SnowLuma，等 OneBot 端口就绪
-4. 打印 `probe.bat` 要用的端口和 token
+2. 后台起 SnowLuma，自动 hook 本机已登录的 QQ
+3. 等它自己写出 `snowluma\config\onebot_<QQ号>.json`，从里面读端口和 token
+4. 打印识别结果
+
+**本机 QQ 号不用输入**：SnowLuma hook 到已登录 QQ 后写的配置文件名
+就是那个号，脚本从中读出来。全新设备（连 `config` 目录都没有）也是
+这条路，实测 5 秒。
 
 **全程不需要打开网页**：协议同意、hook QQ、WebUI 密码都由环境变量给定
-（见附录）。实测约 6 秒返回，node 在后台独立运行，关掉窗口也不影响。
+（见附录）。node 在后台独立运行，关掉窗口也不影响。
 
-预期输出最后几行：
+预期输出最后几行（号码随实际登录的号变化）：
 
 ```
 === 就绪 ===
-  OneBot WS : 127.0.0.1:9721
-  Token     : mkx-1741473279
+  本机 QQ   : 1741473279
+  OneBot WS : 127.0.0.1:3001
+  Token     : <自动生成>
   WebUI     : http://127.0.0.1:5099/  (admin / mkx-webui-1)
-
-  发一张图验证（参数只有对端 QQ 号）：
-    .\probe.bat <对端QQ号>
 ```
+
+### 关于对端 QQ 号（只填一次）
+
+本机号能自动识别，**对端号不能**：它是另一台设备上的 QQ，本机看到的
+只是好友列表里的某一个，没有任何可靠依据去挑。所以第一次要告诉它：
+
+```powershell
+.\chat.bat -Peer 3925697820
+```
+
+之后它会记在 `peer.txt` 里，**再双击 `chat.bat` 就不问了**。想换对端，
+带新的 `-Peer` 再跑一次即可。
 
 ### 分步执行（想看清每一步时）
 
@@ -872,7 +944,8 @@ CHECKLIST = r"""# QQ 跨机连通性测试 · 操作清单
 ```
 
 `run-snowluma.bat` 端口从 `snowluma\config\onebot_*.json` 读，不用手工传。
-`chat.bat` 同样自动读两份配置，要求正好两个 QQ 号各有配置。
+`chat.bat` 自动读配置并识别本机号；对端号第一次用 `-Peer` 给，之后
+从 `peer.txt` 读回。
 
 ---
 

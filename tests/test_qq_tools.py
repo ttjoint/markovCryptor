@@ -691,3 +691,52 @@ class DocsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ZeroInputStartupTest(unittest.TestCase):
+    """新设备上不该要求输入本机 QQ 号。
+
+    SnowLuma hook 到已登录 QQ 之后会自己写 ``config/onebot_<QQ号>.json``，
+    文件名就是那个号。所以"识别本机 QQ"不需要问用户 —— 问反而更糟：
+    用户报了号，我们还要拿它去匹配，匹配不上就卡住，而错误信息会写成
+    "配置不存在"，看起来像包装坏了。
+    """
+
+    def _start(self) -> str:
+        """start.ps1 与它调用的 run-snowluma.ps1 一起看。
+
+        端口发现其实发生在 run-snowluma 里，只看 start 会漏掉真正的那段。
+        """
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        begin = source.index("START_PS1 = r'''")
+        end = source.index('CHAT_PS1 = r"""')
+        return source[begin:end]
+
+    def test_start_does_not_demand_a_qq_number(self):
+        start = self._start()
+        self.assertNotIn("先登录一次 QQ，再跑：start.bat", start,
+                         "不能在全新设备上要求先报号码")
+
+    def test_start_has_no_hardcoded_fallback_port(self):
+        """端口写死 9721 会去等一个永远不会来的端口。
+
+        SnowLuma 起来之前根本没有配置文件，进程起来后才写，而且常用
+        3000/3001。回退到一个猜的端口，症状是卡满超时。
+        """
+        start = self._start()
+        self.assertNotIn("$WsPort = 9721", start,
+                         "不能在发现失败时回退到写死的端口")
+
+    def test_start_reads_the_account_from_the_generated_config(self):
+        """本机号必须来自 SnowLuma 写出的文件名，不是我们猜的。"""
+        start = self._start()
+        self.assertIn("onebot_", start)
+        self.assertIn("发现本机 QQ", start,
+                      "要明确报出识别到的账号，用户才知道挂对了没有")
+
+    def test_chat_remembers_the_peer_so_it_is_asked_once(self):
+        source = (TOOLS / "make_bundle.py").read_text(encoding="utf-8")
+        chat = source[source.index('CHAT_PS1 = r"""'):
+                      source.index("CHAT_BAT = r")]
+        self.assertIn("peer.txt", chat, "对端号要记住，不能每次都问")
+        self.assertIn("上次记住的", chat, "复用了要说明来源，别让人以为没生效")
