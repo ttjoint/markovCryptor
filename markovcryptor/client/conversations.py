@@ -1,0 +1,308 @@
+"""One conversation per friend, created the first time they say anything.
+
+Why lazy matters
+----------------
+A QQ account has ~30 friends. Building a :class:`Terminal` for all of them at
+startup would create 30 independent key pairs, 30 inboxes and 30 picture
+queues, of which at most two or three are ever used. Worse, it would make the
+"who am I talking to" state ambiguous: a terminal exists, so it looks like a
+conversation, but nothing was ever said.
+
+So a conversation is created on first contact -- an inbound message, or the user
+opening it. That also gives a natural definition of unread: created and not yet
+opened.
+
+The routing guarantee
+---------------------
+Each conversation's terminal is registered with ``peer=<uin>``, so the transport
+delivers only that friend's packets to it. This is the whole reason
+``OneBotNetwork.register`` grew a ``peer`` filter: without it, friend A's picture
+would also reach friend B's session, fail authentication there, and surface in
+B's window as a mysterious "解不开".
+
+Ordering note, relied upon below: ``OneBotNetwork._handle_event`` calls the raw
+``on_event`` callbacks *before* it looks up per-peer sinks. That is what lets a
+first message from a stranger create the conversation in time for the sink to
+exist when the packet is handed out. Reordering those two loops would silently
+break first contact.
+"""
+
+from __future__ import annotations
+
+import itertools
+import logging
+import time
+from dataclasses import dataclass, field
+
+from ..observability import event
+from ..terminal.terminal import Inbound, Packet, Terminal
+from .directory import Directory
+
+#: Arrival counter shared by every conversation. Ordering needs one globally
+#: monotonic value: a per-conversation counter would make two chats' latest
+#: messages compare equal, and the list would fall back to name order.
+_ARRIVAL = itertools.count()
+from . import messages as message_parser
+
+
+@dataclass
+class Entry:
+    """One line in a conversation timeline.
+
+    Both directions live in one list so the UI can render a single thread. Which
+    side an entry came from is ``mine``, not a separate list -- two lists would
+    have to be merged by timestamp at render time and would interleave wrongly on
+    a clock skew.
+    """
+
+    at: float = field(default_factory=time.time)
+    #: Global arrival index. Wall-clock ``at`` is not enough for ordering: two
+    #: messages arriving in the same millisecond compare equal, and the chat list
+    #: would then fall back to name order -- which looks like the wrong person
+    #: jumping to the top.
+    seq: int = 0
+    mine: bool = False
+    #: Visible text (what a normal messenger shows).
+    text: str = ""
+    #: Image bytes, ready to display.
+    images: tuple[bytes, ...] = ()
+    #: Decrypted covert messages, in arrival order.
+    covert: tuple[str, ...] = ()
+    #: One short line per thing we declined to render ("对方发送了 语音").
+    unsupported: tuple[str, ...] = ()
+    #: Diagnostic lines from the stego layer (a corrupt frame, a missing slice).
+    notes: tuple[str, ...] = ()
+
+    def is_empty(self) -> bool:
+        return not (self.text.strip() or self.images or self.covert
+                    or self.unsupported or self.notes)
+
+
+class Conversation:
+    """One friend: their terminal, their timeline, their unread count."""
+
+    def __init__(self, peer: str, terminal: Terminal, name: str = "") -> None:
+        self.peer = str(peer)
+        self.terminal = terminal
+        self.name = name or self.peer
+        self.entries: list[Entry] = []
+        #: Messages that arrived while this conversation was not open.
+        #: Reset by :meth:`mark_read`.
+        self.unread = 0
+        self._open = False
+
+    # ------------------------------------------------------------------ state
+
+    @property
+    def established(self) -> bool:
+        return self.terminal.established
+
+    @property
+    def state_label(self) -> str:
+        return self.terminal.state.label
+
+    @property
+    def last_at(self) -> float:
+        return self.entries[-1].at if self.entries else 0.0
+
+    @property
+    def last_seq(self) -> int:
+        """Ordering key that is stable even for same-millisecond arrivals.
+
+        -1 for a conversation with no messages, so it sorts below any that has
+        one -- opening a silent friend should not jump them to the top.
+        """
+        return self.entries[-1].seq if self.entries else -1
+
+    def mark_open(self, is_open: bool = True) -> None:
+        """Tell the conversation whether the user is looking at it.
+
+        Unread only increments while closed. Counting while the user watches the
+        window would leave a red dot on a conversation they just read.
+        """
+        self._open = is_open
+        if is_open:
+            self.mark_read()
+
+    def mark_read(self) -> None:
+        self.unread = 0
+
+    # ---------------------------------------------------------------- inbound
+
+    def _append(self, entry: Entry) -> None:
+        if entry.is_empty():
+            # 空白条目不进时间线：它会让界面出现一个空气泡，且不携带任何信息。
+            return
+        entry.seq = next(_ARRIVAL)
+        self.entries.append(entry)
+        if not self._open:
+            self.unread += 1
+
+    def record_visible(self, parsed: message_parser.ParsedMessage,
+                       images: tuple[bytes, ...] = ()) -> None:
+        """Log what a normal messenger would show for an inbound message."""
+        self._append(Entry(
+            mine=False,
+            text=parsed.text,
+            images=images,
+            unsupported=parsed.unsupported,
+        ))
+
+    def record_inbound(self, inbound: Inbound) -> None:
+        """Log what the stego layer recovered from one packet.
+
+        Called *in addition* to :meth:`record_visible` when the same packet also
+        had recoverable content. Keeping them separate means a message that is
+        entirely ordinary still produces one visible entry and no covert entry,
+        rather than one entry that has to be interpreted by the renderer.
+        """
+        if not (inbound.covert or inbound.notes or inbound.handshake):
+            return
+        self._append(Entry(
+            mine=False,
+            covert=inbound.covert,
+            notes=inbound.notes,
+        ))
+
+    def record_outbound(self, text: str = "", images: tuple[bytes, ...] = (),
+                        covert: tuple[str, ...] = ()) -> None:
+        self._append(Entry(mine=True, text=text, images=images, covert=covert))
+
+
+class Conversations:
+    """Every conversation with one account, keyed by the friend's number.
+
+    Owns the single ``on_event`` registration, so new conversations can be
+    created from an inbound message even if the user never opened that friend.
+    """
+
+    def __init__(self, network, directory: Directory, *, psk: str = "pbx1",
+                 text_channel=None, cover_for=None) -> None:
+        self.network = network
+        self.directory = directory
+        self.psk = psk
+        self.text_channel = text_channel
+        #: ``cover_for(peer) -> bytes | None``. A handshake reply needs one of
+        #: *our* pictures; there is no browser queue on a native client, so the
+        #: answer comes from that friend's picture queue via this callback.
+        self._cover_for = cover_for
+        self._items: dict[str, Conversation] = {}
+
+    # ------------------------------------------------------------- accessors
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __contains__(self, peer) -> bool:
+        return str(peer) in self._items
+
+    def __iter__(self):
+        return iter(self.ordered())
+
+    def get(self, peer) -> Conversation | None:
+        return self._items.get(str(peer))
+
+    def ordered(self) -> list[Conversation]:
+        """Most recent first -- a chat list is ordered by activity, not alphabet.
+
+        Never-spoken-to conversations (created by opening a friend) sort to the
+        bottom rather than the top, otherwise clicking a silent friend would jump
+        them above the person you are actually talking to.
+        """
+        return sorted(self._items.values(),
+                      key=lambda c: (c.last_seq, c.name), reverse=True)
+
+    def unread_total(self) -> int:
+        return sum(c.unread for c in self._items.values())
+
+    # -------------------------------------------------------------- lifecycle
+
+    def ensure(self, peer) -> Conversation:
+        """Return the conversation for ``peer``, creating it if needed.
+
+        Creating one builds a :class:`Terminal` and registers it with the
+        transport scoped to that peer, so this is also the point where a new
+        friend starts receiving covert traffic.
+        """
+        key = str(peer)
+        existing = self._items.get(key)
+        if existing is not None:
+            return existing
+
+        terminal = Terminal(key, self.network, psk=self.psk)
+        if self.text_channel is not None:
+            terminal.use_text_channel(self.text_channel)
+        if self._cover_for is not None:
+            terminal.take_cover = (lambda p=key: self._cover_for(p))
+        terminal.attach(peer=key)
+        terminal.subscribe(lambda inbound, p=key: self._on_inbound(p, inbound))
+
+        conversation = Conversation(key, terminal,
+                                    name=self.directory.name_of(key))
+        self._items[key] = conversation
+        event("client", "conversation_created", peer=key)
+        return conversation
+
+    def forget(self, peer) -> None:
+        """Drop a conversation and everything in it.
+
+        Used on logout and by tests. The transport keeps its sink until replaced;
+        a stale sink that fires later is harmless because the terminal object is
+        no longer referenced by the UI.
+        """
+        self._items.pop(str(peer), None)
+
+    def clear(self) -> None:
+        self._items.clear()
+
+    # ---------------------------------------------------------------- routing
+
+    def attach(self) -> "Conversations":
+        """Start listening for raw messages so stranger contact creates a chat."""
+        on_event = getattr(self.network, "on_event", None)
+        if on_event is None:
+            raise TypeError(
+                f"{type(self.network).__name__} 不支持 on_event；"
+                "会话层需要它才能在陌生人发消息时建会话"
+            )
+        on_event(self._on_raw)
+        return self
+
+    def _on_raw(self, sender: str, payload: dict) -> None:
+        """Raw QQ message, before any stego inspection.
+
+        Creating the conversation *here* rather than in the sink is what makes
+        first contact work: the transport calls this before it looks up per-peer
+        sinks, so by the time the packet is routed, the destination exists.
+        """
+        try:
+            parsed = message_parser.parse(payload)
+        except Exception as exc:                    # noqa: BLE001 - reader thread
+            event("client", "parse_failed", level=logging.WARNING,
+                  sender=sender, error=exc)
+            return
+
+        conversation = self.ensure(sender)
+        if parsed.text or parsed.unsupported:
+            conversation.record_visible(parsed)
+
+    def _on_inbound(self, peer: str, inbound: Inbound) -> None:
+        conversation = self._items.get(str(peer))
+        if conversation is None:
+            return
+        conversation.record_inbound(inbound)
+
+    # ----------------------------------------------------------------- sending
+
+    def send_text(self, peer, text: str) -> Conversation:
+        """Plain, unencrypted text -- what a normal messenger does.
+
+        Kept separate from :meth:`send_covert` because most messages are ordinary
+        and should not touch the stego layer at all.
+        """
+        conversation = self.ensure(peer)
+        if not text.strip():
+            raise ValueError("消息是空的")
+        conversation.terminal.send_packet(conversation.peer, Packet(text=text))
+        conversation.record_outbound(text=text)
+        return conversation

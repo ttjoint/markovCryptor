@@ -153,12 +153,18 @@ class Terminal:
     def subscribe(self, callback: Callable[[Inbound], None]) -> None:
         self._on_inbound = callback
 
-    def attach(self, address: str | None = None) -> "Terminal":
+    def attach(self, address: str | None = None, *, peer: str | None = None) -> "Terminal":
         """Register on the network so incoming packets reach :meth:`deliver`.
 
         Returns ``self`` so a terminal can be created and attached in one
         expression. The sink signature is ``(sender, payload)`` because only the
         network knows who sent a packet.
+
+        ``peer`` scopes this terminal to one remote address, for transports that
+        carry many conversations over one connection (a single QQ account with
+        several friends). It is forwarded only when the network understands it --
+        the loopback transport has one sink per address already and would reject
+        the keyword.
         """
         network = self.network
         register = getattr(network, "register", None)
@@ -166,7 +172,15 @@ class Terminal:
             raise InvalidInput(
                 f"{type(network).__name__} 不支持注册；请手动把包交给 deliver(sender, packet)"
             )
-        register(address or self.id, lambda sender, data: self.deliver(sender, data))
+        sink = lambda sender, data: self.deliver(sender, data)  # noqa: E731
+        if peer is not None:
+            try:
+                register(address or self.id, sink, peer=peer)
+                return self
+            except TypeError:
+                # 传输层不认识 peer（单地址直连），退回普通注册。
+                pass
+        register(address or self.id, sink)
         return self
 
     # ---------------------------------------------------------------- sending
