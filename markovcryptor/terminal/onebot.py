@@ -64,6 +64,9 @@ DEFAULT_REASSEMBLY_TIMEOUT = 30.0
 DEFAULT_RECONNECT_DELAY = 3.0
 #: How long to wait for an image URL before giving up on that one picture.
 DEFAULT_DOWNLOAD_TIMEOUT = 30.0
+#: How long a blocking caller waits for an OneBot reply. Friend lists and
+#: message history are small, but QQ can take seconds under load.
+DEFAULT_ASK_TIMEOUT = 20.0
 
 
 def _new_packet_id() -> int:
@@ -357,11 +360,15 @@ def _download_source(data: dict) -> str | None:
 class OneBotNetwork:
     """A ``Network`` backed by one OneBot v11 WebSocket connection.
 
-    One instance = one QQ account = one terminal. ``register()`` records the
-    local address so incoming events can be routed; the *peer* is never
-    registered, because it is a remote QQ number and there is nothing to call
-    locally --- which is why :meth:`send` does not require the target to be
-    known, unlike :class:`~markovcryptor.terminal.transport.LoopbackNetwork`.
+    One instance = one QQ account. It may carry **several** conversations at
+    once: the account talks to many friends, and each friend is a separate
+    session. ``register()`` therefore takes a ``peer`` filter -- a sink only
+    receives messages from the peer it asked for.
+
+    The *peer* itself is never registered, because it is a remote QQ number and
+    there is nothing to call locally --- which is why :meth:`send` does not
+    require the target to be known, unlike
+    :class:`~markovcryptor.terminal.transport.LoopbackNetwork`.
     """
 
     def __init__(self, url: str, self_id: str | None = None, *, token: str = "",
@@ -375,7 +382,23 @@ class OneBotNetwork:
         self.download_timeout = download_timeout
         self.reassembler = Reassembler(timeout=reassembly_timeout)
         self._connect_factory = connect_factory
-        self._sinks: list = []
+        #: ``peer address -> sink``. A sink registered without a peer only sees
+        #: traffic from peers nobody claimed (see :meth:`_sinks_for`). Keying by
+        #: peer is what keeps one friend's message out of another's session.
+        #: ``echo -> Future`` for in-flight :meth:`ask` calls. OneBot replies
+        #: echo the token we chose, which is the only way to tell a reply apart
+        #: from an unsolicited event on the same socket.
+        self._pending: dict[str, object] = {}
+        #: Monotonic counter so echoes never collide with a retry.
+        self._ask_seq = 0
+        #: 原始消息回调 ``fn(sender, payload)``。隐写层对"这张图没有密文"是
+        #: 刻意静默的 —— 那是最常见情况，报警反而是噪音。但界面上要显示
+        #: 「对方发来一张图」，所以原始事件必须另开一条路上来。
+        self._event_sinks: list = []
+        self._sinks: dict[str, object] = {}
+        #: Sinks that asked for *every* peer. The single-terminal demo uses
+        #: this; a multi-conversation client should not.
+        self._broadcast_sinks: list = []
         self._outbox: "queue.Queue[dict]" = queue.Queue()
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -386,11 +409,63 @@ class OneBotNetwork:
 
     # ------------------------------------------------------------ lifecycle
 
-    def register(self, address: str, sink) -> None:
-        """Record a local sink. ``sink(sender, packet)`` is called per packet."""
-        self._sinks.append(sink)
+    def register(self, address: str, sink, *, peer: str | None = None) -> None:
+        """Record a local sink. ``sink(sender, packet)`` is called per packet.
+
+        ``peer`` scopes the sink to one remote address. Omit it to receive every
+        peer -- correct for a single-terminal demo, wrong the moment the same
+        account serves more than one conversation: without the filter, friend
+        A's picture would also be handed to friend B's session, which would
+        report it as a packet that fails authentication. Silently and
+        confusingly.
+
+        Registering the same ``peer`` twice replaces the earlier sink; a
+        reconnecting client must not leave a dead sink behind and get every
+        packet delivered twice.
+        """
+        if peer is None:
+            self._broadcast_sinks.append(sink)
+        else:
+            self._sinks[str(peer)] = sink
         if not self.self_id:
             self.self_id = str(address)
+
+    def on_event(self, callback) -> None:
+        """Register ``callback(sender, payload)`` for *every* inbound message.
+
+        Called before the stego layer decides anything, so a plain picture with
+        no ciphertext still reaches the UI. Exceptions are swallowed per
+        callback: one broken widget must not stop the reader.
+        """
+        self._event_sinks.append(callback)
+
+    # ------------------------------------------------------------- shortcuts
+
+    def friend_list(self) -> list[dict]:
+        """好友列表，``[{user_id, nickname, remark}, ...]``。"""
+        return list(self.ask("get_friend_list") or [])
+
+    def login_info(self) -> dict:
+        """当前账号 ``{user_id, nickname}``；用来确认 QQ 真的登上了。"""
+        return dict(self.ask("get_login_info") or {})
+
+    def friend_history(self, peer: str, count: int = 20) -> list[dict]:
+        """与某个好友的历史消息，最新在后。"""
+        data = self.ask("get_friend_msg_history",
+                        {"user_id": int(str(peer)), "count": int(count)}) or {}
+        return list(data.get("messages") or [])
+
+    def _sinks_for(self, sender: str) -> list:
+        """Who should receive a packet that came from ``sender``.
+
+        An exact match wins. Falling back to the broadcast sinks is what lets
+        the single-terminal demo keep working unchanged, while a client that
+        registers per-peer sinks gets no cross-talk.
+        """
+        exact = self._sinks.get(str(sender))
+        if exact is not None:
+            return [exact]
+        return list(self._broadcast_sinks)
 
     def start(self) -> "OneBotNetwork":
         """Start the background connection thread. Returns ``self``."""
@@ -455,6 +530,76 @@ class OneBotNetwork:
                 task.cancel()
             await asyncio.gather(reader, writer, return_exceptions=True)
 
+    # ------------------------------------------------------- request/reply
+
+    def _resolve(self, payload: dict) -> bool:
+        """Hand a reply to whoever is waiting. True if it was one.
+
+        Never raises: a reply arriving after its caller gave up must be quietly
+        dropped, not turned into an exception inside the read loop.
+        """
+        echo = payload.get("echo")
+        if not echo:
+            return False
+        fut = self._pending.pop(str(echo), None)
+        if fut is None:
+            return False
+        if not fut.done():
+            fut.set_result(payload)
+        return True
+
+    def ask(self, action: str, params: dict | None = None, *,
+            timeout: float = DEFAULT_ASK_TIMEOUT):
+        """Call one OneBot action and return its ``data``.
+
+        Blocking, and meant to be called from a worker thread -- the web layer
+        already runs handlers off the event loop. Raises
+        :class:`TransportError` on timeout or a non-``ok`` status, because a
+        caller that gets ``None`` back would have to invent its own error
+        message and get it wrong.
+        """
+        import concurrent.futures
+
+        loop = self._loop
+        if loop is None:
+            raise TransportError(
+                "OneBot 还没连上，无法请求好友列表；等连接建立后再试",
+                hints=("确认 SnowLuma 已启动并完成 QQ 登录",),
+            )
+        self._ask_seq += 1
+        echo = f"mkx-ask-{self._ask_seq}"
+        payload = {"action": action, "params": dict(params or {}), "echo": echo}
+        fut = asyncio.run_coroutine_threadsafe(
+            self._await_reply(echo, payload, timeout), loop)
+        try:
+            reply = fut.result(timeout=timeout + 5.0)
+        except concurrent.futures.TimeoutError:
+            raise TransportError(
+                f"OneBot 动作 {action} 超时（{timeout} 秒没有回复）"
+            ) from None
+        return reply
+
+    async def _await_reply(self, echo: str, payload: dict, timeout: float):
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._pending[echo] = fut
+        self._outbox.put(payload)
+        try:
+            reply = await asyncio.wait_for(fut, timeout)
+        except asyncio.TimeoutError:
+            raise TransportError(
+                f"OneBot 动作 {payload['action']} 超时（{timeout} 秒没有回复）",
+                hints=("SnowLuma 可能卡住了，或该动作不被支持",),
+            ) from None
+        finally:
+            self._pending.pop(echo, None)
+        if str(reply.get("status", "ok")).lower() == "failed":
+            raise TransportError(
+                f"OneBot 动作 {payload['action']} 失败："
+                f"{reply.get('message') or reply.get('wording') or reply}"
+            )
+        return reply.get("data")
+
     # ---------------------------------------------------------------- outbox
 
     def send(self, sender: str, target: str, packet: bytes) -> None:
@@ -488,7 +633,13 @@ class OneBotNetwork:
                 payload = json.loads(raw)
             except (TypeError, ValueError):
                 continue
-            if isinstance(payload, dict):
+            if not isinstance(payload, dict):
+                continue
+            # A reply to something we asked for. OneBot plugs the same socket
+            # for actions and events, so the echo token is the only separator.
+            if self._resolve(payload):
+                continue
+            if payload.get("post_type"):
                 await self._handle_event(payload)
 
     async def _handle_event(self, payload: dict) -> None:
@@ -514,8 +665,16 @@ class OneBotNetwork:
 
         self.stats["received"] += 1
         self.stats["images"] += len(images)
+        # 先给上层看一眼原文，再走隐写判定。顺序不能反：上层要能看到
+        # "这张图没藏东西"，而那恰恰是隐写层什么都不说的情况。
+        for callback in list(self._event_sinks):
+            try:
+                callback(sender, payload)
+            except Exception as exc:                   # noqa: BLE001
+                event("onebot", "event_sink_failed", level=logging.ERROR,
+                      url=self.url, error=exc)
         for packet in self.reassembler.feed(sender, text or None, images):
-            for sink in list(self._sinks):
+            for sink in self._sinks_for(sender):
                 try:
                     sink(sender, packet)
                 except Exception as exc:               # noqa: BLE001 - never kill the reader
@@ -601,6 +760,15 @@ class InProcessOneBotNetwork(OneBotNetwork):
         for action in frames_for(target, packet):
             self.hub.route(self.self_id, action)
 
+    def ask(self, action: str, params: dict | None = None, *, timeout: float = 0):
+        """Answer locally. There is no thread loop to wait on in-process.
+
+        Overriding rather than starting a loop keeps the in-memory hub usable
+        from a plain ``unittest``: tests that need a friend list should not have
+        to run an event loop just to read one.
+        """
+        return self.hub.reply(self.self_id, action, dict(params or {}))
+
     def start(self) -> "InProcessOneBotNetwork":
         self.hub.accounts[self.self_id] = self   # already "connected"
         return self
@@ -626,6 +794,28 @@ class InProcessOneBot:
         #: the case the reassembly rules exist for. Default off, because the
         #: common path -- and what P0 measured -- is a single merged message.
         self.split_messages = False
+
+    #: 测试夹具：``{uin: [{"user_id":..., "nickname":..., "remark":...}, ...]}``
+    friends: dict[str, list[dict]] | None = None
+    #: 测试夹具：``{(uin, peer): [{...消息...}, ...]}``
+    history_of: dict[tuple[str, str], list[dict]] | None = None
+
+    def reply(self, uin: str, action: str, params: dict):
+        """What the fake server answers. Mirrors the real OneBot data shapes."""
+        if action == "get_login_info":
+            return {"user_id": int(uin), "nickname": f"账号{uin}"}
+        if action == "get_friend_list":
+            if self.friends is None:
+                return []
+            return list(self.friends.get(str(uin), []))
+        if action == "get_friend_msg_history":
+            peer = str(params.get("user_id"))
+            if self.history_of is None:
+                return {"messages": []}
+            return {"messages": list(self.history_of.get((str(uin), peer), []))}
+        raise TransportError(
+            f"内存版 OneBot 不认识动作 {action!r}；"
+            "要测新动作就先在 InProcessOneBot.reply 里补一条")
 
     def connect(self, uin: str) -> InProcessOneBotNetwork:
         """Create and "connect" one account. Returns its network."""
@@ -714,7 +904,7 @@ class RoutedNetwork:
         #: Each network still knows its own UIN -- that is what goes on the wire.
         self.routes = {str(address): network for address, network in routes.items()}
 
-    def register(self, address: str, sink) -> None:
+    def register(self, address: str, sink, *, peer: str | None = None) -> None:
         key = str(address)
         try:
             network = self.routes[key]
@@ -722,7 +912,7 @@ class RoutedNetwork:
             raise TransportError(
                 f"没有为 {key!r} 配连接；已配：{sorted(self.routes)}"
             ) from None
-        network.register(key, sink)
+        network.register(key, sink, peer=peer)
 
     def send(self, sender: str, target: str, packet: bytes) -> None:
         key = str(sender)

@@ -493,3 +493,221 @@ class TwoSidesOverOneBotTest(unittest.TestCase):
         inbound = bob.inbox[0]
         self.assertEqual(inbound.chat_text, "两张图")
         self.assertEqual(len(inbound.chat_images), 2)
+
+
+class PeerRoutingTest(unittest.TestCase):
+    """One QQ account, several friends. Each conversation must be separate.
+
+    The account talks to many friends at once, and every friend is its own
+    session with its own keys. A sink that receives *every* peer would hand
+    friend A's picture to friend B's session, where it fails authentication and
+    surfaces as a mysterious "解不开" note -- a bug that only appears once a
+    second friend exists, which is exactly when it is hardest to explain.
+    """
+
+    def _network_with_friends(self, friends=("20001", "20002", "20003")):
+        from markovcryptor.terminal.onebot import InProcessOneBot
+
+        hub = InProcessOneBot()
+        net = hub.connect("10001")
+        got = {friend: [] for friend in friends}
+        for friend in friends:
+            net.register("10001",
+                         lambda sender, packet, f=friend: got[f].append(sender),
+                         peer=friend)
+        return hub, net, got
+
+    # ------------------------------------------------------- routing decision
+
+    def test_only_the_addressed_friend_is_selected(self):
+        """路由判定：只挑那个 peer 的 sink，别人的一个都不能碰。"""
+        _, net, _ = self._network_with_friends()
+        chosen = net._sinks_for("20002")
+        self.assertEqual(len(chosen), 1, "只有一个 sink 该收到这条消息")
+
+    def test_unknown_sender_selects_nobody(self):
+        """陌生人发来的消息不能随便塞进某个会话。"""
+        _, net, _ = self._network_with_friends()
+        self.assertEqual(net._sinks_for("29999"), [],
+                         "没有任何 sink 认领陌生人 —— 不能退化成随便挑一个")
+
+    def test_broadcast_sink_still_works_for_the_demo(self):
+        """测试端只注册一个 sink、不指定 peer —— 老行为必须保留。"""
+        from markovcryptor.terminal.onebot import InProcessOneBot
+
+        net = InProcessOneBot().connect("10001")
+        net.register("10001", lambda sender, packet: None)
+        self.assertEqual(len(net._sinks_for("20001")), 1)
+
+    def test_reregistering_a_peer_replaces_its_sink(self):
+        """重连时不能留下死 sink，否则每个包会被投递两次。"""
+        from markovcryptor.terminal.onebot import InProcessOneBot
+
+        net = InProcessOneBot().connect("10001")
+        net.register("10001", lambda s, p: None, peer="20001")
+        net.register("10001", lambda s, p: None, peer="20001")
+        self.assertEqual(len(net._sinks_for("20001")), 1)
+
+    # ------------------------------------------------------------- end to end
+
+    def test_two_friends_do_not_cross_talk(self):
+        """真实链路：两个好友同时发图，各自只进各自的会话。"""
+        hub, net, got = self._network_with_friends(("20002", "20003"))
+        bob = hub.connect("20002")
+        carol = hub.connect("20003")
+
+        bob.send("20002", "10001", _encode_packet(Packet(text="来自 bob")))
+        carol.send("20003", "10001", _encode_packet(Packet(text="来自 carol")))
+        hub.pump()
+
+        self.assertEqual(got["20002"], ["20002"], "bob 的消息只进 bob 的会话")
+        self.assertEqual(got["20003"], ["20003"], "carol 的消息只进 carol 的会话")
+
+
+class AskTest(unittest.TestCase):
+    """请求-响应。隐写只发不收，但好友列表/历史消息全是这么取的。"""
+
+    def test_friend_list_comes_back(self):
+        from markovcryptor.terminal.onebot import InProcessOneBot
+
+        hub = InProcessOneBot()
+        hub.friends = {"10001": [
+            {"user_id": 20001, "nickname": "三马赫", "remark": ""},
+            {"user_id": 20002, "nickname": "x", "remark": "备注名"},
+        ]}
+        net = hub.connect("10001")
+        friends = net.friend_list()
+        self.assertEqual([f["user_id"] for f in friends], [20001, 20002])
+        self.assertEqual(friends[1]["remark"], "备注名")
+
+    def test_login_info_answers(self):
+        from markovcryptor.terminal.onebot import InProcessOneBot
+
+        net = InProcessOneBot().connect("10001")
+        self.assertEqual(net.login_info()["user_id"], 10001)
+
+    def test_history_answers(self):
+        from markovcryptor.terminal.onebot import InProcessOneBot
+
+        hub = InProcessOneBot()
+        hub.history_of = {("10001", "20001"): [{"message_id": 1}]}
+        net = hub.connect("10001")
+        self.assertEqual(net.friend_history("20001"), [{"message_id": 1}])
+
+    def test_unknown_action_says_so_instead_of_guessing(self):
+        """不认识的动作要明确报错，别返回空让上层以为"没有好友"。"""
+        from markovcryptor.terminal.onebot import InProcessOneBot
+        from markovcryptor.terminal.transport import TransportError
+
+        net = InProcessOneBot().connect("10001")
+        with self.assertRaises(TransportError):
+            net.ask("get_unheard_of_thing")
+
+    def test_reply_is_routed_by_echo_and_not_treated_as_event(self):
+        """同一根 socket 上动作回包和事件混在一起，只能靠 echo 分辨。"""
+        import asyncio
+        from markovcryptor.terminal.onebot import OneBotNetwork
+
+        net = OneBotNetwork("ws://unused", "10001")
+
+        async def scenario():
+            fut = asyncio.get_running_loop().create_future()
+            net._pending["mkx-ask-7"] = fut
+            handled = net._resolve({"status": "ok", "echo": "mkx-ask-7",
+                                    "data": {"user_id": 1}})
+            return handled, fut.result()
+
+        handled, data = asyncio.run(scenario())
+        self.assertTrue(handled, "带 echo 的回包必须被认成回包")
+        self.assertEqual(data["data"], {"user_id": 1})
+
+    def test_read_loop_does_not_mistake_a_reply_for_a_message(self):
+        """读循环必须靠 echo 把回包和事件分开。
+
+        直接测 ``_resolve`` 是不够的：那只证明它"能认"，不能证明读循环
+        "真的调它"。OneBot 把动作回包和消息事件塞在同一根 socket 上，
+        漏了这一步的后果是回包被当成消息投进会话。
+        """
+        import asyncio
+        from markovcryptor.terminal.onebot import OneBotNetwork
+
+        net = OneBotNetwork("ws://unused", "10001")
+
+        class Link:
+            def __init__(self):
+                self.lines = [
+                    json.dumps({"status": "ok", "echo": "mkx-ask-1",
+                                "data": {"user_id": 10001}}),
+                ]
+                self.done = False
+
+            async def recv(self):
+                if self.lines:
+                    return self.lines.pop(0)
+                await asyncio.sleep(3600)      # 读循环永远挂着，别退出
+
+        leaked = []
+        net._event_sinks.append(lambda s, p: leaked.append(p))
+
+        async def scenario():
+            fut = asyncio.get_running_loop().create_future()
+            net._pending["mkx-ask-1"] = fut
+            task = asyncio.create_task(net._read_loop(Link()))
+            try:
+                # 回包必须把等待者叫醒；不叫醒就是 ask 永远超时。
+                data = await asyncio.wait_for(fut, 1.0)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            return data
+
+        data = asyncio.run(scenario())
+        self.assertEqual(data["data"], {"user_id": 10001}, "读循环要把回包交给等待者")
+        self.assertEqual(leaked, [], "动作回包不是消息，不能投给界面")
+
+    def test_late_reply_is_dropped_not_raised(self):
+        """调用方超时放弃后，迟到的回包不能把读循环炸掉。"""
+        from markovcryptor.terminal.onebot import OneBotNetwork
+
+        net = OneBotNetwork("ws://unused", "10001")
+        self.assertFalse(net._resolve({"echo": "nobody-waits-for-this"}))
+
+
+class InboundEventTest(unittest.TestCase):
+    """1.3：普通消息也要能上到界面。
+
+    隐写层对"图里没有密文"刻意静默（那是最常见情况），若界面只监听隐写层，
+    用户发一张普通图我们这边界面上什么都不显示 —— 联调时真的误判成丢消息。
+    """
+
+    def _feed(self, net, payload):
+        import asyncio
+        asyncio.run(net._handle_event(payload))
+
+    def test_plain_message_reaches_the_callback(self):
+        from markovcryptor.terminal.onebot import InProcessOneBot
+
+        net = InProcessOneBot().connect("10001")
+        seen = []
+        net.on_event(lambda sender, payload: seen.append((sender, payload)))
+        self._feed(net, {"post_type": "message", "message_type": "private",
+                         "user_id": 20001,
+                         "message": [{"type": "text", "data": {"text": "在吗"}}]})
+        self.assertEqual(len(seen), 1, "普通文本消息必须上到界面")
+        self.assertEqual(seen[0][0], "20001")
+
+    def test_a_broken_callback_does_not_kill_the_reader(self):
+        from markovcryptor.terminal.onebot import InProcessOneBot
+
+        net = InProcessOneBot().connect("10001")
+        seen = []
+
+        def boom(sender, payload):
+            raise RuntimeError("界面挂了")
+
+        net.on_event(boom)
+        net.on_event(lambda sender, payload: seen.append(sender))
+        self._feed(net, {"post_type": "message", "message_type": "private",
+                         "user_id": 20001,
+                         "message": [{"type": "text", "data": {"text": "hi"}}]})
+        self.assertEqual(seen, ["20001"], "一个回调炸了不能拖累后面那个")
