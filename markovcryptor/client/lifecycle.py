@@ -223,3 +223,87 @@ def _kill_tree(pid: int, *, signal_name: str) -> None:
         os.kill(pid, sig)
     except OSError:
         pass
+
+
+# --------------------------------------------------------------------- 端口
+
+def find_free_port(preferred: int, *, tries: int = 30) -> int:
+    """Pick a port we can actually bind.
+
+    The client's UI port used to be a hardcoded 8741: if anything else held it,
+    startup failed with a bare OSError and the user had no way forward. Now we
+    start at the preferred port and walk upward until one binds.
+
+    ``preferred=0`` means "let the OS choose", which is the right default when
+    the user has not pinned anything -- but it makes the URL unpredictable, so
+    callers usually pass an explicit starting point.
+
+    We bind with SO_EXCLUSIVEADDRUSE semantics (the default on Windows for a
+    fresh socket) and close immediately. That is racy in theory -- another
+    process could take the port between the probe and uvicorn's bind -- but the
+    window is microseconds and uvicorn still reports a clear error if it loses.
+    """
+    import socket
+
+    if preferred <= 0:
+        preferred = 1
+
+    for offset in range(tries):
+        candidate = preferred + offset
+        if candidate > 65535:
+            break
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind(("127.0.0.1", candidate))
+            except OSError:
+                continue
+            return candidate
+
+    raise OSError(f"从 {preferred} 开始找了 {tries} 个端口都被占用")
+
+
+def port_owner_hint(port: int) -> str:
+    """Best-effort "who is holding this port" for the error message."""
+    import subprocess
+    import sys
+
+    if sys.platform != "win32":
+        return ""
+    try:
+        out = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            capture_output=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout.decode("gbk", "replace")
+    except Exception:                               # noqa: BLE001
+        return ""
+
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        local, pid = parts[1], parts[-1]
+        if local.endswith(f":{port}") and parts[3] == "LISTENING":
+            name = _process_name(pid)
+            return f"{name} (PID {pid})" if name else f"PID {pid}"
+    return ""
+
+
+def _process_name(pid: str) -> str:
+    import subprocess
+    import sys
+
+    if sys.platform != "win32":
+        return ""
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout.decode("gbk", "replace")
+    except Exception:                               # noqa: BLE001
+        return ""
+    first = out.splitlines()[0] if out.splitlines() else ""
+    if first.startswith('"'):
+        return first.split('","')[0].strip('"')
+    return ""

@@ -312,3 +312,68 @@ class EventStreamTest(unittest.TestCase):
 
         r = asyncio.run(go())
         self.assertEqual(r.status_code, 200)
+
+
+class PortSelectionTest(unittest.TestCase):
+    """界面端口被占用时要能自己换，而不是直接启动失败。
+
+    原来端口写死 8741，被占就抛 OSError，用户看到的是没有任何提示的启动
+    失败，也不知道该改什么。
+    """
+
+    def test_prefers_the_requested_port_when_free(self):
+        from markovcryptor.client.lifecycle import find_free_port
+
+        # 找一个当前空闲的端口当起点
+        import socket
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            free = s.getsockname()[1]
+        self.assertEqual(find_free_port(free), free)
+
+    def test_walks_upward_when_port_is_taken(self):
+        import socket
+
+        from markovcryptor.client.lifecycle import find_free_port
+
+        with socket.socket() as held:
+            held.bind(("127.0.0.1", 0))
+            held.listen(1)
+            taken = held.getsockname()[1]
+            got = find_free_port(taken, tries=20)
+            self.assertNotEqual(got, taken, "被占用的端口不能选中")
+            self.assertGreater(got, taken, "应当往上找")
+            self.assertLessEqual(got, taken + 20)
+
+    def test_returns_a_port_that_can_actually_bind(self):
+        import socket
+
+        from markovcryptor.client.lifecycle import find_free_port
+
+        with socket.socket() as held:
+            held.bind(("127.0.0.1", 0))
+            taken = held.getsockname()[1]
+            got = find_free_port(taken, tries=20)
+
+        # 真的绑一下，证明返回的端口可用（不是只"看起来"空闲）
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", got))
+
+    def test_raises_when_nothing_is_free(self):
+        import socket
+
+        from markovcryptor.client.lifecycle import find_free_port
+
+        with socket.socket() as held:
+            held.bind(("127.0.0.1", 0))
+            held.listen(1)
+            taken = held.getsockname()[1]
+            # tries=1 且那个端口被占 -> 必然失败
+            with self.assertRaises(OSError):
+                find_free_port(taken, tries=1)
+
+    def test_port_owner_hint_does_not_crash(self):
+        from markovcryptor.client.lifecycle import port_owner_hint
+
+        # 只要求不抛异常：查不到时返回空串是正常结果。
+        self.assertIsInstance(port_owner_hint(1), str)

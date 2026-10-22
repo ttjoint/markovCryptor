@@ -512,3 +512,75 @@ class BundlePrivacyTest(unittest.TestCase):
         # 1741473279 是打包机的账号，绝不该出现在脚本里
         self.assertNotIn("1741473279", source)
         self.assertNotIn("3925697820", source)
+
+
+class SplitterRecoveryTest(unittest.TestCase):
+    """一侧被收起后必须还能拉回来。
+
+    实际反馈：拖到一侧消失后，分隔条被 `hidden = true` 一起藏了，
+    没有任何办法把那一侧拉回来 —— 只能重启程序（而且 ratio 存在
+    localStorage 里，重启还是收起的）。
+    """
+
+    def _html(self) -> str:
+        path = (Path(__file__).resolve().parent.parent
+                / "markovcryptor" / "client" / "webui" / "index.html")
+        return path.read_text(encoding="utf-8")
+
+    def test_splitter_is_never_hidden(self):
+        html = self._html()
+        # 找 applySplit 里对 splitter 的处理
+        start = html.index("function applySplit()")
+        end = html.index("function initSplitter()")
+        body = html[start:end]
+        self.assertNotIn("splitter.hidden = true", body,
+                         "收起一侧时不能把分隔条一起藏掉，否则拉不回来")
+        self.assertNotIn("$(\"splitter\").hidden = true", body)
+
+    def test_collapsed_splitter_gets_a_visible_handle(self):
+        html = self._html()
+        self.assertIn("splitter.classList.add(\"collapsed\")", html,
+                      "收起态要有个明显的抓手")
+        self.assertIn(".splitter.collapsed", html,
+                      "收起态需要独立样式，否则和边框没区别")
+
+    def test_ratio_range_allows_full_collapse(self):
+        """ratio 允许到 0/1（代表收起），拖回来时离开极值即可恢复。"""
+        html = self._html()
+        self.assertIn("Math.min(1, Math.max(0, ratio))", html)
+        self.assertNotIn("Math.min(0.95, Math.max(0.05, ratio))", html)
+
+    def test_saved_ratio_accepts_extremes(self):
+        html = self._html()
+        self.assertIn("saved >= 0 && saved <= 1", html,
+                      "存下的收起状态要能恢复，不能因为越界被丢弃")
+
+
+class ScrollbarStyleTest(unittest.TestCase):
+    """默认滚动条在深色界面里是一块浅灰方条，还占 17px 让布局跳动。"""
+
+    def _html(self) -> str:
+        path = (Path(__file__).resolve().parent.parent
+                / "markovcryptor" / "client" / "webui" / "index.html")
+        return path.read_text(encoding="utf-8")
+
+    def test_webkit_scrollbar_is_styled(self):
+        html = self._html()
+        self.assertIn("::-webkit-scrollbar", html,
+                      "Chromium --app 模式用的就是它")
+        self.assertIn("::-webkit-scrollbar-thumb", html)
+
+    def test_firefox_scrollbar_is_styled(self):
+        html = self._html()
+        self.assertIn("scrollbar-width: thin", html,
+                      "降级到 Firefox 普通窗口时也要生效")
+        self.assertIn("scrollbar-color", html)
+
+    def test_textarea_has_a_max_height(self):
+        html = self._html()
+        start = html.index(".composer textarea {")
+        end = html.index("}", start)
+        body = html[start:end]
+        self.assertIn("max-height", body,
+                      "输入框内容多了要自己滚，不能把布局顶高")
+        self.assertIn("overflow-y: auto", body)

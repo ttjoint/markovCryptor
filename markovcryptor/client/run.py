@@ -225,7 +225,22 @@ def _serve(endpoint, cfg, *, config_path: Path | None, root: Path,
     cfg.onebot_token = endpoint.token
     cfg.save(config_path)
 
-    port = cfg.port or DEFAULT_CLIENT_PORT
+    # 端口：用户没指定就从 8741 开始往上找空位。
+    # 原来写死 8741，被别的程序占了就直接抛 OSError —— 用户看到的是一个
+    # 没有任何提示的启动失败，也不知道该改什么。
+    preferred = cfg.port or DEFAULT_CLIENT_PORT
+    try:
+        port = lifecycle.find_free_port(preferred)
+    except OSError as exc:
+        raise launcher.LauncherError(
+            f"找不到可用的界面端口：{exc}",
+            hint="在配置里把 port 改成一个别的值，或关掉占用端口的程序。")
+
+    if port != preferred:
+        owner = lifecycle.port_owner_hint(preferred)
+        detail = f"（被 {owner} 占用）" if owner else ""
+        _log(f"端口 {preferred} 已被占用{detail}，改用 {port}")
+
     webui = Path(__file__).resolve().with_name("webui")
 
     # 前端关掉 / 后端该退出的统一收尾。必须幂等：看门狗、用户点退出、

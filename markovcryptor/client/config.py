@@ -61,6 +61,9 @@ class ClientConfig:
     onebot_url: str = ""
     onebot_token: str = ""
     #: Port for the client's own HTTP server.
+    #: Local port for the UI. 0 means "pick one that is free", starting from
+    #: :data:`markovcryptor.client.app.DEFAULT_CLIENT_PORT`. Users can pin a
+    #: specific port when something else keeps taking 8741.
     port: int = 0
     #: Set false to skip opening a browser (headless testing).
     open_browser: bool = True
