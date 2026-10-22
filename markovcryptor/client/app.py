@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from ..core.errors import StegoError
 from ..observability import event
 from .account import Account
 
@@ -25,6 +26,37 @@ from .account import Account
 DEFAULT_CLIENT_PORT = 8741
 
 DEFAULT_CLIENT_HOST = "127.0.0.1"
+
+
+def _http_error(exc: BaseException, *, fallback: int = 502) -> HTTPException:
+    """Turn an exception into an HTTP error the user can act on.
+
+    ``StegoError`` already carries ``http_status`` (413 for a picture too small,
+    415 for an unsupported format, 422 for bad input) and ``hints`` (what to do
+    next). Discarding both was a real bug: a picture that cannot hold the payload
+    is the *user's* choice, and reporting it as 502 sends them to check their
+    network instead of picking a bigger picture.
+
+    Anything unrecognised stays 502 -- that genuinely is our fault, and pretending
+    otherwise would hide bugs.
+    """
+    hints = tuple(getattr(exc, "hints", ()) or ())
+    detail = str(exc) or type(exc).__name__
+    if hints:
+        # 前端把 detail 原样显示，所以"怎么办"要拼进去，而不是丢掉。
+        detail = "\n".join((detail, *hints))
+
+    # ValueError 先判：``InvalidInput`` 既是 StegoError（http_status=422）也是
+    # ValueError，而它表达的是"当前状态不允许这个操作"（未握手、队列空），
+    # 409 比 422 准确 —— 请求本身没写错，是时机不对。
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=409, detail=detail)
+    if isinstance(exc, StegoError):
+        status = int(getattr(exc, "http_status", 422) or 422)
+        # StegoError 默认 500 表示"我们的错"，这里保留 fallback 语义。
+        return HTTPException(status_code=status if status != 500 else fallback,
+                            detail=detail)
+    return HTTPException(status_code=fallback, detail=detail)
 
 
 def _entry_payload(entry) -> dict:
@@ -106,7 +138,7 @@ def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
             "name": account.directory.name_of(peer),
             "established": conversation.established,
             "state_label": conversation.state_label,
-            "entries": [_entry_payload(e) for e in conversation.entries],
+            "entries": [_entry_payload(e) for e in conversation.snapshot()],
         })
 
     @app.post("/client/conversation/{peer}/open")
@@ -148,22 +180,22 @@ def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
                 account.send_covert(peer, text)
             else:
                 account.start_handshake(peer)
-        except ValueError as exc:
-            # 用户的错（队列空了、会话没建立），不是服务器故障。
-            # 用 409 而不是 400：状态不对，重试同样的请求也不会成。
-            raise HTTPException(status_code=409, detail=str(exc)) from None
         except HTTPException:
             raise
+        except (StegoError, ValueError) as exc:
+            event("client", "send_rejected", level=logging.INFO,
+                  peer=peer, mode=mode, error=exc)
+            raise _http_error(exc) from None
         except Exception as exc:                    # noqa: BLE001
             event("client", "send_failed", level=logging.ERROR,
                   peer=peer, mode=mode, error=exc)
-            raise HTTPException(status_code=502, detail=f"发送失败：{exc}") from None
+            raise _http_error(exc, fallback=502) from None
 
         conversation = account.conversations.ensure(peer)
         return JSONResponse({
             "ok": True,
             "state_label": conversation.state_label,
-            "entries": [_entry_payload(e) for e in conversation.entries[-3:]],
+            "entries": [_entry_payload(e) for e in conversation.snapshot()[-3:]],
         })
 
     @app.get("/client/history/{peer}")
@@ -171,10 +203,15 @@ def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
         """Fetch recent messages from QQ without merging into the timeline."""
         try:
             parsed = account.load_history(peer, count=count)
+        except (StegoError, ValueError) as exc:
+            # 非法 QQ 号是用户输入问题（409/422），不是服务器故障。
+            event("client", "history_rejected", level=logging.INFO,
+                  peer=peer, error=exc)
+            raise _http_error(exc) from None
         except Exception as exc:                    # noqa: BLE001
             event("client", "history_failed", level=logging.WARNING,
                   peer=peer, error=exc)
-            raise HTTPException(status_code=502, detail=f"读取历史失败：{exc}") from None
+            raise _http_error(exc, fallback=502) from None
         return JSONResponse({
             "ok": True,
             "messages": [
@@ -221,11 +258,6 @@ def _merge_history(account: Account, conversation, peer: str, count: int) -> Non
               peer=peer, error=exc)
         return
 
-    if getattr(conversation, "_history_merged", False):
-        # 只在首次打开时合并一次，否则每次刷新都会把同一段历史再灌一遍。
-        return
-
-    existing = list(conversation.entries)
     merged: list = []
     for item in parsed:
         if not (item.text.strip() or item.images or item.unsupported):
@@ -235,5 +267,6 @@ def _merge_history(account: Account, conversation, peer: str, count: int) -> Non
             text=item.text,
             unsupported=item.unsupported,
         ))
-    conversation.entries[:] = merged + existing
-    conversation._history_merged = True
+    # 去重与插入在会话的锁内一次完成：先快照再切片赋值会抹掉期间到达的
+    # 新消息，而"检查标志位 + 插入"分开做会让并发打开灌两遍历史。
+    conversation.prepend_history(merged)

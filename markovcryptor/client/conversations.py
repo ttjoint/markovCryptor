@@ -31,12 +31,26 @@ from __future__ import annotations
 
 import itertools
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 
 from ..observability import event
 from ..terminal.terminal import Inbound, Packet, Terminal
 from .directory import Directory
+
+#: Guards every mutable structure in this module.
+#:
+#: Two threads genuinely touch them: the OneBot reader thread delivers inbound
+#: messages, and the uvicorn thread serves HTTP. Without a lock the failures are
+#: not theoretical -- `entries[:] = merged + existing` (history merge) can drop a
+#: message that arrived during the assignment, and iterating `_items` while
+#: `ensure()` inserts raises "dictionary changed size during iteration".
+#:
+#: One module-wide lock rather than one per conversation: contention is trivial
+#: (a handful of messages per second) and a single lock removes the ordering
+#: questions that per-object locks invite.
+_STATE_LOCK = threading.RLock()
 
 #: Arrival counter shared by every conversation. Ordering needs one globally
 #: monotonic value: a per-conversation counter would make two chats' latest
@@ -90,6 +104,7 @@ class Conversation:
         #: Reset by :meth:`mark_read`.
         self.unread = 0
         self._open = False
+        self._history_merged = False
 
     # ------------------------------------------------------------------ state
 
@@ -103,7 +118,8 @@ class Conversation:
 
     @property
     def last_at(self) -> float:
-        return self.entries[-1].at if self.entries else 0.0
+        with _STATE_LOCK:
+            return self.entries[-1].at if self.entries else 0.0
 
     @property
     def last_seq(self) -> int:
@@ -112,7 +128,19 @@ class Conversation:
         -1 for a conversation with no messages, so it sorts below any that has
         one -- opening a silent friend should not jump them to the top.
         """
-        return self.entries[-1].seq if self.entries else -1
+        with _STATE_LOCK:
+            return self.entries[-1].seq if self.entries else -1
+
+    def snapshot(self) -> list[Entry]:
+        """A copy of the timeline, safe to iterate outside the lock.
+
+        Callers must not hold the lock while serialising to JSON, and must not
+        iterate the live list -- a history merge prepends to it and an in-flight
+        message appends, either of which makes a bare iterator repeat or skip
+        entries.
+        """
+        with _STATE_LOCK:
+            return list(self.entries)
 
     def mark_open(self, is_open: bool = True) -> None:
         """Tell the conversation whether the user is looking at it.
@@ -120,12 +148,30 @@ class Conversation:
         Unread only increments while closed. Counting while the user watches the
         window would leave a red dot on a conversation they just read.
         """
-        self._open = is_open
-        if is_open:
-            self.mark_read()
+        with _STATE_LOCK:
+            self._open = is_open
+            if is_open:
+                self.unread = 0
 
     def mark_read(self) -> None:
-        self.unread = 0
+        with _STATE_LOCK:
+            self.unread = 0
+
+    def prepend_history(self, entries: list[Entry]) -> bool:
+        """Put older messages in front, once.
+
+        Returns False when history was already merged. The check and the set
+        happen under the same lock: two concurrent "open conversation" requests
+        would otherwise both pass the check and prepend the same history twice.
+        """
+        with _STATE_LOCK:
+            if self._history_merged:
+                return False
+            self._history_merged = True
+            # 在锁内做整体替换。此时若有入站消息 append，它会排在 merged 之后，
+            # 不会像"先快照再切片赋值"那样被抹掉。
+            self.entries[:] = list(entries) + self.entries
+            return True
 
     # ---------------------------------------------------------------- inbound
 
@@ -133,10 +179,11 @@ class Conversation:
         if entry.is_empty():
             # 空白条目不进时间线：它会让界面出现一个空气泡，且不携带任何信息。
             return
-        entry.seq = next(_ARRIVAL)
-        self.entries.append(entry)
-        if not self._open:
-            self.unread += 1
+        with _STATE_LOCK:
+            entry.seq = next(_ARRIVAL)
+            self.entries.append(entry)
+            if not self._open:
+                self.unread += 1
 
     def record_visible(self, parsed: message_parser.ParsedMessage,
                        images: tuple[bytes, ...] = ()) -> None:
@@ -191,16 +238,19 @@ class Conversations:
     # ------------------------------------------------------------- accessors
 
     def __len__(self) -> int:
-        return len(self._items)
+        with _STATE_LOCK:
+            return len(self._items)
 
     def __contains__(self, peer) -> bool:
-        return str(peer) in self._items
+        with _STATE_LOCK:
+            return str(peer) in self._items
 
     def __iter__(self):
         return iter(self.ordered())
 
     def get(self, peer) -> Conversation | None:
-        return self._items.get(str(peer))
+        with _STATE_LOCK:
+            return self._items.get(str(peer))
 
     def ordered(self) -> list[Conversation]:
         """Most recent first -- a chat list is ordered by activity, not alphabet.
@@ -209,11 +259,15 @@ class Conversations:
         bottom rather than the top, otherwise clicking a silent friend would jump
         them above the person you are actually talking to.
         """
-        return sorted(self._items.values(),
-                      key=lambda c: (c.last_seq, c.name), reverse=True)
+        with _STATE_LOCK:
+            items = list(self._items.values())
+        # 排序放在锁外：last_seq 各自取锁，不会持有全局锁做 O(n log n)。
+        return sorted(items, key=lambda c: (c.last_seq, c.name), reverse=True)
 
     def unread_total(self) -> int:
-        return sum(c.unread for c in self._items.values())
+        with _STATE_LOCK:
+            items = list(self._items.values())
+        return sum(c.unread for c in items)
 
     # -------------------------------------------------------------- lifecycle
 
@@ -225,10 +279,18 @@ class Conversations:
         friend starts receiving covert traffic.
         """
         key = str(peer)
-        existing = self._items.get(key)
-        if existing is not None:
-            return existing
+        # 整个创建过程持锁：check-then-create 若分两次拿锁，两个线程会为同一
+        # peer 各建一个 Terminal，后注册的 sink 覆盖前者，而 _items 里留下的
+        # 可能是另一个 —— 会话对象和实际收包的 Terminal 不是同一个。
+        with _STATE_LOCK:
+            existing = self._items.get(key)
+            if existing is not None:
+                return existing
+            conversation = self._create_locked(key)
+            return conversation
 
+    def _create_locked(self, key: str) -> Conversation:
+        """Build and register one conversation. Caller holds ``_STATE_LOCK``."""
         terminal = Terminal(key, self.network, psk=self.psk)
         if self.text_channel is not None:
             terminal.use_text_channel(self.text_channel)
@@ -250,10 +312,12 @@ class Conversations:
         a stale sink that fires later is harmless because the terminal object is
         no longer referenced by the UI.
         """
-        self._items.pop(str(peer), None)
+        with _STATE_LOCK:
+            self._items.pop(str(peer), None)
 
     def clear(self) -> None:
-        self._items.clear()
+        with _STATE_LOCK:
+            self._items.clear()
 
     # ---------------------------------------------------------------- routing
 
@@ -287,7 +351,7 @@ class Conversations:
             conversation.record_visible(parsed)
 
     def _on_inbound(self, peer: str, inbound: Inbound) -> None:
-        conversation = self._items.get(str(peer))
+        conversation = self.get(peer)
         if conversation is None:
             return
         conversation.record_inbound(inbound)

@@ -90,9 +90,23 @@ if (-not (Test-Path $node)) {
 }
 $env:PATH = (Join-Path $here "node") + ";" + $env:PATH
 
+$logFile = Join-Path $env:APPDATA "markovcryptor\client.log"
 Write-Host "正在启动…（第一次会等 QQ 登录）" -ForegroundColor Cyan
 & $py -X utf8 -m markovcryptor.client.run --snowluma (Join-Path $here "snowluma")
-exit $LASTEXITCODE
+$code = $LASTEXITCODE
+if ($code -ne 0) {
+  # 失败原因必须看得见。pythonw 没有控制台时，日志文件是唯一的线索。
+  Write-Host ""
+  Write-Host "启动失败（退出码 $code）。" -ForegroundColor Red
+  if (Test-Path $logFile) {
+    Write-Host "日志：$logFile" -ForegroundColor Yellow
+    Write-Host "最后几行：" -ForegroundColor Yellow
+    Get-Content $logFile -Tail 12 | ForEach-Object { Write-Host "  $_" }
+  } else {
+    Write-Host "没有日志文件（$logFile）。多半是包不完整。" -ForegroundColor Yellow
+  }
+}
+exit $code
 """
 
 

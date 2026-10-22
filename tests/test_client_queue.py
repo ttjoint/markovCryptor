@@ -7,8 +7,11 @@ small to hold anything, or the program reading a 3000-sticker folder into RAM.
 
 from __future__ import annotations
 
+import itertools
 import tempfile
+import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from PIL import Image
@@ -158,3 +161,112 @@ class ConfigTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConcurrencyTest(unittest.TestCase):
+    """两个线程真的会同时抽图：HTTP 处理"用户点发送"，OneBot 读线程处理
+    "自动回握手"。没有锁时，单元素队列的 take() 会在判空和 pop 之间被打断，
+    第二个线程 pop(0) 空列表 -> IndexError；replenish() 还会把同一张图入队两次。
+    """
+
+    def test_take_checks_and_pops_inside_one_critical_section(self):
+        """判空与 pop 必须在同一临界区 —— 用确定性方式验证，不靠压测。
+
+        压测抓不到这个竞态：GIL 下"判空 -> pop(0)"之间的窗口极窄，而且
+        ``replenish()`` 自己也会加锁、不断把队列补满，窗口几乎不存在。
+        实测把锁去掉后跑 4 线程 × 300 次仍然全绿 —— 假绿的测试比没测试更糟。
+
+        所以改成验证结构：用一个记账锁替身，检查 take() 期间 acquire/release
+        的配对，以及"判空到 pop"这段是否落在同一次 acquire 之内。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_image(Path(tmp) / "only.png", size=(200, 200))
+            q = PictureQueue(folders=[Path(tmp)], max_items=1)
+            q.replenish()
+
+            depth = {"n": 0, "max": 0}
+            pops_while_held: list[int] = []
+            real_lock = q._lock
+
+            class RecordingLock:
+                """Pass-through lock that records the nesting depth."""
+
+                def __enter__(self):
+                    depth["n"] += 1
+                    depth["max"] = max(depth["max"], depth["n"])
+                    return real_lock.__enter__()
+
+                def __exit__(self, *exc):
+                    depth["n"] -= 1
+                    return real_lock.__exit__(*exc)
+
+                def acquire(self, *a, **kw):
+                    return real_lock.acquire(*a, **kw)
+
+                def release(self):
+                    return real_lock.release()
+
+            q._lock = RecordingLock()  # type: ignore[assignment]
+
+            # 记录 pop 发生时是否处于锁内。
+            class SpyList(list):
+                def pop(self, index=-1):
+                    pops_while_held.append(depth["n"])
+                    return super().pop(index)
+
+            q.items = SpyList(q.items)  # type: ignore[assignment]
+
+            q.take()
+
+            self.assertTrue(pops_while_held, "没走到 pop，测试本身失效")
+            self.assertTrue(all(d > 0 for d in pops_while_held),
+                            f"pop 必须在锁内执行，实际深度：{pops_while_held}")
+
+    def test_parallel_take_does_not_return_the_same_object_twice(self):
+        """同一张图不能被两个线程同时取走。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in range(6):
+                _write_image(Path(tmp) / f"{i}.png", size=(200, 200))
+            q = PictureQueue(folders=[Path(tmp)], max_items=2)
+            q.replenish()
+
+            # 不能用 id()：对象被回收后地址会复用，会把两张不同的图误判成
+            # 同一张。给每个对象打一个唯一标记。
+            taken: list[int] = []
+            lock = threading.Lock()
+            marks = itertools.count()
+
+            def worker():
+                for _ in range(20):
+                    item = q.take()
+                    if item is not None:
+                        item.marker = next(marks)
+                        with lock:
+                            taken.append(item.marker)
+
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(len(taken), len(set(taken)),
+                             "同一个 QueuedImage 对象被取走了两次")
+
+    def test_queue_never_exceeds_max_under_concurrency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in range(30):
+                _write_image(Path(tmp) / f"{i}.png", size=(200, 200))
+            q = PictureQueue(folders=[Path(tmp)], max_items=3)
+            peak = [0]
+
+            def worker():
+                for _ in range(15):
+                    q.replenish()
+                    peak[0] = max(peak[0], len(q))
+
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertLessEqual(peak[0], 3, f"并发下队列超上限：{peak[0]}")

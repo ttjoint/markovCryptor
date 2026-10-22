@@ -279,3 +279,51 @@ tests/test_onebot_transport.py       PeerRoutingTest / AskTest / InboundEventTes
 | `dist/client_build9/qqclient-0.3.0-20261022-1740/` | **正式客户端**，零安装 | 双击 start.bat |
 
 客户端包还没打 zip（等阶段 6 做完一起）。
+
+---
+
+## 阶段 5.5：跨子系统审查（2026-10-22）
+
+实机测试前做了一次全面审查，覆盖并发、错误路径、资源生命周期。发现的都是
+**只在多线程/异常路径下才出现**的问题，功能测试全绿也看不出来。
+
+### 已修（按严重程度）
+
+| # | 问题 | 后果 | 修法 |
+| --- | --- | --- | --- |
+| C1 | `Conversation.entries` 无锁，`_merge_history` 用「先快照再切片赋值」 | **丢消息**：快照与赋值之间到达的消息被整体覆盖抹掉；迭代时前插会**重复渲染**同一条 | 加 `_STATE_LOCK`；新增 `snapshot()` 供外部迭代；`prepend_history()` 在锁内一次完成去重+插入 |
+| C2 | `unread += 1` 与 `mark_read()=0` 竞争 | 用户正看着窗口却亮红点，或丢一次未读 | 计数与 `_open` 判断放进同一临界区 |
+| C3 | `Conversations._items` 迭代时被 `ensure()` 插入 | `RuntimeError: dictionary changed size`；并发 ensure 为同一 peer 建两个 Terminal，会话对象和实际收包的 Terminal 不是同一个 | 创建过程整体持锁（`_create_locked`） |
+| C4 | `PictureQueue.take()` 判空与 `pop(0)` 分两次 | 单元素队列并发时 `IndexError`；`replenish()` 竞争会把同一张图入队两次 | 判空+pop+补充放同一临界区 |
+| C5 | `Account.close()` 不停网络；`cli.py` 的 client 分支无 finally | 关闭后 OneBot 线程和 websocket 继续跑，往刚清空的结构投消息 | `close()` 里调 `network.stop()`；cli 加 `finally: account.close()` |
+| E1 | `app.py` 只按 `ValueError` 映射，丢弃 `StegoError.http_status` 和 `hints` | 图片太小（413）、格式不支持（415）都报 **502**，用户去查网络；「怎么办」被丢掉 | `_http_error()` 统一转换，保留 hints 拼进 detail |
+| E2 | 前端 `refreshState` 两处 `catch` 静默 return | 服务端一挂，界面永远停在旧状态且**毫无提示** | 状态变化时 toast 一次（不刷屏），恢复时也提示 |
+| E3 | `_log` 只写 stdout | **pythonw 无控制台**，启动失败双击后什么都不发生 —— 用户只会认为包是坏的 | 同时写 `%APPDATA%\markovcryptor\client.log`；start.ps1 失败时显示日志末 12 行 |
+| E4 | 队列空的提示不带 hints | 只说「队列为空」，不说怎么办 | 改 `InvalidInput` + hints（「指定图片文件夹或点补图」） |
+
+### 未修（记录在案，不影响当前使用）
+
+- `ask()` 的 `_ask_seq` 非原子自增 —— 并发调用可能撞 echo。当前前端是单请求
+  串行轮询，实际不会触发；若将来并行调用需加锁。
+- `_write_loop` 用 `run_in_executor` 阻塞 `queue.get`，重连时可能漏一个 executor
+  worker。影响重连场景，日常不断线不触发。
+- `Terminal.pending_request` 跨线程读写（握手自动回复 vs 补图重试）。两者同时
+  发生才会重复回复，概率极低。
+- `_merge_history` 吞掉历史读取异常（返回 200 但无历史）—— 已改成只合并一次，
+  但失败时用户仍不知情。低优先级。
+
+### 测试方法上的一个教训
+
+**并发 bug 不能只靠压测验证。** 我一开始用「4 线程 × 300 次」验证 `take()` 的
+竞态，把锁去掉后**测试依然全绿** —— GIL 下那个窗口太窄，而且 `replenish()`
+自己也会加锁、不断补满队列，窗口几乎不存在。假绿的测试比没测试更糟。
+
+改用**确定性验证**：
+- 丢消息：直接构造「快照 → 插入消息 → 切片赋值」的时序，断言旧写法确实丢
+  （`test_old_style_merge_would_lose_the_message`），作为"为什么不能那样写"的记录。
+- 队列临界区：用记账锁替身记录 acquire 深度，断言 `pop` 发生时深度 > 0
+  （`test_take_checks_and_pops_inside_one_critical_section`）。去掉锁后立刻 FAIL。
+
+### 测试数
+
+**527 passed**（审查前 507，新增 20 项）。

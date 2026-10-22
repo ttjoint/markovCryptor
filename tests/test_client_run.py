@@ -92,3 +92,44 @@ class ConsoleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StartupLogTest(unittest.TestCase):
+    """启动失败必须留下能查的痕迹。
+
+    打包版用 pythonw 跑（没有控制台）。原来 _log 只写 stdout，失败时
+    双击之后**什么都没发生** —— 用户只会认为包是坏的。日志文件是唯一
+    能在事后查到原因的地方。
+    """
+
+    def test_log_writes_to_a_file_even_without_stdout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "client.log"
+            with mock.patch.object(run_mod, "_log_path", return_value=log), \
+                 mock.patch.object(run_mod.sys, "stdout", None):
+                run_mod._log("启动失败：QQ 没登录")
+            self.assertTrue(log.exists(), "没有控制台时也必须写日志")
+            self.assertIn("QQ 没登录", log.read_text(encoding="utf-8"))
+
+    def test_log_failure_never_raises(self):
+        """日志写不进去（只读目录）也不能让程序崩。"""
+        with mock.patch.object(run_mod, "_log_path",
+                               return_value=Path("X:/nope/client.log")), \
+             mock.patch.object(run_mod.sys, "stdout", None):
+            run_mod._log("随便")      # 不抛即通过
+
+    def test_failure_is_recorded_in_the_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snow = root / "snowluma"
+            snow.mkdir()
+            (snow / "index.mjs").write_text("// stub")
+            log = root / "client.log"
+            with mock.patch.object(run_mod, "_log_path", return_value=log), \
+                 mock.patch.object(launcher, "start_snowluma", return_value=None), \
+                 mock.patch.object(run_mod.sys, "stdout", None):
+                code = run_mod.run(snowluma=snow, wait=0.2, open_browser=False)
+            self.assertEqual(code, 2)
+            text = log.read_text(encoding="utf-8")
+            self.assertIn("启动失败", text)
+            self.assertIn("QQ", text)

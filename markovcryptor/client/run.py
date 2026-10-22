@@ -27,21 +27,44 @@ from . import launcher
 from .account import Account
 from .app import DEFAULT_CLIENT_PORT, create_client_app
 from .config import ClientConfig
+from . import config as config_mod
 from .queue import PictureQueue
 
 
-def _log(msg: str) -> None:
-    """Print to the console when there is one.
+#: Where startup messages also go. Under ``pythonw`` there is no console at all,
+#: so a message written only to stdout is invisible -- and a launcher that fails
+#: silently is the worst possible outcome: the user double-clicks, nothing
+#: happens, and they conclude the package is broken.
+LOG_NAME = "client.log"
 
-    The packaged launcher runs with ``pythonw`` (no console) to avoid a black
-    window behind the chat UI, and writing to a closed stdout raises there.
+
+def _log_path() -> Path:
+    """Log beside the config, so it is findable without a console."""
+    return Path(config_mod.default_config_path()).parent / LOG_NAME
+
+
+def _log(msg: str) -> None:
+    """Write to the console if there is one, and always to a log file.
+
+    The file matters more than the console here: the packaged launcher may run
+    with no console at all, and "startup failed" needs to be discoverable
+    afterwards. Failure to write the log is ignored -- logging must never be the
+    reason the program dies.
     """
+    line = msg
     try:
         stream = sys.stdout
         if stream is not None:
-            stream.write(msg + "\n")
+            stream.write(line + "\n")
             stream.flush()
     except Exception:                              # noqa: BLE001 - no console
+        pass
+    try:
+        path = _log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
+    except Exception:                              # noqa: BLE001 - logging
         pass
 
 

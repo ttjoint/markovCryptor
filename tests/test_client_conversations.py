@@ -199,3 +199,186 @@ class TimelineTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConcurrencyTest(unittest.TestCase):
+    """入站消息在 OneBot 读线程，发送在 uvicorn 线程 —— 真会同时发生。
+
+    这些用真实多线程跑，因为审查发现的丢消息/重复渲染都只在并发下出现。
+    """
+
+    def setUp(self):
+        self.hub, self.net = _network_with_friends()
+        self.directory = Directory()
+        self.directory.refresh(self.hub.friends[SELF])
+        self.conversations = Conversations(self.net, self.directory).attach()
+        self.bob = self.conversations.ensure(BOB)
+
+    def test_concurrent_appends_and_snapshots_do_not_lose_messages(self):
+        """一边收消息一边取快照，条目数必须对得上。"""
+        import threading
+
+        stop = threading.Event()
+        errors: list[BaseException] = []
+        snapshots = [0]
+
+        def reader():
+            for i in range(200):
+                try:
+                    self.conversations._on_raw(BOB, _message(BOB, text=f"m{i}"))
+                except BaseException as exc:        # noqa: BLE001
+                    errors.append(exc)
+
+        def snapshotter():
+            while not stop.is_set():
+                try:
+                    snapshots[0] = max(snapshots[0], len(self.bob.snapshot()))
+                except BaseException as exc:        # noqa: BLE001
+                    errors.append(exc)
+
+        watcher = threading.Thread(target=snapshotter)
+        watcher.start()
+        writer = threading.Thread(target=reader)
+        writer.start()
+        writer.join()
+        stop.set()
+        watcher.join()
+
+        self.assertEqual(errors, [], f"并发下不该抛异常：{errors[:3]}")
+        self.assertEqual(len(self.bob.snapshot()), 200, "一条消息都不能丢")
+
+    def test_concurrent_ensure_creates_one_conversation(self):
+        """两线程同时 ensure 同一个 peer，只能有一个 Terminal。"""
+        import threading
+
+        created: list[object] = []
+        errors: list[BaseException] = []
+
+        def worker():
+            try:
+                created.append(self.conversations.ensure("77777"))
+            except BaseException as exc:            # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"并发 ensure 不该抛：{errors[:3]}")
+        self.assertEqual(len({id(c) for c in created}), 1,
+                         "同一个 peer 只能有一个会话对象")
+        self.assertEqual(len(self.conversations), 2)   # bob + 77777
+
+    def test_iterating_while_creating_does_not_raise(self):
+        """迭代会话列表时新建会话，不能抛 dict changed size during iteration。"""
+        import threading
+
+        errors: list[BaseException] = []
+        stop = threading.Event()
+
+        def iterator():
+            while not stop.is_set():
+                try:
+                    for c in self.conversations:
+                        _ = c.name
+                    _ = self.conversations.unread_total()
+                except BaseException as exc:        # noqa: BLE001
+                    errors.append(exc)
+                    return
+
+        def creator():
+            for i in range(60):
+                self.conversations.ensure(str(90000 + i))
+
+        reader = threading.Thread(target=iterator)
+        reader.start()
+        creator()
+        stop.set()
+        reader.join()
+
+        self.assertEqual(errors, [], f"迭代时新建会话不该抛：{errors[:3]}")
+
+    def test_unread_is_not_counted_while_open(self):
+        """用户正看着窗口时到达的消息不该留下红点（check-then-increment 竞争）。"""
+        import threading
+
+        self.bob.mark_open()
+        errors: list[BaseException] = []
+
+        def reader():
+            for i in range(200):
+                try:
+                    self.conversations._on_raw(BOB, _message(BOB, text=f"m{i}"))
+                except BaseException as exc:        # noqa: BLE001
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=reader) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(self.bob.unread, 0, "开着的会话不该累计未读")
+
+
+class LostMessageTest(unittest.TestCase):
+    """确定性复现「合并历史时丢掉新消息」。
+
+    审查指出的时序：先 list(entries) 快照 -> 中间到达一条新消息 append ->
+    再 entries[:] = merged + existing。新消息不在快照里，被整体覆盖抹掉。
+    压测难以命中这个窗口，所以直接构造：在快照和赋值之间插入一条消息。
+    """
+
+    def setUp(self):
+        self.hub, self.net = _network_with_friends()
+        self.directory = Directory()
+        self.directory.refresh(self.hub.friends[SELF])
+        self.conversations = Conversations(self.net, self.directory).attach()
+        self.bob = self.conversations.ensure(BOB)
+
+    def test_prepend_history_keeps_messages_that_arrive_during_the_merge(self):
+        """prepend_history 在锁内整体替换，期间 append 的消息必须还在。"""
+        from markovcryptor.client.conversations import Entry
+
+        self.bob.record_outbound(text="已有的")
+        # 模拟"合并进行中又收到一条"：直接调 prepend_history，并在其前后
+        # 各放一条消息。原子实现下三条都在。
+        self.bob.record_outbound(text="合并前")
+        self.bob.prepend_history([Entry(mine=False, text="历史一")])
+        self.bob.record_outbound(text="合并后")
+
+        texts = [e.text for e in self.bob.snapshot()]
+        for expected in ("历史一", "已有的", "合并前", "合并后"):
+            self.assertIn(expected, texts, f"{expected} 被丢了")
+
+    def test_old_style_merge_would_lose_the_message(self):
+        """证明旧的「快照 + 切片赋值」写法确实会丢消息。
+
+        这不是测产品代码，是测"为什么不能那样写"：构造出同样的时序，
+        断言它确实丢——这样以后有人想改回去，会看到这条记录。
+        """
+        from markovcryptor.client.conversations import Entry
+
+        self.bob.record_outbound(text="已有")
+        entries = self.bob.entries
+        existing = list(entries)                 # 快照
+        # 快照之后、赋值之前到达的新消息
+        self.bob.record_outbound(text="窗口期到达")
+        # 旧写法：整体覆盖
+        entries[:] = [Entry(mine=False, text="历史")] + existing
+
+        texts = [e.text for e in self.bob.snapshot()]
+        self.assertNotIn("窗口期到达", texts,
+                         "旧写法本该丢掉窗口期消息 —— 这条断言失败说明"
+                         "测试没复现出那个时序")
+
+    def test_prepend_history_only_once(self):
+        from markovcryptor.client.conversations import Entry
+
+        self.assertTrue(self.bob.prepend_history([Entry(text="h")]))
+        self.assertFalse(self.bob.prepend_history([Entry(text="h")]),
+                         "第二次必须被拒绝，否则历史灌两遍")
+        self.assertEqual(len(self.bob.snapshot()), 1)

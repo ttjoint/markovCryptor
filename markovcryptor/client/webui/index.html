@@ -383,10 +383,25 @@ async function openConversation(peer) {
 
 // ---------------------------------------------------------------- 状态刷新
 
+// 轮询失败时只在"状态发生变化"时提示一次：每 2.5 秒弹一个 toast 会刷屏，
+// 但完全静默会让用户对着一个再也不更新的界面发呆，分不清是卡了还是没人说话。
+let lastStateError = null;
+
 async function refreshState() {
   let data;
-  try { data = await api("/client/state"); }
-  catch (e) { return; }
+  try {
+    data = await api("/client/state");
+    if (lastStateError) {
+      lastStateError = null;
+      toast("连接已恢复");
+    }
+  } catch (e) {
+    if (lastStateError !== e.message) {
+      lastStateError = e.message;
+      toast("连接断开：" + e.message + "（重试中）");
+    }
+    return;
+  }
   S.uin = data.uin;
   S.ready = data.ready;
   S.conversations = data.conversations;
@@ -407,7 +422,13 @@ async function refreshState() {
     try {
       const detail = await api(`/client/conversation/${S.current}`);
       renderConversation(detail);
-    } catch (e) { /* 会话可能已被丢弃 */ }
+    } catch (e) {
+      // 会话可能已被丢弃；但要让人知道这次刷新没成功，否则新消息静默不出现。
+      if (lastStateError !== e.message) {
+        lastStateError = e.message;
+        toast("读取会话失败：" + e.message);
+      }
+    }
   }
 }
 
@@ -481,7 +502,9 @@ $("input").addEventListener("keydown", (e) => {
 });
 
 // 轮询：没有 WebSocket 推送到浏览器，用短轮询就够（单机、一个用户）。
-refreshState();
+// 首次加载要显式兜住：未处理的 rejection 在控制台之外看不见，
+// 用户只会看到一个永远空着的界面。
+refreshState().catch((e) => toast("启动失败：" + e.message));
 setInterval(refreshState, 2500);
 </script>
 </body>

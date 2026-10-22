@@ -13,6 +13,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from unittest import mock
+
 from httpx import ASGITransport, AsyncClient
 from PIL import Image
 
@@ -27,6 +29,12 @@ BOB = "20001"
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _parsed(text: str):
+    """A ParsedMessage as the history parser would produce it."""
+    from markovcryptor.client.messages import ParsedMessage
+    return ParsedMessage(sender=BOB, text=text)
 
 
 def _make_cover(folder: Path, name="c.png", size=(400, 400)):
@@ -245,3 +253,85 @@ class WebuiMountTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ErrorMappingTest(_Base):
+    """用户的错必须报 4xx，不能报 502。
+
+    ``core/errors.py`` 早就给 StegoError 定义了 ``http_status``（413 图太小、
+    415 格式不对）和 ``hints``（下一步怎么办）。app.py 原来只按 ValueError
+    一刀切、还丢掉 hints，结果"换张大点的图"被显示成"发送失败"，用户去查
+    网络 —— 方向完全错了。
+    """
+
+    def test_picture_too_small_is_413_not_502(self):
+        from markovcryptor.core.errors import CapacityExceeded
+
+        with mock.patch.object(self.account, "send_covert",
+                               side_effect=CapacityExceeded("图太小")):
+            r = self.post("/client/send", json={"peer": BOB, "text": "x",
+                                                "mode": "covert"})
+        self.assertEqual(r.status_code, 413)
+
+    def test_unsupported_format_is_415_not_502(self):
+        from markovcryptor.core.errors import UnsupportedCarrier
+
+        with mock.patch.object(self.account, "send_covert",
+                               side_effect=UnsupportedCarrier("格式不支持")):
+            r = self.post("/client/send", json={"peer": BOB, "text": "x",
+                                                "mode": "covert"})
+        self.assertEqual(r.status_code, 415)
+
+    def test_hints_are_kept_in_the_message(self):
+        """hints 里写着"怎么办"，丢掉就等于只说失败不说下一步。"""
+        from markovcryptor.core.errors import CapacityExceeded
+
+        exc = CapacityExceeded("图太小", hints=("换一张更大的图片",))
+        with mock.patch.object(self.account, "send_covert", side_effect=exc):
+            r = self.post("/client/send", json={"peer": BOB, "text": "x",
+                                                "mode": "covert"})
+        self.assertIn("换一张更大的图片", r.json()["detail"])
+
+    def test_genuine_failure_stays_502(self):
+        """真故障不能被伪装成 4xx，否则会盖住 bug。"""
+        with mock.patch.object(self.account, "send_text",
+                               side_effect=RuntimeError("网络炸了")):
+            r = self.post("/client/send", json={"peer": BOB, "text": "x",
+                                                "mode": "text"})
+        self.assertEqual(r.status_code, 502)
+
+
+class HistoryMergeTest(_Base):
+    """历史只合并一次，且不能抹掉期间到达的新消息。"""
+
+    def test_history_merged_only_once(self):
+        with mock.patch.object(self.account, "load_history", return_value=[
+                _parsed("旧消息一"), _parsed("旧消息二")]):
+            first = self.get(f"/client/conversation/{BOB}?history=5").json()
+            second = self.get(f"/client/conversation/{BOB}?history=5").json()
+        self.assertEqual(len(first["entries"]), 2)
+        self.assertEqual(len(second["entries"]), 2, "重复打开不能灌两遍")
+
+    def test_new_message_during_merge_is_not_lost(self):
+        """合并历史时到达的新消息不能被切片赋值抹掉。
+
+        这正是审查发现的丢消息时序：先快照、再整体替换，中间 append 进来的
+        那条不在快照里，被直接覆盖。
+        """
+        conv = self.account.conversations.ensure(BOB)
+        conv.record_outbound(text="合并前就在的消息")
+        with mock.patch.object(self.account, "load_history", return_value=[
+                _parsed("旧消息")]):
+            self.get(f"/client/conversation/{BOB}?history=5")
+        texts = [e.text for e in conv.snapshot()]
+        self.assertIn("合并前就在的消息", texts, "已有消息不能被历史覆盖掉")
+        self.assertIn("旧消息", texts)
+
+    def test_history_prepended_before_existing(self):
+        conv = self.account.conversations.ensure(BOB)
+        conv.record_outbound(text="新")
+        with mock.patch.object(self.account, "load_history", return_value=[
+                _parsed("旧")]):
+            self.get(f"/client/conversation/{BOB}?history=5")
+        texts = [e.text for e in conv.snapshot()]
+        self.assertEqual(texts, ["旧", "新"], "历史要在前面")

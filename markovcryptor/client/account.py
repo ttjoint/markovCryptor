@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from ..core.errors import InvalidInput
 from ..observability import event
 from ..terminal.terminal import Packet
 from . import messages as message_parser
@@ -158,7 +159,10 @@ class Account:
         if images is None:
             item = self.queue.take()
             if item is None:
-                raise ValueError("没有可用的图片：图片队列为空，且未指定图片")
+                raise InvalidInput(
+                    "没有可用的图片：图片队列为空",
+                    hints=("在配置文件里指定一个图片文件夹，或在界面上点「补图」",),
+                )
             images = (item.raw,)
         conversation.terminal.send_covert_in_images(conversation.peer, text, images)
         conversation.record_outbound(covert=(text,))
@@ -169,9 +173,10 @@ class Account:
         conversation = self.conversations.ensure(peer)
         item = self.queue.take()
         if item is None:
-            raise ValueError(
-                "密钥交换需要一张图片，但图片队列是空的。"
-                "先在配置里指定一个图片文件夹，或往队列里加图。")
+            raise InvalidInput(
+                "密钥交换需要一张图片，但图片队列是空的",
+                hints=("在配置文件里指定一个图片文件夹，或在界面上点「补图」",),
+            )
         conversation.terminal.send_handshake(conversation.peer, (item.raw,))
         conversation.record_outbound(text="（已发起密钥交换）")
         return conversation
@@ -198,7 +203,19 @@ class Account:
     # ------------------------------------------------------------------ shutdown
 
     def close(self) -> None:
-        """Drop all in-memory state. Nothing was ever on disk to clean up."""
+        """Stop the transport and drop all in-memory state.
+
+        Stops the network too, not just the data. Leaving the OneBot reader
+        thread running after "close" is a leak the caller cannot see: the process
+        keeps a websocket open and keeps receiving messages into structures that
+        were just cleared. Nothing was ever on disk to clean up.
+        """
+        stop = getattr(self.network, "stop", None)
+        if stop is not None:
+            try:
+                stop()
+            except Exception as exc:               # noqa: BLE001 - shutdown path
+                event("client", "stop_failed", level=logging.WARNING, error=exc)
         self.conversations.clear()
         self.directory.clear()
         self.queue.clear()

@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -119,6 +120,12 @@ class PictureQueue:
     #: are still fresh pictures. In memory only, by design.
     _used: set[str] = field(default_factory=set)
     _rng: random.Random = field(default_factory=random.Random)
+    #: Guards ``items``/``_used``. Two threads draw from this queue: the HTTP
+    #: handler (user pressed "send") and the OneBot reader thread (auto-replying
+    #: to a handshake with a cover). Without it, ``take()`` on a one-item queue
+    #: races between the empty-check and ``pop(0)`` and raises IndexError -- and
+    #: ``replenish()`` can enqueue the same file twice.
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     # ------------------------------------------------------------------ config
 
@@ -141,14 +148,17 @@ class PictureQueue:
     # ------------------------------------------------------------------- state
 
     def __len__(self) -> int:
-        return len(self.items)
+        with self._lock:
+            return len(self.items)
 
     @property
     def full(self) -> bool:
-        return len(self.items) >= self.max_items
+        with self._lock:
+            return len(self.items) >= self.max_items
 
     def peek(self) -> QueuedImage | None:
-        return self.items[0] if self.items else None
+        with self._lock:
+            return self.items[0] if self.items else None
 
     # ------------------------------------------------------------------ filling
 
@@ -174,7 +184,12 @@ class PictureQueue:
         emoji simply yields nothing rather than filling the queue with unusable
         entries.
         """
-        if self.full:
+        with self._lock:
+            return self._replenish_locked()
+
+    def _replenish_locked(self) -> int:
+        """Top up. Caller holds ``_lock``."""
+        if len(self.items) >= self.max_items:
             return 0
         candidates = _list_candidates(self.folders)
         if not candidates:
@@ -215,19 +230,25 @@ class PictureQueue:
         Does **not** delete the file. The picture simply leaves *our* queue; the
         user's folder is untouched.
         """
-        if not self.items:
-            self.replenish()
-        if not self.items:
-            return None
-        item = self.items.pop(0)
-        self.replenish()
-        return item
+        with self._lock:
+            if not self.items:
+                self._replenish_locked()
+            if not self.items:
+                return None
+            # 判空与 pop 必须同一个临界区：中间放开锁时，另一个线程会把唯一
+            # 那张取走，这里再 pop(0) 就是 IndexError。
+            item = self.items.pop(0)
+            self._replenish_locked()
+            return item
 
     def clear(self) -> None:
         """Drop everything. Called on exit -- the queue is never persisted."""
-        self.items.clear()
-        self._used.clear()
+        with self._lock:
+            self.items.clear()
+            self._used.clear()
 
     def stats(self) -> dict:
-        return {"queued": len(self.items), "max": self.max_items,
+        with self._lock:
+            queued = len(self.items)
+        return {"queued": queued, "max": self.max_items,
                 "folders": len(self.folders), "pick": self.pick}

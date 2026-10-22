@@ -345,7 +345,12 @@ def _run_client(args) -> int:
             webbrowser.open(shown)
         except Exception:                          # noqa: BLE001 - headless
             pass
-    uvicorn.run(app, host=args.host, port=port, log_level="warning")
+    try:
+        uvicorn.run(app, host=args.host, port=port, log_level="warning")
+    finally:
+        # 服务停下就收干净：OneBot 线程、websocket、会话都在这里结束。
+        # 少了这一步，进程虽然会退，但退出前一直挂着连接。
+        account.close()
     return 0
 
 
