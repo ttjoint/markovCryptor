@@ -327,3 +327,25 @@ tests/test_onebot_transport.py       PeerRoutingTest / AskTest / InboundEventTes
 ### 测试数
 
 **527 passed**（审查前 507，新增 20 项）。
+
+### 界面修正：消息归属与时间戳（2026-10-22，用户反馈）
+
+用户反馈：消息栏看不出是发出的还是收到的。
+
+**根因**：历史合并把每条都硬编码成 `mine=False`，于是用户自己发过的话
+也排在左边、和对方一模一样。CSS 的左右对齐一直是对的，错在数据。
+
+**修法**：
+- `messages.py`：`ParsedMessage` 加 `at`（QQ 的 `time` 字段，范围校验，
+  不在 2001~2286 之间当没有）；归属优先取 `sender.user_id`（历史条目
+  里有，实时事件里没有）
+- `app.py::_merge_history`：`mine=bool(account.uin) and item.sender == account.uin`
+- 前端：气泡三重区分（**位置** 左右对齐 + **颜色** 蓝/灰 + **尖角方向**），
+  气泡上方加「我 · 19:39」标签；历史跨天时时间戳自动带日期
+  （一串 09:15 分不清是哪天）
+
+**真机验证**：三历史消息全部正确标为我方（它们确实是用户发的）；
+Playwright 构造对方消息确认左右布局 + 时间戳渲染正常。截图两张。
+
+**测试**：`HistoryAttributionTest` 3 项，注入「硬编码 mine=False + 丢时间」
+验过能 FAIL。全量 527 passed。

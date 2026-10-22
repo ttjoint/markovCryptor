@@ -91,14 +91,25 @@
   }
   .thread { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex;
             flex-direction: column; gap: 10px; }
-  .msg { max-width: 86%; }
-  .msg.mine { align-self: flex-end; }
-  .msg.them { align-self: flex-start; }
+  /* 发出/收到靠三件事一起区分，单靠颜色在浅色主题或色弱时不够：
+     位置（左右对齐）、气泡形状（尖角方向）、以及明确的发送者标签。 */
+  .msg { max-width: 86%; display: flex; flex-direction: column; gap: 3px; }
+  .msg.mine { align-self: flex-end; align-items: flex-end; }
+  .msg.them { align-self: flex-start; align-items: flex-start; }
+  .meta { font-size: 11px; color: var(--dim); padding: 0 3px; }
+  .who { font-weight: 600; }
   .bubble {
-    padding: 8px 11px; border-radius: 10px; background: var(--panel2);
-    word-break: break-word; white-space: pre-wrap;
+    padding: 8px 12px; border-radius: 12px; background: var(--panel2);
+    word-break: break-word; white-space: pre-wrap; border: 1px solid transparent;
+    position: relative;
   }
-  .msg.mine .bubble { background: #2e4a63; }
+  /* 气泡尖角指向说话人一侧 —— 不用读文字也能看出方向。 */
+  .msg.them .bubble { border-top-left-radius: 3px; }
+  .msg.mine .bubble { border-top-right-radius: 3px; }
+  .msg.mine .bubble { background: #2e4a63; border-color: #3a5c78; }
+  @media (prefers-color-scheme: light) {
+    .msg.mine .bubble { background: #d6e8f7; border-color: #b9d5ec; }
+  }
   .bubble img { max-width: 220px; border-radius: 8px; display: block; margin-top: 6px; }
   .unsupported { color: var(--dim); font-style: italic; font-size: 12px; }
   .note { color: var(--warn); font-size: 12px; }
@@ -301,9 +312,40 @@ function renderList() {
 
 // ---------------------------------------------------------------- 右侧对话
 
-function bubbleFor(entry) {
+// 时间戳：只显示 时:分。历史消息可能跨天，跨天时补上日期。
+function fmtTime(at, showDate) {
+  if (!at) return "";                      // 没有时间就不编一个
+  const d = new Date(at * 1000);
+  if (isNaN(d.getTime())) return "";
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  if (!showDate) return `${hh}:${mm}`;
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${mo}-${dd} ${hh}:${mm}`;
+}
+
+function bubbleFor(entry, peerName, showDate) {
   const wrap = document.createElement("div");
   wrap.className = "msg " + (entry.mine ? "mine" : "them");
+
+  // 谁说的 + 什么时候，放在气泡上方。位置本身已经区分了方向，
+  // 这行是给"看不清颜色"和"历史消息跨天"的情况兜底。
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  const who = document.createElement("span");
+  who.className = "who";
+  who.textContent = entry.mine ? "我" : (peerName || "对方");
+  meta.appendChild(who);
+  const stamp = fmtTime(entry.at, showDate);
+  if (stamp) {
+    const sep = document.createTextNode(" · ");
+    const t = document.createElement("span");
+    t.textContent = stamp;
+    meta.append(sep, t);
+  }
+  wrap.appendChild(meta);
+
   const b = document.createElement("div");
   b.className = "bubble";
   if (entry.text) {
@@ -355,6 +397,20 @@ function renderConversation(data) {
     if ((entry.covert || []).length) {
       const cw = document.createElement("div");
       cw.className = "msg " + (entry.mine ? "mine" : "them");
+      const cmeta = document.createElement("div");
+      cmeta.className = "meta";
+      const cwho = document.createElement("span");
+      cwho.className = "who";
+      cwho.textContent = entry.mine ? "我" : (data.name || "对方");
+      cmeta.appendChild(cwho);
+      const cstamp = fmtTime(entry.at, showDate);
+      if (cstamp) {
+        const sep = document.createTextNode(" · ");
+        const t = document.createElement("span");
+        t.textContent = cstamp;
+        cmeta.append(sep, t);
+      }
+      cw.appendChild(cmeta);
       const cb = document.createElement("div");
       cb.className = "bubble";
       cb.textContent = entry.covert.join("\n");

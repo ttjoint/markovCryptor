@@ -101,6 +101,10 @@ class ParsedMessage:
     #: Empty for a message that was entirely text and pictures.
     unsupported: tuple[str, ...] = ()
     message_id: str | None = None
+    #: Unix seconds from QQ's own ``time`` field. 0 when the payload did not
+    #: carry one (a synthetic event, or an older bridge), which the UI renders
+    #: as "no time" rather than inventing one.
+    at: float = 0.0
 
     @property
     def has_content(self) -> bool:
@@ -172,14 +176,43 @@ def parse(payload: dict) -> ParsedMessage:
             if not unsupported or unsupported[-1] != line:
                 unsupported.append(line)
 
+    # ``sender.user_id`` is the authoritative author for history entries, while
+    # a live private-message event only carries a top-level ``user_id`` (the
+    # friend). Prefer the nested one so history can tell who said what.
     sender = payload.get("user_id")
+    sender_info = payload.get("sender")
+    if isinstance(sender_info, dict) and sender_info.get("user_id") is not None:
+        sender = sender_info["user_id"]
+
     return ParsedMessage(
         sender=str(sender) if sender is not None else "",
         text="".join(texts),
         images=tuple(images),
         unsupported=tuple(unsupported),
         message_id=str(payload.get("message_id")) if payload.get("message_id") is not None else None,
+        at=_timestamp(payload),
     )
+
+
+def _timestamp(payload: dict) -> float:
+    """QQ's ``time`` field as a float, or 0.0 when absent/unparsable.
+
+    QQ sends seconds. Anything wildly out of range is treated as absent rather
+    than shown as a date in 1970 or 55000 -- a wrong timestamp is worse than
+    none.
+    """
+    for key in ("time", "timestamp"):
+        value = payload.get(key)
+        if value is None:
+            continue
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            continue
+        # 2001-09-09 .. 2286: anything outside is not a real chat timestamp.
+        if 1_000_000_000 <= seconds <= 10_000_000_000:
+            return seconds
+    return 0.0
 
 
 def describe_unsupported(kind: str) -> str:

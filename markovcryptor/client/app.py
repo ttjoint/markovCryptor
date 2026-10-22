@@ -262,10 +262,14 @@ def _merge_history(account: Account, conversation, peer: str, count: int) -> Non
     for item in parsed:
         if not (item.text.strip() or item.images or item.unsupported):
             continue
+        # 归属由 QQ 自己的 sender 决定，不能一律当"对方"。
+        # 硬编码 mine=False 会让用户自己发过的话也显示在左边、和对方一模一样,
+        # 界面上根本分不出谁说的 —— 这正是实际反馈的问题。
         merged.append(Entry(
-            mine=False,
+            mine=bool(account.uin) and item.sender == account.uin,
             text=item.text,
             unsupported=item.unsupported,
+            at=item.at or 0.0,
         ))
     # 去重与插入在会话的锁内一次完成：先快照再切片赋值会抹掉期间到达的
     # 新消息，而"检查标志位 + 插入"分开做会让并发打开灌两遍历史。

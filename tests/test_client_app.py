@@ -335,3 +335,42 @@ class HistoryMergeTest(_Base):
             self.get(f"/client/conversation/{BOB}?history=5")
         texts = [e.text for e in conv.snapshot()]
         self.assertEqual(texts, ["旧", "新"], "历史要在前面")
+
+
+class HistoryAttributionTest(_Base):
+    """历史消息必须分得清谁说的。
+
+    实际反馈的问题：消息栏里看不出是发出的还是收到的。根因是历史合并把
+    每条都硬编码成 ``mine=False``，于是用户自己发过的话也排在左边、
+    和对方长得一模一样。
+    """
+
+    def _history(self, *rows):
+        from markovcryptor.client.messages import ParsedMessage
+        return [ParsedMessage(sender=s, text=t, at=1000.0 + i)
+                for i, (s, t) in enumerate(rows)]
+
+    def test_own_history_message_is_marked_mine(self):
+        with mock.patch.object(self.account, "load_history", return_value=
+                self._history((ALICE, "我说的"), (BOB, "他说的"))):
+            self.get(f"/client/conversation/{BOB}?history=5")
+        entries = self.account.conversations.get(BOB).snapshot()
+        by_text = {e.text: e.mine for e in entries}
+        self.assertTrue(by_text["我说的"], "自己发的必须在右边")
+        self.assertFalse(by_text["他说的"], "对方发的必须在左边")
+
+    def test_history_keeps_qq_timestamps(self):
+        with mock.patch.object(self.account, "load_history", return_value=
+                self._history((BOB, "带时间"))):
+            self.get(f"/client/conversation/{BOB}?history=5")
+        entry = self.account.conversations.get(BOB).snapshot()[0]
+        self.assertEqual(entry.at, 1000.0, "QQ 给的时间不能被丢掉")
+
+    def test_api_exposes_at_and_mine(self):
+        with mock.patch.object(self.account, "load_history", return_value=
+                self._history((ALICE, "我"), (BOB, "他"))):
+            body = self.get(f"/client/conversation/{BOB}?history=5").json()
+        mine_flags = {e["text"]: e["mine"] for e in body["entries"]}
+        self.assertEqual(mine_flags, {"我": True, "他": False})
+        self.assertTrue(all("at" in e for e in body["entries"]),
+                        "每条都要带时间，前端才画得出时间戳")
