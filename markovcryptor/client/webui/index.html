@@ -152,6 +152,72 @@
     border-radius: 8px; padding: 0 12px; cursor: pointer; font: inherit; font-size: 12px;
   }
   .composer button:disabled { opacity: .5; cursor: not-allowed; }
+  /* ---------- 设置 / 模型管理弹窗 ---------- */
+  .iconbtn {
+    margin-left: auto; background: none; border: 0; color: var(--dim);
+    font-size: 18px; cursor: pointer; padding: 4px 6px; border-radius: 6px;
+    line-height: 1;
+  }
+  .iconbtn:hover { background: var(--panel2); color: var(--text); }
+  .modal {
+    position: fixed; inset: 0; background: rgba(0,0,0,.5);
+    display: grid; place-items: center; z-index: 100; padding: 20px;
+  }
+  .sheet {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    width: min(720px, 100%); max-height: 86vh; display: flex;
+    flex-direction: column; overflow: hidden;
+  }
+  .sheet header {
+    display: flex; align-items: center; gap: 12px; padding: 14px 18px;
+    border-bottom: 1px solid var(--line);
+  }
+  .sheet header h3 { margin: 0; font-size: 15px; }
+  .sheet header .tabs { padding: 0; margin-left: auto; }
+  .sheet header .tabs button { padding: 6px 12px; }
+  .sheet .body { padding: 16px 18px; overflow-y: auto; }
+  .sheet footer {
+    display: flex; gap: 10px; justify-content: flex-end; padding: 12px 18px;
+    border-top: 1px solid var(--line);
+  }
+  .field { margin-bottom: 16px; }
+  .field label { display: block; font-size: 12px; color: var(--dim);
+                 margin-bottom: 6px; }
+  .field input[type="text"], .field input[type="number"] {
+    width: 100%; background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 8px; color: var(--text); padding: 8px 10px; font: inherit;
+  }
+  .field .row { display: flex; gap: 8px; }
+  .field .row input { flex: 1; }
+  .field .hint { font-size: 11px; color: var(--dim); margin-top: 5px; }
+  .folderlist { list-style: none; margin: 0; padding: 0; display: flex;
+                flex-direction: column; gap: 6px; }
+  .folderlist li {
+    display: flex; align-items: center; gap: 8px; background: var(--panel2);
+    border-radius: 8px; padding: 7px 10px; font-size: 12px;
+  }
+  .folderlist li .p { flex: 1; overflow: hidden; text-overflow: ellipsis;
+                      white-space: nowrap; direction: rtl; text-align: left; }
+  .folderlist li .warn { color: var(--warn); font-size: 11px; }
+  .btn {
+    background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+    border-radius: 8px; padding: 7px 14px; cursor: pointer; font: inherit;
+    font-size: 13px;
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.danger { color: var(--err); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .modellist { list-style: none; margin: 0; padding: 0;
+               display: flex; flex-direction: column; gap: 6px; }
+  .modellist li {
+    display: flex; align-items: center; gap: 10px; background: var(--panel2);
+    border-radius: 8px; padding: 9px 12px; font-size: 13px;
+  }
+  .modellist li .nm { flex: 1; min-width: 0; overflow: hidden;
+                      text-overflow: ellipsis; white-space: nowrap; }
+  .modellist li .tag { font-size: 11px; color: var(--dim); }
+  .modellist li .tag.ok { color: var(--ok); }
+  .modellist li .tag.bad { color: var(--err); }
   .toast {
     position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
     background: var(--err); color: #fff; padding: 8px 16px; border-radius: 8px;
@@ -167,6 +233,7 @@
         <div id="meName">未登录</div>
         <div class="uin" id="meUin"></div>
       </div>
+      <button class="iconbtn" id="btnSettings" title="设置" aria-label="设置">⚙</button>
     </div>
     <div class="tabs">
       <button id="tabRecent" aria-selected="true">最近</button>
@@ -175,8 +242,94 @@
     <div class="list" id="list"></div>
   </aside>
 
+  <div class="modal" id="modal" hidden>
+    <div class="sheet">
+      <header>
+        <h3 id="sheetTitle">设置</h3>
+        <div class="tabs">
+          <button id="tabGeneral" aria-selected="true">常规</button>
+          <button id="tabModels" aria-selected="false">文本模型</button>
+        </div>
+        <button class="iconbtn" id="btnCloseSheet" title="关闭" aria-label="关闭">✕</button>
+      </header>
+      <div class="body">
+        <div id="paneGeneral">
+          <div class="field">
+            <label>图片文件夹（握手与图片密文的底图来源）</label>
+            <ul class="folderlist" id="folderList"></ul>
+            <div class="row" style="margin-top:8px">
+              <button class="btn" id="btnAddFolder">添加文件夹…</button>
+              <input type="text" id="manualFolder" placeholder="或直接粘贴路径">
+              <button class="btn" id="btnAddManual">添加</button>
+            </div>
+            <div class="hint">只记录路径，不复制、不删除你的图片。队列关闭即清空。</div>
+          </div>
+          <div class="field">
+            <label>队列上限</label>
+            <input type="number" id="maxQueue" min="1" max="50">
+            <div class="hint">一次最多排几张待发图片。建议 5~10。</div>
+          </div>
+          <div class="field">
+            <label>取图方式</label>
+            <select id="pickMode" style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px 10px;font:inherit">
+              <option value="random">随机</option>
+              <option value="sequential">按文件名顺序</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>模型目录</label>
+            <div class="row">
+              <input type="text" id="modelFolder" placeholder="例如 D:\models">
+              <button class="btn" id="btnPickModelFolder">浏览…</button>
+            </div>
+            <div class="hint">存放 *.json 文本模型的目录。留空则只能用图片密文。</div>
+          </div>
+          <div class="hint" id="configPath"></div>
+        </div>
+
+        <div id="paneModels" hidden>
+          <ul class="modellist" id="modelList"></ul>
+          <div class="hint" id="modelEmpty">还没有模型。可以训练一个新的，或导入已有的 .json。</div>
+          <div class="field" style="margin-top:16px">
+            <label>训练新模型（需要一个 UTF-8 中文语料文件）</label>
+            <div class="row">
+              <input type="text" id="corpusPath" placeholder="语料文件完整路径">
+              <button class="btn" id="btnPickCorpus">浏览…</button>
+            </div>
+            <div class="row" style="margin-top:8px">
+              <input type="text" id="modelName" placeholder="模型名（留空用文件名）">
+              <button class="btn primary" id="btnTrain">开始训练</button>
+            </div>
+            <div class="hint">训练在服务端同步进行，几 MB 语料通常几秒完成。</div>
+          </div>
+          <div class="field">
+            <label>导入已有模型</label>
+            <div class="row">
+              <input type="text" id="importPath" placeholder=".json 模型文件完整路径">
+              <button class="btn" id="btnImport">导入</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <footer>
+        <button class="btn" id="btnCancelSheet">关闭</button>
+        <button class="btn primary" id="btnSaveSettings">保存设置</button>
+      </footer>
+    </div>
+  </div>
+
   <main>
-    <div class="empty" id="empty">选择一个好友开始</div>
+    <div class="empty" id="empty">
+      <div class="onboard" id="onboard">
+        <h3>还没有开始对话</h3>
+        <ol>
+          <li id="obQueue">图片文件夹：<b>未配置</b> —— 握手和图片密文都需要它</li>
+          <li id="obModel">文本模型：<b>未加载</b> —— 文本密文需要它</li>
+          <li>在左侧「好友」里点一个人，或在「最近」里等消息</li>
+        </ol>
+        <button class="ghost" id="btnOnboardSettings">打开设置</button>
+      </div>
+    </div>
     <div id="chat" hidden style="display:flex;flex-direction:column;height:100%">
       <div class="topbar">
         <div class="title" id="peerName"></div>
@@ -386,7 +539,51 @@ function bubbleFor(entry, peerName, showDate) {
   return wrap;
 }
 
-function renderConversation(data) {
+// 增量渲染状态。每 2.5 秒重建整棵 DOM 的代价是：用户滚上去看历史会被
+// 强行拉回底部、正在复制的选区丢失、消息越多越卡。所以按 seq 记住渲染到
+// 哪一条，只 append 新的。切会话时才整窗重建。
+const R = { peer: null, lastSeq: -1, firstSeq: null, count: 0 };
+
+function resetRender(peer) {
+  R.peer = peer;
+  R.lastSeq = -1;
+  R.firstSeq = null;
+  R.count = 0;
+  $("plainThread").innerHTML = "";
+  $("covertThread").innerHTML = "";
+}
+
+// 用户是否本来就贴着底部。只有这种情况才自动滚到底 —— 用户往上翻历史时
+// 新消息到达不该把他拽回去。
+function nearBottom(el) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+}
+
+function covertBubbleFor(entry, peerName, showDate) {
+  const cw = document.createElement("div");
+  cw.className = "msg " + (entry.mine ? "mine" : "them");
+  const cmeta = document.createElement("div");
+  cmeta.className = "meta";
+  const cwho = document.createElement("span");
+  cwho.className = "who";
+  cwho.textContent = entry.mine ? "我" : (peerName || "对方");
+  cmeta.appendChild(cwho);
+  const cstamp = fmtTime(entry.at, showDate);
+  if (cstamp) {
+    cmeta.append(document.createTextNode(" · "));
+    const t = document.createElement("span");
+    t.textContent = cstamp;
+    cmeta.appendChild(t);
+  }
+  cw.appendChild(cmeta);
+  const cb = document.createElement("div");
+  cb.className = "bubble";
+  cb.textContent = entry.covert.join("\n");
+  cw.appendChild(cb);
+  return cw;
+}
+
+function renderHeader(data) {
   $("peerName").textContent = data.name || data.peer;
   const st = $("peerState");
   st.innerHTML = "";
@@ -394,43 +591,63 @@ function renderConversation(data) {
   span.className = data.established ? "est" : "wait";
   span.textContent = data.established ? "信道已建立" : data.state_label;
   st.appendChild(span);
+}
 
+// 把 entries 里还没渲染的部分追加进去。整窗重建只发生在三种情况：
+// 切会话、历史被前插、服务端没给 seq。
+function renderConversation(data) {
+  const peer = data.peer;
+  if (R.peer !== peer) resetRender(peer);
+  renderHeader(data);
+
+  const entries = data.entries || [];
   const plain = $("plainThread");
   const covert = $("covertThread");
-  plain.innerHTML = "";
-  covert.innerHTML = "";
 
-  for (const entry of data.entries) {
-    const b = bubbleFor(entry);
-    if (!b) continue;
-    plain.appendChild(b);
-    // 密文窗只显示解出来的隐藏内容，独立于明文窗。
+  const seqs = entries.map((e) => e.seq);
+  const hasSeq = seqs.every((v) => typeof v === "number");
+  const firstSeq = hasSeq && seqs.length ? seqs[0] : null;
+  // 历史前插：最早那条比我们渲染过的还早，说明窗口头部多了内容。
+  const prepended = hasSeq && R.lastSeq >= 0 && firstSeq !== null &&
+                    firstSeq < R.firstSeq;
+  const shrank = entries.length < R.count;
+  const rebuild = !hasSeq || prepended || shrank;
+
+  const plainAtBottom = nearBottom(plain);
+  const covertAtBottom = nearBottom(covert);
+
+  if (rebuild) {
+    plain.innerHTML = "";
+    covert.innerHTML = "";
+    R.lastSeq = -1;
+    R.firstSeq = null;
+    R.count = 0;
+  }
+
+  const showDate = new Set(entries.filter((e) => e.at)
+    .map((e) => new Date(e.at * 1000).toDateString())).size > 1;
+
+  for (const entry of entries) {
+    if (!rebuild && typeof entry.seq === "number" && entry.seq <= R.lastSeq) {
+      continue;                       // 已经渲染过
+    }
+    const b = bubbleFor(entry, data.name, showDate);
+    if (b) plain.appendChild(b);
     if ((entry.covert || []).length) {
-      const cw = document.createElement("div");
-      cw.className = "msg " + (entry.mine ? "mine" : "them");
-      const cmeta = document.createElement("div");
-      cmeta.className = "meta";
-      const cwho = document.createElement("span");
-      cwho.className = "who";
-      cwho.textContent = entry.mine ? "我" : (data.name || "对方");
-      cmeta.appendChild(cwho);
-      const cstamp = fmtTime(entry.at, showDate);
-      if (cstamp) {
-        const sep = document.createTextNode(" · ");
-        const t = document.createElement("span");
-        t.textContent = cstamp;
-        cmeta.append(sep, t);
-      }
-      cw.appendChild(cmeta);
-      const cb = document.createElement("div");
-      cb.className = "bubble";
-      cb.textContent = entry.covert.join("\n");
-      cw.appendChild(cb);
-      covert.appendChild(cw);
+      covert.appendChild(covertBubbleFor(entry, data.name, showDate));
+    }
+    if (typeof entry.seq === "number") {
+      R.lastSeq = Math.max(R.lastSeq, entry.seq);
     }
   }
-  plain.scrollTop = plain.scrollHeight;
-  covert.scrollTop = covert.scrollHeight;
+  if (hasSeq && seqs.length) {
+    R.firstSeq = R.firstSeq === null ? seqs[0] : Math.min(R.firstSeq, seqs[0]);
+  }
+  R.count = plain.childElementCount;
+
+  // 只在用户本来就贴着底部时才跟随；往上翻历史时不该被拽回去。
+  if (plainAtBottom) plain.scrollTop = plain.scrollHeight;
+  if (covertAtBottom) covert.scrollTop = covert.scrollHeight;
 }
 
 async function openConversation(peer) {
@@ -508,6 +725,7 @@ async function refreshState() {
   }
   $("modelPick").disabled = (m.names || []).length === 0;
 
+  updateOnboard(data);
   renderList();
 
   // 当前会话如果开着，顺带刷新它的消息。
@@ -614,6 +832,323 @@ $("modelPick").onchange = async () => {
 $("input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send("text"); }
 });
+
+
+// ================================================================= 设置与模型
+
+const SET = { data: null, models: [] };
+
+function openSheet(tab) {
+  $("modal").hidden = false;
+  switchSheetTab(tab || "general");
+  loadSettings();
+  loadModelList();
+}
+
+function closeSheet() {
+  $("modal").hidden = true;
+}
+
+function switchSheetTab(tab) {
+  const general = tab === "general";
+  $("tabGeneral").setAttribute("aria-selected", general ? "true" : "false");
+  $("tabModels").setAttribute("aria-selected", general ? "false" : "true");
+  $("paneGeneral").hidden = !general;
+  $("paneModels").hidden = general;
+  // 「保存设置」只对常规页有意义；模型页的按钮各管各的。
+  $("btnSaveSettings").hidden = !general;
+}
+
+async function loadSettings() {
+  try {
+    const d = await api("/client/settings");
+    SET.data = d;
+    renderFolders(d);
+    $("maxQueue").value = d.max_queue;
+    $("pickMode").value = d.pick;
+    $("modelFolder").value = d.model_folder || "";
+    $("configPath").textContent = "配置文件：" + d.path;
+  } catch (e) {
+    toast("读取设置失败：" + e.message);
+  }
+}
+
+function renderFolders(d) {
+  const list = $("folderList");
+  list.innerHTML = "";
+  const usable = new Set(d.usable_folders || []);
+  if (!(d.cover_folders || []).length) {
+    const li = document.createElement("li");
+    li.innerHTML = '<span class="p" style="color:var(--dim)">还没有配置</span>';
+    list.appendChild(li);
+    return;
+  }
+  for (const folder of d.cover_folders) {
+    const li = document.createElement("li");
+    const span = document.createElement("span");
+    span.className = "p";
+    span.textContent = folder;
+    span.title = folder;
+    li.appendChild(span);
+    if (!usable.has(folder)) {
+      // 区分"没配"和"配了但没图/不存在"—— 两种情况下用户该做的事不一样。
+      const warn = document.createElement("span");
+      warn.className = "warn";
+      warn.textContent = "无可用图片";
+      li.appendChild(warn);
+    }
+    const del = document.createElement("button");
+    del.className = "btn danger";
+    del.textContent = "移除";
+    del.onclick = async () => {
+      const rest = (SET.data.cover_folders || []).filter((f) => f !== folder);
+      await saveSettings({ cover_folders: rest });
+      await loadSettings();
+    };
+    li.appendChild(del);
+    list.appendChild(li);
+  }
+}
+
+async function saveSettings(patch) {
+  try {
+    await api("/client/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    await refreshState();
+    return true;
+  } catch (e) {
+    toast("保存失败：" + e.message);
+    return false;
+  }
+}
+
+async function pickFolder(title, targetInput) {
+  try {
+    const d = await api("/client/settings/pick-folder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    if (d.ok && d.path) {
+      if (targetInput) targetInput.value = d.path;
+      return d.path;
+    }
+    if (d.cancelled) return null;
+    toast("系统没有提供选择对话框，请手动粘贴路径");
+    return null;
+  } catch (e) {
+    toast("打开选择框失败：" + e.message);
+    return null;
+  }
+}
+
+async function loadModelList() {
+  try {
+    const d = await api("/client/models");
+    SET.models = d.names || [];
+    const list = $("modelList");
+    list.innerHTML = "";
+    const all = (d.names || []).slice();
+    // 已加载的和失败的都要显示：失败的要能看见、能删掉，否则用户
+    // 永远不知道为什么少了一个模型。
+    const failed = (d.failed_names || []);
+    $("modelEmpty").hidden = all.length > 0 || failed.length > 0;
+    for (const name of all) {
+      list.appendChild(modelRow(name, true));
+    }
+    for (const name of failed) {
+      list.appendChild(modelRow(name, false));
+    }
+  } catch (e) {
+    toast("读取模型列表失败：" + e.message);
+  }
+}
+
+function modelRow(name, loaded) {
+  const li = document.createElement("li");
+  const nm = document.createElement("span");
+  nm.className = "nm";
+  nm.textContent = name;
+  li.appendChild(nm);
+  const tag = document.createElement("span");
+  tag.className = "tag " + (loaded ? "ok" : "bad");
+  tag.textContent = loaded ? "已加载" : "加载失败";
+  li.appendChild(tag);
+
+  const exp = document.createElement("button");
+  exp.className = "btn";
+  exp.textContent = "导出";
+  exp.onclick = async () => {
+    const dir = await pickFolder("选择导出到的文件夹", null);
+    if (!dir) return;
+    try {
+      const d = await api("/client/models/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, path: dir }),
+      });
+      toast("已导出到 " + d.path);
+    } catch (e) { toast(e.message); }
+  };
+  li.appendChild(exp);
+
+  const del = document.createElement("button");
+  del.className = "btn danger";
+  del.textContent = "删除";
+  del.onclick = async () => {
+    if (!confirm(`删除模型「${name}」？这会删掉磁盘上的 .json 文件。`)) return;
+    try {
+      await api("/client/models/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      toast("已删除 " + name);
+      await loadModelList();
+      await refreshState();
+    } catch (e) { toast(e.message); }
+  };
+  li.appendChild(del);
+  return li;
+}
+
+// ================================================================= 空状态引导
+
+function updateOnboard(data) {
+  const q = data.queue || {};
+  const m = data.models || {};
+  const qEl = $("obQueue");
+  if (qEl) {
+    qEl.innerHTML = "";
+    qEl.append("图片文件夹：");
+    const b = document.createElement("b");
+    if ((q.folders || 0) > 0) { b.textContent = `已配置 ${q.folders} 个`; b.style.color = "var(--ok)"; }
+    else b.textContent = "未配置";
+    qEl.appendChild(b);
+    qEl.append(" —— 握手和图片密文都需要它");
+  }
+  const mEl = $("obModel");
+  if (mEl) {
+    mEl.innerHTML = "";
+    mEl.append("文本模型：");
+    const b = document.createElement("b");
+    if ((m.loaded || 0) > 0) { b.textContent = `已加载 ${m.loaded} 个`; b.style.color = "var(--ok)"; }
+    else b.textContent = "未加载";
+    mEl.appendChild(b);
+    mEl.append(" —— 文本密文需要它");
+  }
+}
+
+// ================================================================= 事件绑定
+
+$("btnSettings").onclick = () => openSheet("general");
+$("btnCloseSheet").onclick = closeSheet;
+$("btnCancelSheet").onclick = closeSheet;
+$("tabGeneral").onclick = () => switchSheetTab("general");
+$("tabModels").onclick = () => switchSheetTab("models");
+$("modal").addEventListener("click", (e) => {
+  if (e.target === $("modal")) closeSheet();     // 点遮罩关闭
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("modal").hidden) closeSheet();
+});
+
+$("btnSaveSettings").onclick = async () => {
+  const ok = await saveSettings({
+    max_queue: Number($("maxQueue").value) || 8,
+    pick: $("pickMode").value,
+    model_folder: $("modelFolder").value.trim(),
+  });
+  if (ok) {
+    toast("设置已保存");
+    await loadSettings();
+    await loadModelList();
+  }
+};
+
+$("btnAddFolder").onclick = async () => {
+  const chosen = await pickFolder("选择图片文件夹", null);
+  if (!chosen) return;
+  const rest = [...(SET.data.cover_folders || []), chosen];
+  if (await saveSettings({ cover_folders: rest })) {
+    await loadSettings();
+    toast("已添加：" + chosen);
+  }
+};
+
+$("btnAddManual").onclick = async () => {
+  const value = $("manualFolder").value.trim();
+  if (!value) return;
+  const rest = [...(SET.data.cover_folders || []), value];
+  if (await saveSettings({ cover_folders: rest })) {
+    $("manualFolder").value = "";
+    await loadSettings();
+  }
+};
+
+$("btnPickModelFolder").onclick = async () => {
+  const chosen = await pickFolder("选择模型目录", $("modelFolder"));
+  if (!chosen) return;
+  if (await saveSettings({ model_folder: chosen })) {
+    toast("模型目录已更新");
+    await loadModelList();
+  }
+};
+
+$("btnPickCorpus").onclick = async () => {
+  const chosen = await pickFolder("选择语料所在文件夹", null);
+  if (!chosen) return;
+  // 目录选择器拿不到文件名，提示用户补全 —— 比假装选好了更诚实。
+  $("corpusPath").value = chosen + String.fromCharCode(92);
+  $("corpusPath").focus();
+  toast("请补全语料文件名");
+};
+
+$("btnTrain").onclick = async () => {
+  const path = $("corpusPath").value.trim();
+  if (!path) { toast("请填写语料文件路径"); return; }
+  const btn = $("btnTrain");
+  btn.disabled = true;
+  btn.textContent = "训练中…";
+  try {
+    const d = await api("/client/models/train", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, name: $("modelName").value.trim() }),
+    });
+    toast("训练完成：" + d.path);
+    $("corpusPath").value = "";
+    $("modelName").value = "";
+    await loadModelList();
+    await refreshState();
+  } catch (e) {
+    toast("训练失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "开始训练";
+  }
+};
+
+$("btnImport").onclick = async () => {
+  const path = $("importPath").value.trim();
+  if (!path) { toast("请填写模型文件路径"); return; }
+  try {
+    const d = await api("/client/models/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    toast("已导入：" + d.path);
+    $("importPath").value = "";
+    await loadModelList();
+    await refreshState();
+  } catch (e) { toast(e.message); }
+};
+
+$("btnOnboardSettings").onclick = () => openSheet("general");
 
 // 轮询：没有 WebSocket 推送到浏览器，用短轮询就够（单机、一个用户）。
 // 首次加载要显式兜住：未处理的 rejection 在控制台之外看不见，

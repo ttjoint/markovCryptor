@@ -125,6 +125,9 @@ class ModelLibrary:
                 "loaded": sum(1 for e in self._entries if e.loaded),
                 "failed": sum(1 for e in self._entries if e.error),
                 "names": [e.name for e in self._entries if e.loaded],
+                # 失败的名字也要报：用户要能看见、能删掉，否则永远不知道
+                # 为什么少了一个模型。
+                "failed_names": [e.name for e in self._entries if e.error],
                 "loading": self._loading,
             }
 
@@ -198,6 +201,22 @@ class ModelLibrary:
             if on_progress is not None:
                 on_progress(count, len(self))
         return count
+
+    def wait_idle(self, timeout: float = 30.0) -> bool:
+        """Block until no background load is running.
+
+        Needed before deleting a model file: on Windows an open handle makes the
+        delete fail with WinError 32, and the handle is held by the loader thread
+        that started a moment ago. Returns False on timeout rather than raising --
+        the caller decides whether a busy folder is fatal.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if not self._loading:
+                    return True
+            time.sleep(0.05)
+        return False
 
     def load_in_background(self) -> threading.Thread:
         """Load the remaining models without blocking the UI.

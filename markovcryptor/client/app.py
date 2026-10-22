@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import base64
 import logging
+import shutil
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -20,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ..core.errors import StegoError
 from ..observability import event
+from . import config
 from .account import Account
 
 #: High, unassigned, and distinct from the workbench (8731) so both can run.
@@ -66,6 +69,10 @@ def _entry_payload(entry) -> dict:
     is no URL to hand out. Base64 in JSON is the honest encoding for that.
     """
     return {
+        # ``seq`` is the arrival counter the browser uses for incremental
+        # rendering: it appends entries with a larger seq instead of rebuilding
+        # the whole thread every poll.
+        "seq": entry.seq,
         "at": entry.at,
         "mine": entry.mine,
         "text": entry.text,
@@ -286,12 +293,270 @@ def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
         channel.use(chosen)
         return JSONResponse({"ok": True, "selected": name})
 
+    # ------------------------------------------------------------------ 设置
+
+    @app.get("/client/settings")
+    def settings_get() -> JSONResponse:
+        """Current configuration, plus where it is stored.
+
+        The path is returned so the UI can show it: users reasonably want to know
+        what a program wrote where, and "it is somewhere in AppData" is not an
+        answer.
+        """
+        cfg = config.ClientConfig.load()
+        return JSONResponse({
+            "ok": True,
+            "path": str(config.default_config_path()),
+            "cover_folders": [str(p) for p in cfg.cover_folders],
+            "usable_folders": [str(p) for p in cfg.usable_cover_folders()],
+            "max_queue": cfg.max_queue,
+            "pick": cfg.pick,
+            "model_folder": str(cfg.model_folder) if cfg.model_folder else "",
+            "port": cfg.port,
+            "open_browser": cfg.open_browser,
+        })
+
+    @app.post("/client/settings")
+    async def settings_set(payload: dict) -> JSONResponse:
+        """Persist settings and apply the ones that can change at runtime.
+
+        The picture queue is rebuilt in place rather than restarting: pointing at
+        a different folder and being told "restart to apply" is a bad experience
+        for the single most likely thing a new user does.
+        """
+        cfg = config.ClientConfig.load()
+        if "cover_folders" in payload:
+            raw = payload.get("cover_folders") or []
+            if not isinstance(raw, list):
+                raise HTTPException(status_code=422, detail="cover_folders 必须是列表")
+            cfg.cover_folders = [Path(str(p)).expanduser()
+                                 for p in raw if str(p).strip()]
+        if "max_queue" in payload:
+            try:
+                cfg.max_queue = max(1, int(payload["max_queue"]))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=422,
+                                    detail="max_queue 必须是整数") from None
+        if "pick" in payload:
+            pick = str(payload["pick"]).lower()
+            if pick not in ("random", "sequential"):
+                raise HTTPException(status_code=422,
+                                    detail="pick 只能是 random 或 sequential")
+            cfg.pick = pick
+        if "model_folder" in payload:
+            folder = str(payload["model_folder"] or "").strip()
+            cfg.model_folder = Path(folder).expanduser() if folder else None
+        if "open_browser" in payload:
+            cfg.open_browser = bool(payload["open_browser"])
+
+        if not cfg.save():
+            raise HTTPException(
+                status_code=500,
+                detail=f"配置文件写不进去：{config.default_config_path()}")
+
+        # 立刻生效：换图片文件夹后队列要重新取样。
+        usable = cfg.usable_cover_folders()
+        account.queue.folders = usable
+        account.queue.max_items = cfg.max_queue
+        account.queue.pick = cfg.pick
+        account.queue.clear()
+        account.queue.replenish()
+
+        # 换模型目录后重新扫描。
+        if "model_folder" in payload:
+            from .models import ModelLibrary
+            if cfg.model_folder is not None and cfg.model_folder.is_dir():
+                account.models = ModelLibrary(cfg.model_folder)
+                account.models.scan()
+                account.models.load_in_background()
+            else:
+                account.models = None
+
+        return JSONResponse({"ok": True,
+                             "usable_folders": [str(p) for p in usable],
+                             "queue": account.queue.stats()})
+
+    @app.post("/client/settings/pick-folder")
+    async def pick_folder(payload: dict) -> JSONResponse:
+        """Open a native folder chooser on the machine running the server.
+
+        Typing an absolute path into a text box is the most error-prone step for
+        a normal user, and the server runs on the same machine as the browser, so
+        a real dialog is both possible and much better.
+        """
+        title = str(payload.get("title") or "选择文件夹")
+        chosen = _pick_folder(title)
+        if chosen is None:
+            return JSONResponse({"ok": False, "cancelled": True, "path": ""})
+        return JSONResponse({"ok": True, "path": chosen})
+
+    # -------------------------------------------------------------- 模型管理
+
+    @app.post("/client/models/train")
+    async def models_train(payload: dict) -> JSONResponse:
+        """Train a model from a corpus file and save it into the model folder.
+
+        Runs synchronously: a few MB of Chinese text trains in seconds, and
+        returning early would let the UI show a model that is not ready yet.
+        """
+        source = str(payload.get("path") or "").strip()
+        name = str(payload.get("name") or "").strip()
+        if not source:
+            raise HTTPException(status_code=422, detail="缺少语料文件路径")
+        corpus_path = Path(source).expanduser()
+        if not corpus_path.is_file():
+            raise HTTPException(status_code=404,
+                                detail=f"语料文件不存在：{corpus_path}")
+
+        folder = _model_folder(account)
+        if folder is None:
+            raise HTTPException(status_code=409,
+                                detail="还没有配置模型目录，请先在设置里指定")
+
+        try:
+            size = int(payload.get("vocabulary_size") or 3000)
+        except (TypeError, ValueError):
+            size = 3000
+
+        try:
+            from ..model import MarkovModel
+
+            text = corpus_path.read_text(encoding="utf-8", errors="replace")
+            model = MarkovModel.train(text, vocabulary_size=max(64, size),
+                                      name=name or corpus_path.stem)
+            target = folder / f"{name or corpus_path.stem}.json"
+            model.save(target)
+        except ValueError as exc:
+            raise HTTPException(status_code=422,
+                                detail=f"训练失败：{exc}") from None
+        except OSError as exc:
+            raise HTTPException(status_code=500,
+                                detail=f"写入模型失败：{exc}") from None
+        except Exception as exc:                    # noqa: BLE001
+            event("models", "train_failed", level=logging.ERROR, error=exc)
+            raise HTTPException(status_code=500,
+                                detail=f"训练失败：{exc}") from None
+
+        account.models.scan()
+        account.models.load_in_background()
+        return JSONResponse({"ok": True, "path": str(target)})
+
+    @app.post("/client/models/import")
+    async def models_import(payload: dict) -> JSONResponse:
+        """Copy an existing model file into the model folder."""
+        source = str(payload.get("path") or "").strip()
+        if not source:
+            raise HTTPException(status_code=422, detail="缺少模型文件路径")
+        src = Path(source).expanduser()
+        if not src.is_file():
+            raise HTTPException(status_code=404, detail=f"文件不存在：{src}")
+
+        folder = _model_folder(account)
+        if folder is None:
+            raise HTTPException(status_code=409,
+                                detail="还没有配置模型目录，请先在设置里指定")
+        try:
+            target = folder / src.name
+            if src.resolve() != target.resolve():
+                shutil.copy2(src, target)
+        except OSError as exc:
+            raise HTTPException(status_code=500,
+                                detail=f"导入失败：{exc}") from None
+
+        account.models.scan()
+        account.models.load_in_background()
+        return JSONResponse({"ok": True, "path": str(target)})
+
+    @app.post("/client/models/export")
+    async def models_export(payload: dict) -> JSONResponse:
+        """Copy a model out to a directory the user chooses."""
+        name = str(payload.get("name") or "").strip()
+        target_dir = str(payload.get("path") or "").strip()
+        if not name or not target_dir:
+            raise HTTPException(status_code=422, detail="需要模型名和目标目录")
+        entries = account.models.entries() if account.models else []
+        entry = next((e for e in entries
+                      if e.name == name or e.path.stem == name), None)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"没有模型叫 {name!r}")
+        try:
+            dest = Path(target_dir).expanduser() / entry.path.name
+            shutil.copy2(entry.path, dest)
+        except OSError as exc:
+            raise HTTPException(status_code=500,
+                                detail=f"导出失败：{exc}") from None
+        return JSONResponse({"ok": True, "path": str(dest)})
+
+    @app.post("/client/models/delete")
+    async def models_delete(payload: dict) -> JSONResponse:
+        """Delete a model file from the model folder.
+
+        Only files *inside* the configured model folder are eligible: a local API
+        should not be able to delete an arbitrary path just because the UI asked.
+        """
+        name = str(payload.get("name") or "").strip()
+        folder = _model_folder(account)
+        if folder is None:
+            raise HTTPException(status_code=409, detail="还没有配置模型目录")
+        entries = account.models.entries()
+        entry = next((e for e in entries
+                      if e.name == name or e.path.stem == name), None)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"没有模型叫 {name!r}")
+        try:
+            entry.path.resolve().relative_to(folder.resolve())
+        except ValueError:
+            raise HTTPException(status_code=409,
+                                detail="只能删除模型目录里的文件") from None
+        # 后台加载线程可能正握着这个文件的句柄；Windows 上会 WinError 32。
+        # 先等它放手，再删 —— 否则用户刚训练完就删会失败，且提示莫名其妙。
+        account.models.wait_idle(timeout=30.0)
+        try:
+            entry.path.unlink()
+        except OSError as exc:
+            raise HTTPException(status_code=500,
+                                detail=f"删除失败（文件可能正被占用）：{exc}") from None
+        account.models.scan()
+        return JSONResponse({"ok": True})
+
     if webui_dir is not None:
         # Mounted last so it does not shadow the API routes above.
         app.mount("/", StaticFiles(directory=str(webui_dir), html=True),
                   name="webui")
 
     return app
+
+
+def _model_folder(account: Account) -> Path | None:
+    """The configured model folder, if it exists."""
+    lib = account.models
+    if lib is None or lib.folder is None:
+        return None
+    folder = Path(lib.folder)
+    return folder if folder.is_dir() else None
+
+
+def _pick_folder(title: str) -> str | None:
+    """Native folder picker on the server's machine.
+
+    Uses tkinter, which ships with the bundled Python. Returns ``None`` when no
+    display is available (the UI then lets the user type a path) rather than
+    raising: a stripped build must not make settings unusable.
+    """
+    try:
+        import tkinter
+        from tkinter import filedialog
+
+        root = tkinter.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        chosen = filedialog.askdirectory(title=title)
+        root.destroy()
+        return chosen or None
+    except Exception as exc:                        # noqa: BLE001 - optional
+        event("client", "folder_picker_unavailable", level=logging.WARNING,
+              error=exc)
+        return None
 
 
 def _merge_history(account: Account, conversation, peer: str, count: int) -> None:

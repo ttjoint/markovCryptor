@@ -283,3 +283,56 @@ class PackageDataTest(unittest.TestCase):
         body = ui.read_text(encoding="utf-8")
         self.assertIn("display: none !important", body,
                       "hidden 必须配 !important，否则自带 display 会压掉它")
+
+
+class WebuiSyntaxTest(unittest.TestCase):
+    """界面 JS 必须语法正确。
+
+    实际踩过：用脚本改 index.html 时反斜杠被多重转义，写出
+    `join("` + 真换行，整个 <script> 直接 SyntaxError —— 页面一片空白，
+    没有任何错误提示（浏览器只在控制台里说）。这类错误只能靠真正解析
+    一次 JS 来防。
+    """
+
+    def _script(self) -> str:
+        import re
+        root = Path(__file__).resolve().parent.parent
+        html = (root / "markovcryptor" / "client" / "webui" / "index.html")
+        body = html.read_text(encoding="utf-8")
+        match = re.search(r"<script>(.*?)</script>", body, re.S)
+        self.assertIsNotNone(match, "找不到 <script> 块")
+        return match.group(1)
+
+    def test_no_raw_newline_inside_string_literal(self):
+        """字符串字面量里不能出现未转义的换行。"""
+        script = self._script()
+        for lineno, line in enumerate(script.splitlines(), 1):
+            stripped = line.rstrip()
+            # 以 .join(" 或 = " 结尾且引号没闭合的行，就是被换行劈开的字符串。
+            if stripped.endswith('.join("') or stripped.endswith('= "'):
+                self.fail(f"第 {lineno} 行字符串没闭合：{line!r}")
+
+    def test_no_quadruple_backslash(self):
+        """四个连续反斜杠在 JS 里是无效转义，多半是脚本写入时多加了一层。"""
+        script = self._script()
+        self.assertNotIn(chr(92) * 4, script,
+                         "出现四个连续反斜杠，检查是不是转义时多套了一层")
+
+    def test_script_parses_as_javascript(self):
+        """真的用 node 解析一次 —— 这是唯一可靠的验证。"""
+        import shutil
+        import subprocess
+        import tempfile
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("没有 node，跳过 JS 语法检查")
+        script = self._script()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ui.js"
+            path.write_text(script, encoding="utf-8")
+            result = subprocess.run([node, "--check", str(path)],
+                                    capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace")
+        self.assertEqual(result.returncode, 0,
+                         f"JS 语法错误：{result.stderr[-600:]}")
