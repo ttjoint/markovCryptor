@@ -59,3 +59,9 @@ markovcryptor = ["webui/*.html", "client/webui/*.html", "covers/*.jpg"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# 打包验证会真的联网下载多个 Python 版本的 wheel（单条 196 秒，占全量
+# 三分之二）。日常开发不需要它；发版前用 `-m slow` 单独跑。
+markers = [
+    "slow: 会联网或真打包的测试，默认跳过（用 -m slow 运行）",
+]
+addopts = "-m 'not slow'"

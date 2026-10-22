@@ -111,7 +111,7 @@ def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
             "uin": account.uin,
             "ready": account.ready,
             "unread_total": account.conversations.unread_total(),
-            "queue": account.queue.stats(),
+            "queue": {**account.queue.stats(), "items": _queue_items(account)},
             "models": (account.models.status() if account.models is not None
                        else {"total": 0, "loaded": 0, "folder": "",
                              "names": [], "loading": False}),
@@ -235,7 +235,25 @@ def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
 
     @app.get("/client/queue")
     def queue_state() -> JSONResponse:
-        return JSONResponse({"ok": True, **account.queue.stats()})
+        """Queue stats plus a thumbnail of every pending picture.
+
+        The user needs to see *which* pictures are queued, not just how many:
+        "8/8" tells them nothing about whether the right photo is next.
+        """
+        return JSONResponse({"ok": True, **account.queue.stats(),
+                             "items": _queue_items(account)})
+
+    @app.post("/client/queue/remove")
+    async def queue_remove(payload: dict) -> JSONResponse:
+        """Drop one picture from the queue without sending it."""
+        try:
+            index = int(payload.get("index"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="index 必须是整数") from None
+        if not account.queue.remove(index):
+            raise HTTPException(status_code=404, detail=f"队列里没有第 {index} 张")
+        return JSONResponse({"ok": True, **account.queue.stats(),
+                             "items": _queue_items(account)})
 
     @app.post("/client/queue/refill")
     def queue_refill() -> JSONResponse:
@@ -243,7 +261,8 @@ def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
         added = account.queue.replenish()
         answered = account.retry_handshakes()
         return JSONResponse({"ok": True, "added": added, "answered": answered,
-                             **account.queue.stats()})
+                             **account.queue.stats(),
+                             "items": _queue_items(account)})
 
     @app.get("/client/models")
     def models_state() -> JSONResponse:
@@ -390,6 +409,20 @@ def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
             return JSONResponse({"ok": False, "cancelled": True, "path": ""})
         return JSONResponse({"ok": True, "path": chosen})
 
+    @app.post("/client/settings/pick-file")
+    async def pick_file(payload: dict) -> JSONResponse:
+        """Native file chooser -- used for corpus and model files.
+
+        Typing a full path by hand was the only way before, which is exactly the
+        step users get wrong.
+        """
+        title = str(payload.get("title") or "选择文件")
+        spec = str(payload.get("filter") or "")
+        chosen = _pick_file(title, spec)
+        if chosen is None:
+            return JSONResponse({"ok": False, "cancelled": True, "path": ""})
+        return JSONResponse({"ok": True, "path": chosen})
+
     # -------------------------------------------------------------- 模型管理
 
     @app.post("/client/models/train")
@@ -527,6 +560,41 @@ def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
     return app
 
 
+#: 缩略图边长。队列里一次最多十张，原图直接内联会让 /client/state 变成
+#: 几 MB 的响应，而 2.5 秒轮询一次。
+_THUMB_SIZE = 96
+
+
+def _thumbnail(raw: bytes) -> str | None:
+    """A small JPEG data URL for the queue list."""
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw)) as image:
+            image.thumbnail((_THUMB_SIZE, _THUMB_SIZE))
+            if image.mode not in ("RGB", "L"):
+                image = image.convert("RGB")
+            buffer = io.BytesIO()
+            image.save(buffer, "JPEG", quality=70)
+        return "data:image/jpeg;base64," + base64.b64encode(
+            buffer.getvalue()).decode("ascii")
+    except Exception:                               # noqa: BLE001 - cosmetic
+        return None
+
+
+def _queue_items(account: Account) -> list[dict]:
+    """Pending pictures as ``{name, thumb}``, oldest first."""
+    items = []
+    for item in account.queue.preview():
+        items.append({
+            "name": Path(item.path).name if getattr(item, "path", None) else "",
+            "thumb": _thumbnail(item.raw),
+        })
+    return items
+
+
 def _model_folder(account: Account) -> Path | None:
     """The configured model folder, if it exists."""
     lib = account.models
@@ -555,6 +623,72 @@ def _pick_folder(title: str) -> str | None:
         return None
 
 
+def _pick_file_win32(title: str, filter: str = "") -> str | None:
+    """``GetOpenFileNameW`` -- same pointer caveat as the folder picker."""
+    import ctypes
+    from ctypes import wintypes
+
+    class OPENFILENAMEW(ctypes.Structure):
+        _fields_ = [
+            ("lStructSize", wintypes.DWORD),
+            ("hwndOwner", wintypes.HWND),
+            ("hInstance", wintypes.HINSTANCE),
+            ("lpstrFilter", wintypes.LPCWSTR),
+            ("lpstrCustomFilter", wintypes.LPWSTR),
+            ("nMaxCustFilter", wintypes.DWORD),
+            ("nFilterIndex", wintypes.DWORD),
+            ("lpstrFile", wintypes.LPWSTR),
+            ("nMaxFile", wintypes.DWORD),
+            ("lpstrFileTitle", wintypes.LPWSTR),
+            ("nMaxFileTitle", wintypes.DWORD),
+            ("lpstrInitialDir", wintypes.LPCWSTR),
+            ("lpstrTitle", wintypes.LPCWSTR),
+            ("Flags", wintypes.DWORD),
+            ("nFileOffset", wintypes.WORD),
+            ("nFileExtension", wintypes.WORD),
+            ("lpstrDefExt", wintypes.LPCWSTR),
+            ("lCustData", wintypes.LPARAM),
+            ("lpfnHook", ctypes.c_void_p),
+            ("lpTemplateName", wintypes.LPCWSTR),
+        ]
+
+    comdlg32 = ctypes.windll.comdlg32
+    ole32 = ctypes.windll.ole32
+
+    comdlg32.GetOpenFileNameW.restype = wintypes.BOOL
+    comdlg32.GetOpenFileNameW.argtypes = [ctypes.POINTER(OPENFILENAMEW)]
+    ole32.CoInitialize(None)
+    try:
+        buffer = ctypes.create_unicode_buffer(4096)
+        # 过滤器用  分隔，最后再补一个  结束。
+        spec = filter or "所有文件 (*.*)\0*.*\0\0"
+        info = OPENFILENAMEW()
+        info.lStructSize = ctypes.sizeof(OPENFILENAMEW)
+        info.hwndOwner = None
+        info.lpstrFilter = spec
+        info.nFilterIndex = 1
+        info.lpstrFile = ctypes.cast(buffer, wintypes.LPWSTR)
+        info.nMaxFile = len(buffer)
+        info.lpstrTitle = title
+        # OFN_FILEMUSTEXIST(0x1000) | OFN_PATHMUSTEXIST(0x800)
+        info.Flags = 0x1000 | 0x800
+        if not comdlg32.GetOpenFileNameW(ctypes.byref(info)):
+            return None
+        return buffer.value or None
+    finally:
+        ole32.CoUninitialize()
+
+
+def _pick_file(title: str, filter: str = "") -> str | None:
+    """Native file picker. Returns None when cancelled or unavailable."""
+    try:
+        return _pick_file_win32(title, filter)
+    except Exception as exc:                        # noqa: BLE001 - optional
+        event("client", "file_picker_unavailable", level=logging.WARNING,
+              error=exc)
+        return None
+
+
 def _pick_folder_win32(title: str) -> str | None:
     """``SHBrowseForFolderW`` with a caller-supplied title."""
     import ctypes
@@ -574,6 +708,18 @@ def _pick_folder_win32(title: str) -> str | None:
 
     shell32 = ctypes.windll.shell32
     ole32 = ctypes.windll.ole32
+
+    # **必须声明指针返回值。** ctypes 的默认 restype 是 c_long（32 位），
+    # 64 位进程里 SHBrowseForFolderW 返回的 ITEMIDLIST* 高 32 位会被截断，
+    # 再传给 SHGetPathFromIDListW 必然失败 —— 对话框弹出来了、用户也选了，
+    # 但函数返回 None，界面表现为"点了没反应"。这是实际反馈的 bug。
+    shell32.SHBrowseForFolderW.restype = ctypes.c_void_p
+    shell32.SHBrowseForFolderW.argtypes = [ctypes.POINTER(BROWSEINFOW)]
+    shell32.SHGetPathFromIDListW.restype = wintypes.BOOL
+    shell32.SHGetPathFromIDListW.argtypes = [ctypes.c_void_p,
+                                             wintypes.LPWSTR]
+    ole32.CoTaskMemFree.restype = None
+    ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
 
     # 对话框要求当前线程已初始化 COM；uvicorn 的工作线程通常没有。
     ole32.CoInitialize(None)
@@ -624,12 +770,18 @@ def _merge_history(account: Account, conversation, peer: str, count: int) -> Non
         return
 
     merged: list = []
+    #: (entry, urls) —— 插入之后再下载，界面先出内容、图随后补上。
+    pending_images: list = []
+
     for item in parsed:
-        # 历史里的图片**不下载**：拉 20 条历史顺带下几十张图既慢又占内存，
-        # 而用户多半只是想知道"之前聊了什么"。但要留一行占位，否则这些
-        # 消息会变成完全空白的条目 —— 界面上看着像丢了消息。
         placeholders = list(item.unsupported)
-        if item.images and not item.text.strip():
+        urls = [ref.locate() for ref in item.images]
+        urls = [u for u in urls if u]
+
+        # 图片要真的显示出来（用户明确要求：历史里的图也要看得到）。
+        # 下载不在这里做 —— 二十条历史可能带几十张图，同步拉会把"点开好友"
+        # 变成一次等待。先记占位，插进时间线后再后台补图。
+        if urls and not item.text.strip():
             placeholders.append("对方发送了 图片")
 
         if not (item.text.strip() or placeholders):
@@ -639,12 +791,38 @@ def _merge_history(account: Account, conversation, peer: str, count: int) -> Non
         # 硬编码 mine=False 会让用户自己发过的话也显示在左边、和对方一模一样,
         # 界面上根本分不出谁说的 —— 这正是实际反馈的问题。
         mine = bool(account.uin) and item.sender == account.uin
-        merged.append(Entry(
+        entry = Entry(
             mine=mine,
             text=item.text,
             unsupported=tuple(placeholders),
             at=item.at or 0.0,
-        ))
+        )
+        merged.append(entry)
+        if urls:
+            pending_images.append((entry, urls))
+
     # 去重与插入在会话的锁内一次完成：先快照再切片赋值会抹掉期间到达的
     # 新消息，而"检查标志位 + 插入"分开做会让并发打开灌两遍历史。
-    conversation.prepend_history(merged)
+    if conversation.prepend_history(merged) and pending_images:
+        _download_history_images(account, pending_images)
+
+
+def _download_history_images(account: Account, pending: list) -> None:
+    """Fetch history pictures in the background and attach them to entries.
+
+    Mutating ``entry.images`` in place keeps each entry's ``seq``, so the browser
+    appends the picture instead of rebuilding the whole thread (and losing the
+    user's scroll position).
+    """
+    cache = getattr(account, "images", None)
+    if cache is None:
+        return
+
+    def worker():
+        for entry, urls in pending:
+            raws = tuple(raw for raw in (cache.get(u) for u in urls) if raw)
+            if raws:
+                entry.images = raws
+
+    import threading
+    threading.Thread(target=worker, name="history-images", daemon=True).start()

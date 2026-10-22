@@ -444,9 +444,27 @@ class Terminal:
             try:
                 result, display = self._inspect_image(raw)
             except Exception as exc:            # noqa: BLE001 - never surface carrier bugs
-                notes.append(f"图片 {index + 1}：处理失败——{exc}")
-                event("terminal", "image_failed", level=logging.WARNING,
+                # 绝不把 reedsolo / PIL 的原始报错甩到聊天窗口里。
+                # 实际踩过：对方发了个收藏的 GIF 表情包，界面显示
+                # "step=96.0: Y: 引导头解码失败…Too many (or few) errors
+                # found by Chien Search…"。用户看到的是我们内部的纠错算法
+                # 细节，既看不懂、又泄露了实现。
+                event("terminal", "image_failed", level=logging.DEBUG,
                       id=self.id, index=index + 1, error=exc)
+
+                # 要区分两件事，它们的处理方式相反：
+                #
+                # 1. **图能正常打开**（表情包、截图、动图）—— 只是里面没有
+                #    我们的隐藏帧。这是绝大多数情况，也是完全正常的：
+                #    别人发图不是来跟我们通信的。静默，照常显示。
+                # 2. **图根本打不开**（数据损坏、截断、不是图片）—— 这值得
+                #    告诉用户，否则一张坏图会无声无息地消失。
+                opened = _try_open(raw)
+                if opened is not None:
+                    shown.append(opened)
+                else:
+                    notes.append(
+                        f"图片 {index + 1}：无法读取（文件可能已损坏）")
                 continue
             if display is not None:
                 shown.append(display)
@@ -521,7 +539,7 @@ class Terminal:
         display = _try_open(raw)
         try:
             payload = self._extract_bytes(raw)
-        except (NoHiddenFrame, CarrierDamaged) as exc:
+        except (NoHiddenFrame, CarrierDamaged, gif_stego.GifStegoError) as exc:
             # A photo that was never stego and a frame damaged past recovery are
             # indistinguishable at the ECC layer (a wrong key looks exactly like
             # a mangled lead), and the first case is by far the common one. So
@@ -594,9 +612,18 @@ class Terminal:
             # Answer automatically -- but only with a picture this side owns.
             # If there is none yet, the request is held and the state stays
             # WAITING; the UI says so and retries when the user queues a picture.
+            #
+            # On an established session this is a *rekey*: the old keys stay
+            # usable, so "等待本端上传图片" does not mean the channel is down.
+            was_established = was is State.ESTABLISHED
             self._auto_respond(peer_public)
             if self.pending_request is None:
                 return _Inspected(handshake=summary + "，已自动回发")
+            if was_established:
+                return _Inspected(
+                    handshake=summary + "，等待本端上传图片后自动回复"
+                              "（旧密钥仍可用）"
+                )
             return _Inspected(
                 handshake=summary + "，等待本端上传图片后自动回复"
             )
@@ -635,7 +662,10 @@ class Terminal:
             stego = self._embed_bytes(envelope, cover)
         except StegoError as exc:
             # Our own picture is too small for a 38-byte handshake. Keep the
-            # request pending so a bigger one can be used later.
+            # request pending so a bigger one can be used later, and throw away
+            # the prepared response -- committing it now would install keys for
+            # a reply that never left the machine.
+            self.session.discard_answer()
             self.pending_request = peer_public
             event("terminal", "handshake_cover_failed", level=logging.WARNING,
                   id=self.id, peer=target, error=exc)
@@ -643,6 +673,8 @@ class Terminal:
         self.pending_request = None
         event("terminal", "handshake_auto_response", id=self.id, peer=target)
         self.network.send(self.id, target, _encode_packet(Packet(images=(stego,))))
+        # The packet is out; now the new keys become the live ones.
+        self.session.commit_answer()
 
     def retry_pending(self) -> bool:
         """Answer a held handshake request now that a cover may be available.

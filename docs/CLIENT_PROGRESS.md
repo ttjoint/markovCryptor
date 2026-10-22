@@ -767,3 +767,78 @@ import 真实依赖、查文件而非只 import、认单文件模块。
 
 **「在打包机上验证通过」不等于「包是好的」。** 打包机的环境总是比目标机器
 丰富。凡是自检，必须在尽可能接近目标机器的环境里跑 —— 做不到就显式隔离。
+
+---
+
+## 重握手（Rekey）语义修正（2026-10-22）
+
+### 问题
+
+用户提出：*"由于我们的通信无状态，应支持对方随时用新的密钥重新握手"*。
+
+实测发现**已有的信道会被一次重握手打死**：
+
+```
+建立: alice=已建立 bob=已建立
+无图重握手后: alice=等待对端回复 bob=等待对端回复
+  alice.pending_request: True
+InvalidInput: 会话等待对端回复，不能发送密文
+```
+
+`Session.absorb()` 收到 `Mode.REQUEST` 时**无条件**覆盖 `peer_public` 并把
+state 改成 `WAITING`。于是对端一重握手，本端立刻失去可用密钥 —— 而本端可能
+正握着待发图片队列为空，回复发不出去，两边永久卡在"等待对端回复"。
+
+**根因是概念错误**：把"收到重握手请求"当成了"密钥已经更换"。实际上在对方
+拿到我们的回复之前，旧密钥对双方都还有效。
+
+### 修法：暂存（staging）+ 原子切换
+
+`Session` 新增暂存字段 `_staged_private_key` / `_staged_my_public` /
+`_staged_peer_public` / `_staged_outgoing`，以及 `rekeying` 属性。
+
+规则：
+- **已建立时收到 REQUEST** → 只暂存对端新公钥，**保持 ESTABLISHED**，
+  旧密钥继续收发
+- **`begin()` 在已建立时** → 只生成并暂存自己的新密钥对，不动现役密钥
+- **`answer()` 不再修改现役会话**，只准备材料（`_staged_outgoing`）；
+  调用方在**报文真正发出后**才调 `commit_answer()` 落盘
+- 嵌图失败时调 `discard_answer()`，现役会话毫发无伤
+- 新握手完成时 `generation` 才 +1
+
+`_auto_respond()` 相应改成"发送成功后 commit"。`_on_handshake` 在重握手挂起时
+提示"（旧密钥仍可用）"，避免用户误以为信道断了。
+
+### 为什么 answer() 必须两阶段
+
+回复装在图片里，而图片可能装不下 38 字节握手。原来 `answer()` 立刻 `_derive()`
+—— 密钥换了、回复却没发出，对端还在旧密钥上，**双方永久错位**。
+拆成 `answer()` + `commit_answer()` / `discard_answer()` 后，只有发送成功才切换。
+
+### 实测
+
+| 场景 | 结果 |
+| --- | --- |
+| 重握手 + 本端无图 | 双方仍「已建立」，密文照常收发 ✓ |
+| 补图后 `retry_pending` | `generation` 1→2，双方同步，双向密文通 ✓ |
+| 连续 3 次重握手 | 每轮都可用 ✓ |
+| 回复因图太小失败 | `generation` 不变，旧会话完好 ✓ |
+
+测试：`RekeyTest` 4 项。注入「收到 REQUEST 立刻覆盖密钥」验证 2 项能 FAIL。
+修正了 `test_fresh_handshake_means_old_body_fails`：旧密文失效的时机是重握手
+**完成**时，不是收到请求时。
+
+### 顺带：全量回归提速
+
+`--durations` 显示单条测试吃掉 196 秒：
+
+```
+196.54s  test_qq_tools.py::PackagingTest::test_generated_wheels_cover_declared_targets
+```
+
+它真下载 cp311/cp314/cp315 的 numpy/pillow wheel，占全量 63%，与日常开发无关。
+
+处理：`pyproject.toml` 加 `slow` marker 且 `addopts = "-m 'not slow'"`，
+给两条真联网/真打包的测试打上标记。发版前用 `-m slow` 单独跑。
+
+**310 秒 → 106 秒（快 3 倍）**，623 passed（2 条 slow 默认跳过）。

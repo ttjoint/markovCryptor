@@ -129,6 +129,23 @@
   .msg.them .bubble { border-top-left-radius: 3px; }
   .msg.mine .bubble { border-top-right-radius: 3px; }
   .msg.mine .bubble { background: #2e4a63; border-color: #3a5c78; }
+  /* 聊天图片：限高限宽、圆角、点击可看大图。不限高的话一张竖图就能把
+     整条会话顶出屏幕。 */
+  .bubble img {
+    display: block; max-width: 100%; max-height: 240px;
+    border-radius: 8px; margin-top: 6px; cursor: zoom-in;
+    object-fit: contain; background: rgba(0,0,0,.15);
+  }
+  .bubble img:first-child { margin-top: 0; }
+  /* 点开的大图 */
+  .lightbox {
+    position: fixed; inset: 0; z-index: 300; background: rgba(0,0,0,.85);
+    display: grid; place-items: center; cursor: zoom-out; padding: 24px;
+  }
+  .lightbox img {
+    max-width: 100%; max-height: 100%; border-radius: 6px;
+    box-shadow: 0 12px 48px rgba(0,0,0,.6);
+  }
   @media (prefers-color-scheme: light) {
     .msg.mine .bubble { background: #d6e8f7; border-color: #b9d5ec; }
   }
@@ -140,11 +157,34 @@
   .covert-thread .bubble { background: #2b2333; border: 1px solid #43324f; }
 
   /* ---------- 底部：输入 + 队列 ---------- */
+  .queuegrid {
+    display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 4px;
+    min-height: 0;
+  }
+  .queuegrid:empty { display: none; }
+  .qthumb {
+    position: relative; flex: 0 0 auto; width: 56px; height: 56px;
+    border-radius: 8px; overflow: hidden; border: 1px solid var(--line);
+    background: var(--panel2);
+  }
+  .qthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .qthumb .x {
+    position: absolute; top: 2px; right: 2px; width: 18px; height: 18px;
+    border-radius: 50%; border: 0; cursor: pointer; padding: 0;
+    background: rgba(0,0,0,.65); color: #fff; font-size: 12px; line-height: 18px;
+    text-align: center;
+  }
+  .qthumb .x:hover { background: var(--err); }
+  .qthumb .n {
+    position: absolute; left: 3px; bottom: 2px; font-size: 10px;
+    color: #fff; text-shadow: 0 1px 2px #000;
+  }
   .composer {
     flex: 0 0 auto;                 /* 输入区固定，永远不被消息区挤掉 */
     border-top: 1px solid var(--line); background: var(--panel);
     padding: 10px 16px; display: flex; flex-direction: column; gap: 8px;
   }
+  /* 待发队列：一排小缩略图，每张右上角一个叉。 */
   .queuebar { display: flex; align-items: center; gap: 10px; font-size: 12px;
               color: var(--dim); flex-wrap: wrap; }
   .queuebar .pill {
@@ -392,6 +432,7 @@
           <button id="btnHandshake">发起密钥交换</button>
           <span id="queueHint" class="sub"></span>
         </div>
+        <div class="queuegrid" id="queueGrid"></div>
         <div class="queuebar">
           <span class="pill" id="modelStat">模型 0/0</span>
           <select id="modelPick" title="用于加密发出的文本；收方向会尝试所有已加载模型"></select>
@@ -738,6 +779,7 @@ async function refreshState() {
 
   const q = data.queue;
   $("queueStat").textContent = `队列 ${q.queued}/${q.max}`;
+  renderQueue(q.items);
   $("queueHint").textContent = q.folders === 0
     ? "未配置图片文件夹" : `${q.folders} 个文件夹`;
 
@@ -1308,6 +1350,77 @@ document.addEventListener("keydown", (e) => {
   if (k === "f5" || ((e.ctrlKey || e.metaKey) && k === "r")) {
     e.preventDefault();
   }
+});
+
+
+// ================================================================= 待发队列缩略图
+
+// 队列里每张图显示成小缩略图，右上角一个叉可以撤掉。
+// 只有数字（"队列 5/8"）说明不了"下一张到底发的是哪张"。
+function renderQueue(items) {
+  const grid = $("queueGrid");
+  if (!grid) return;
+  // 内容没变就不重建，否则 2.5 秒轮询会让用户刚点到的叉消失。
+  const signature = (items || []).map((i) => i.name).join("|");
+  if (grid.dataset.sig === signature) return;
+  grid.dataset.sig = signature;
+  grid.innerHTML = "";
+  (items || []).forEach((item, index) => {
+    const box = document.createElement("div");
+    box.className = "qthumb";
+    if (item.thumb) {
+      const img = document.createElement("img");
+      img.src = item.thumb;
+      img.alt = item.name || "";
+      img.title = item.name || "";
+      box.appendChild(img);
+    } else {
+      // 缩略图生成失败也要占位，否则用户会以为队列里没东西。
+      const ph = document.createElement("div");
+      ph.style.cssText = "width:100%;height:100%;display:grid;place-items:center;font-size:10px;color:var(--dim)";
+      ph.textContent = "无预览";
+      box.appendChild(ph);
+    }
+    const x = document.createElement("button");
+    x.className = "x";
+    x.textContent = "×";
+    x.title = "从队列移除（不会删你的文件）";
+    x.onclick = async (ev) => {
+      ev.stopPropagation();
+      try {
+        const d = await api("/client/queue/remove", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ index }),
+        });
+        renderQueue(d.items);
+        await refreshState();
+      } catch (e) { toast(e.message); }
+    };
+    box.appendChild(x);
+    grid.appendChild(box);
+  });
+}
+
+// ================================================================= 看大图
+
+function openLightbox(src) {
+  const box = document.createElement("div");
+  box.className = "lightbox";
+  const img = document.createElement("img");
+  img.src = src;
+  box.appendChild(img);
+  box.onclick = () => box.remove();
+  document.addEventListener("keydown", function esc(e) {
+    if (e.key === "Escape") { box.remove(); document.removeEventListener("keydown", esc); }
+  });
+  document.body.appendChild(box);
+}
+
+// 事件委托：气泡里的图片点一下看大图。
+document.addEventListener("click", (e) => {
+  const img = e.target.closest(".bubble img");
+  if (img && img.src) openLightbox(img.src);
 });
 
 // 轮询：没有 WebSocket 推送到浏览器，用短轮询就够（单机、一个用户）。

@@ -185,24 +185,26 @@ class Conversation:
 
     # ---------------------------------------------------------------- inbound
 
-    def _append(self, entry: Entry) -> None:
+    def _append(self, entry: Entry) -> Entry:
         if entry.is_empty():
             # 空白条目不进时间线：它会让界面出现一个空气泡，且不携带任何信息。
-            return
+            return entry
         with _STATE_LOCK:
             entry.seq = next(_ARRIVAL)
             self.entries.append(entry)
             if not self._open:
                 self.unread += 1
+        return entry
 
     def record_visible(self, parsed: message_parser.ParsedMessage,
-                       images: tuple[bytes, ...] = ()) -> None:
+                       images: tuple[bytes, ...] = ()) -> Entry:
         """Log what a normal messenger would show for an inbound message."""
-        self._append(Entry(
+        return self._append(Entry(
             mine=False,
             text=parsed.text,
             images=images,
             unsupported=parsed.unsupported,
+            at=getattr(parsed, "at", 0.0) or 0.0,
         ))
 
     def record_inbound(self, inbound: Inbound) -> None:
@@ -222,8 +224,23 @@ class Conversation:
         ))
 
     def record_outbound(self, text: str = "", images: tuple[bytes, ...] = (),
-                        covert: tuple[str, ...] = ()) -> None:
-        self._append(Entry(mine=True, text=text, images=images, covert=covert))
+                        covert: tuple[str, ...] = ()) -> Entry:
+        return self._append(Entry(mine=True, text=text, images=images,
+                                  covert=covert))
+
+
+def _fill_images(cache, entry, urls) -> None:
+    """Attach downloaded pictures to an entry that is already on screen.
+
+    Called from the prefetch thread. Mutating ``entry.images`` in place (rather
+    than replacing the entry) keeps its ``seq``, so the browser appends the
+    picture instead of re-rendering the whole thread.
+    """
+    raws = tuple(raw for raw in (cache.get(url) for url in urls) if raw)
+    if not raws:
+        return
+    with _STATE_LOCK:
+        entry.images = raws
 
 
 class Conversations:
@@ -342,6 +359,10 @@ class Conversations:
         on_event(self._on_raw)
         return self
 
+    def attach_images(self, cache) -> None:
+        """Give the conversation layer somewhere to download pictures from."""
+        self.images = cache
+
     def _on_raw(self, sender: str, payload: dict) -> None:
         """Raw QQ message, before any stego inspection.
 
@@ -357,8 +378,21 @@ class Conversations:
             return
 
         conversation = self.ensure(sender)
-        if parsed.text or parsed.unsupported:
+        if not (parsed.text or parsed.unsupported or parsed.images):
+            return
+
+        # 图片要显示在左侧聊天栏里 —— 这是用户明确要求的功能。
+        # 下载放后台：读线程是维持握手和密文流动的那根线，不能被 CDN 卡住。
+        urls = [ref.locate() for ref in parsed.images]
+        urls = [u for u in urls if u]
+        cache = getattr(self, "images", None)
+        if cache is None or not urls:
             conversation.record_visible(parsed)
+            return
+
+        # 先记一条不带图的，界面立刻有内容（文字/占位行），图随后补上。
+        entry = conversation.record_visible(parsed)
+        cache.prefetch(urls, on_ready=lambda: _fill_images(cache, entry, urls))
 
     def _on_inbound(self, peer: str, inbound: Inbound) -> None:
         conversation = self.get(peer)

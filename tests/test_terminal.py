@@ -50,6 +50,11 @@ def _cover(size=256, seed=42):
     return _png_bytes(_synthetic_cover(size, seed))
 
 
+def _tiny_cover():
+    """A picture too small to hold a 38-byte handshake (64x64 -> capacity 0)."""
+    return _cover(size=64)
+
+
 def _pair(**kwargs):
     """Two terminals, each with its own one-picture queue.
 
@@ -150,7 +155,12 @@ class SessionTest(unittest.TestCase):
             Session().seal(Kind.BODY_TEXT, b"x")
 
     def test_fresh_handshake_means_old_body_fails(self):
-        # A replayed handshake image must not resurrect an old session.
+        """重握手完成后，旧密钥的密文必须失效。
+
+        注意：失效发生在重握手**完成**时，不是收到请求时。协议是无状态的，
+        对端随时可以换新密钥；在它拿到我们的回复之前，旧会话仍然可用 ——
+        这是刻意的，否则一次重握手就会把正在工作的信道打断。
+        """
         a, b = Session(), Session()
         pa, _ = a.begin()
         b.absorb(pa, Mode.REQUEST)
@@ -161,7 +171,11 @@ class SessionTest(unittest.TestCase):
         a2, _ = Session(), None
         pa2, _ = a2.begin()
         b.absorb(pa2, Mode.REQUEST)
+        # 请求已收到但还没回复：旧密钥仍然可用。
+        self.assertEqual(b.open(Kind.BODY_TEXT, old_body), b"old")
+
         b.answer()
+        b.commit_answer()
         with self.assertRaises(BadKey):
             b.open(Kind.BODY_TEXT, old_body)
         self.assertIsNotNone(old_body)
@@ -539,3 +553,118 @@ def stego_bytes(image):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RekeyTest(unittest.TestCase):
+    """对端可以随时用新密钥重新握手，且不能打断正在工作的信道。
+
+    协议是无状态的：对端不保存任何会话状态，随时可能丢弃旧密钥、发一张新的
+    握手图。这必须支持 —— 但也必须**不伤到已建立的信道**。
+
+    实际踩到的 bug：对端重握手、本端恰好没有待发图片时，`absorb()` 无条件把
+    state 改成 WAITING，于是双方都变成"等待对端回复"，谁都发不了密文。
+    一次重握手就把好好的信道打死，而且没法自行恢复。
+    """
+
+    def _pair(self):
+        net = LoopbackNetwork()
+        alice = Terminal("alice", net)
+        alice.take_cover = lambda: _cover()
+        alice.attach()
+        bob = Terminal("bob", net)
+        bob.take_cover = lambda: _cover()
+        bob.attach()
+        return net, alice, bob
+
+    def test_peer_rekey_keeps_session_usable(self):
+        """重握手期间旧会话必须继续能收发密文。"""
+        net, alice, bob = self._pair()
+        alice.send_handshake("bob", (_cover(),))
+        net.pump()
+        self.assertTrue(alice.session.established)
+        self.assertTrue(bob.session.established)
+
+        # bob 换新密钥，alice 此刻没有图 —— 这正是打死信道的那个场景。
+        alice.take_cover = lambda: None
+        bob.send_handshake("alice", (_cover(),))
+        net.pump()
+
+        self.assertEqual(alice.session.state.label, "已建立",
+                         "重握手请求不能把已建立的会话打回等待")
+        self.assertTrue(alice.session.rekeying, "应当知道有一个重握手在进行")
+        self.assertIsNotNone(alice.pending_request, "请求被挂起等图")
+
+        alice.send_covert_in_images("bob", "重握手期间", (_cover(),))
+        net.pump()
+        self.assertEqual(bob.inbox[-1].covert, ("重握手期间",),
+                         "重握手期间旧密钥必须还能用")
+
+    def test_rekey_completes_when_cover_becomes_available(self):
+        """补上图之后重握手真正完成，generation 前进，新密钥双向可用。"""
+        net, alice, bob = self._pair()
+        alice.send_handshake("bob", (_cover(),))
+        net.pump()
+        first_gen = alice.session.generation
+
+        alice.take_cover = lambda: None
+        bob.send_handshake("alice", (_cover(),))
+        net.pump()
+
+        alice.take_cover = lambda: _cover()
+        self.assertTrue(alice.retry_pending(), "补图后应当自动完成回复")
+        net.pump()
+
+        self.assertEqual(alice.session.generation, first_gen + 1)
+        self.assertEqual(bob.session.generation, first_gen + 1,
+                         "两侧 generation 必须同步前进")
+        self.assertFalse(alice.session.rekeying, "完成后不该还挂着")
+        self.assertTrue(alice.session.established)
+        self.assertTrue(bob.session.established)
+
+        alice.send_covert_in_images("bob", "新密钥A", (_cover(),))
+        net.pump()
+        self.assertEqual(bob.inbox[-1].covert, ("新密钥A",))
+        bob.send_covert_in_images("alice", "新密钥B", (_cover(),))
+        net.pump()
+        self.assertEqual(alice.inbox[-1].covert, ("新密钥B",),
+                         "新密钥下反向也必须通")
+
+    def test_repeated_rekeys_keep_working(self):
+        """连续多次重握手都要能走通，不能只在第一次正确。"""
+        net, alice, bob = self._pair()
+        alice.send_handshake("bob", (_cover(),))
+        net.pump()
+
+        for round_index in range(3):
+            bob.send_handshake("alice", (_cover(),))
+            net.pump()
+            alice.send_covert_in_images("bob", f"第{round_index}轮", (_cover(),))
+            net.pump()
+            self.assertEqual(bob.inbox[-1].covert, (f"第{round_index}轮",),
+                             f"第 {round_index} 轮重握手后信道必须仍可用")
+
+    def test_failed_response_does_not_break_the_live_session(self):
+        """回复发不出去（图太小）时，旧会话必须完好无损。
+
+        answer() 曾经会立刻改密钥；若随后嵌图失败，密钥已经换了、回复却没发出，
+        对端还在用旧密钥 —— 双方永久错位。
+        """
+        net, alice, bob = self._pair()
+        alice.send_handshake("bob", (_cover(),))
+        net.pump()
+        gen_before = alice.session.generation
+
+        # 先让 alice 手上只有一张装不下 38 字节握手的小图，再让 bob 重握手 ——
+        # 否则 alice 会立刻用大图回复，重握手当场就完成了，测不到失败路径。
+        alice.take_cover = lambda: _tiny_cover()
+        bob.send_handshake("alice", (_cover(),))
+        net.pump()
+        self.assertIsNotNone(alice.pending_request, "小图回复失败，请求应当仍挂着")
+        alice.retry_pending()
+        net.pump()
+
+        self.assertEqual(alice.session.generation, gen_before,
+                         "回复没发出去就不能换密钥")
+        alice.send_covert_in_images("bob", "仍然可用", (_cover(),))
+        net.pump()
+        self.assertEqual(bob.inbox[-1].covert, ("仍然可用",))

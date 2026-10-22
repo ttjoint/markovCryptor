@@ -15,6 +15,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+import pytest
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -544,8 +546,13 @@ class PackagingTest(unittest.TestCase):
         self.assertIn("if errorlevel 1", body,
                       "probe.bat 失败后直接 pause，屏幕上看不出出过错")
 
+    @pytest.mark.slow
     def test_generated_wheels_cover_declared_targets(self) -> None:
-        """真打一个包（不含 SnowLuma），检查每个组合都有 numpy 和 pillow。"""
+        """真打一个包（不含 SnowLuma），检查每个组合都有 numpy 和 pillow。
+
+        会联网下载 cp311/cp314/cp315 的 numpy 和 pillow，单条约 200 秒。
+        默认不跑（见 pyproject.toml 的 slow marker）；发版前 `-m slow` 验证。
+        """
         import re
 
         targets = re.findall(r'"3\.\d+"',
@@ -584,6 +591,7 @@ class PackagingTest(unittest.TestCase):
             self.assertIn(name, source)
         self.assertIn("-ExecutionPolicy Bypass", source)
 
+    @pytest.mark.slow
     def test_generated_scripts_have_right_encoding(self) -> None:
         """实际打一个包，逐项检查编码。
 

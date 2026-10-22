@@ -241,6 +241,28 @@ class PictureQueue:
             self._replenish_locked()
             return item
 
+    def preview(self) -> list[QueuedImage]:
+        """A copy of the pending pictures, oldest first.
+
+        The UI shows these as thumbnails so the user can see *which* pictures are
+        about to go out. Returns a copy: the caller iterates it on the HTTP
+        thread while the reader thread may be taking from the real list.
+        """
+        with self._lock:
+            return list(self.items)
+
+    def remove(self, index: int) -> bool:
+        """Drop the picture at ``index``. Returns False if there is none.
+
+        Only removes it from *our* queue -- the file on disk is never touched.
+        """
+        with self._lock:
+            if not 0 <= index < len(self.items):
+                return False
+            self.items.pop(index)
+            self._replenish_locked()
+            return True
+
     def clear(self) -> None:
         """Drop everything. Called on exit -- the queue is never persisted."""
         with self._lock:

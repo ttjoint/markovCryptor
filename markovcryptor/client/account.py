@@ -31,6 +31,7 @@ from ..terminal.terminal import Packet
 from . import messages as message_parser
 from .conversations import Conversations
 from .directory import Directory
+from .images import ImageCache
 from .models import ModelLibrary, MultiModelTextChannel
 from .queue import PictureQueue
 
@@ -40,7 +41,8 @@ class Account:
 
     def __init__(self, network, *, psk: str = "pbx1", text_channel=None,
                  queue: PictureQueue | None = None,
-                 models: ModelLibrary | None = None) -> None:
+                 models: ModelLibrary | None = None,
+                 images: ImageCache | None = None) -> None:
         #: A started :class:`~markovcryptor.terminal.onebot.OneBotNetwork`.
         self.network = network
         self.directory = Directory()
@@ -49,6 +51,9 @@ class Account:
         #: channel entirely, which is the right default for a client that has
         #: not been pointed at a model folder.
         self.models = models
+        #: 下载并缓存 QQ 图片，供左侧聊天栏显示。界面上看到的图全在这里，
+        #: 有上限、LRU 淘汰，退出即销毁。
+        self.images = images if images is not None else ImageCache()
         if text_channel is None and models is not None:
             text_channel = MultiModelTextChannel(models)
         self.conversations = Conversations(
@@ -78,6 +83,7 @@ class Account:
         self.uin = str(info.get("user_id") or self.uin)
         self.directory.refresh(self.network.friend_list(), owner=self.uin)
         self.conversations.attach()
+        self.conversations.attach_images(self.images)
         self._load_models()
         self._ready = True
         event("client", "account_ready", uin=self.uin, friends=len(self.directory))
@@ -200,7 +206,8 @@ class Account:
                 )
             images = (item.raw,)
         conversation.terminal.send_covert_in_images(conversation.peer, text, images)
-        conversation.record_outbound(covert=(text,))
+        # 图也要留在聊天栏里：用户发出去的就是这张照片，看不到会以为没发成功。
+        conversation.record_outbound(text="", images=images, covert=(text,))
         return conversation
 
     def start_handshake(self, peer):
@@ -213,7 +220,8 @@ class Account:
                 hints=("在配置文件里指定一个图片文件夹，或在界面上点「补图」",),
             )
         conversation.terminal.send_handshake(conversation.peer, (item.raw,))
-        conversation.record_outbound(text="（已发起密钥交换）")
+        conversation.record_outbound(text="（已发起密钥交换）",
+                                     images=(item.raw,))
         return conversation
 
     # ------------------------------------------------------------------ history
