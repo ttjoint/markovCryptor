@@ -46,10 +46,13 @@ markovcryptor = "markovcryptor.cli:main"
 [tool.setuptools.packages.find]
 include = ["markovcryptor*"]
 
-# The Web UI is a single static file served by ``webui.py``; without this it is
-# left out of the wheel and every installed copy returns 404 on ``/``.
+# The UIs are single static files; without this they are left out of the wheel
+# and every installed copy returns 404 on ``/``. Both are listed: ``webui`` is
+# the steganography workbench and the alice/bob demo, ``client/webui`` is the
+# chat client. Missing the second one ships a package whose window is blank,
+# which looks like a JavaScript bug and is actually a packaging one.
 [tool.setuptools.package-data]
-markovcryptor = ["webui/*.html", "covers/*.jpg"]
+markovcryptor = ["webui/*.html", "client/webui/*.html", "covers/*.jpg"]
 
 # The suite is stdlib unittest, so configure nothing for pytest beyond the path:
 # it is optional (see [project.optional-dependencies].dev) for anyone who wants it.

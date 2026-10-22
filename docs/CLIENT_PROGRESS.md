@@ -6,13 +6,14 @@
 > 设计决策见 `CLIENT.md`（为什么）。施工顺序见 `CLIENT_PLAN.md`（怎么做）。
 > 本文只记录**实际做到哪一步**，与代码同步维护。
 >
-> 最后更新：阶段 4（新前端）完成，阶段 5（启动器）开始前。
+> 最后更新：阶段 5（零安装打包）完成，阶段 6（文本模型）开始前。
 
 ## 1. 一句话现状
 
-协议层、编码层、传输层、客户端非界面部分、**客户端界面**均已完成。
-真机（真实 SnowLuma + 真实 QQ 账号）端到端验过：好友列表、历史合并、明文发送、
-我方气泡渲染全部正常。**下一步是阶段 5 启动器打包。**
+客户端全部五层（传输/会话/队列/界面/启动器）完成，并产出**零安装交付包**
+（dist/client_build9/qqclient-*，140MB，无需系统装 Python/Node）。
+真机端到端验过：双击 start.bat -> 自动发现 QQ -> 29 好友 -> 界面正常。
+**下一步是阶段 6 文本模型、阶段 7 双机验证。**
 
 ## 2. 两条产品线，别搞混
 
@@ -33,8 +34,8 @@
 | 2 | 消息解析 / 好友目录 / 多会话 | ✅ 完成 |
 | 3 | 图片队列（文件夹取样、预筛、上限） | ✅ 完成 |
 | 4 | 新前端（好友列表 + 双窗） | ✅ 真机验过 |
-| 5 | 启动器（零安装打包） | ⬜ **下一步** |
-| 6 | 文本模型（懒加载、GUI 管理） | ⬜ |
+| 5 | 启动器（零安装打包） | ✅ 真机验过 |
+| 6 | 文本模型（懒加载、GUI 管理） | ⬜ **下一步** |
 | 7 | 跨设备真机验证 | ⬜ |
 | — | 交付包更新到含客户端 | ⬜ |
 
@@ -216,3 +217,65 @@ tests/test_onebot_transport.py       PeerRoutingTest / AskTest / InboundEventTes
 - 新增注入 bug 验证过的测试，补进第 4 节的表
 - 实测出来的新环境事实，补进第 5 节
 - 结论与代码不一致时，**以代码为准并立刻改文档**
+
+### 阶段 5：零安装打包 ✅
+
+三个待定项已定（写进 `CLIENT_PLAN.md`）：
+1. **模型无共同 → 静默不发**（不降级、不告知对端）
+2. **配置放 `%APPDATA%\markovcryptor\client.json`**（程序目录可能只读）
+3. **Firefox 降级普通窗口，可接受**
+
+新增 `markovcryptor/client/config.py`
+- 只存偏好（图片文件夹、队列上限、psk），**不含聊天数据**
+- JSON 坏了 → 回默认值并记日志，不让程序起不来
+- `usable_cover_folders()` 区分「没配」「配了但没图」「文件夹不存在」
+
+新增 `markovcryptor/client/browser.py`
+- 读注册表 `UrlAssociations` 拿默认浏览器
+- Chrome/Edge/Brave → `--app=URL`（无地址栏独立窗口）
+- Firefox → 普通标签页（已接受）
+- `--app` 失败自动降级标签页，不能什么都不显示
+- 本机实测：正确探测到 Chrome
+
+新增 `markovcryptor/client/launcher.py`
+- **账号来自文件名**（`onebot_<QQ号>.json`），这是「不用输 QQ 号」的全部依据
+- `wait_for_endpoint()` 超时提示说「去登录 QQ」，不说「超时」
+- `start_snowluma()` 自带 EULA/PRIVACY/BOOTSTRAP_PASSWORD 环境变量，
+  免去首次网页点击同意
+- **包自带 node 优先于 PATH**（机器上的老 node 会造成谜之失败）
+
+新增 `markovcryptor/client/run.py` —— 无参数一键入口
+- 顺序：定位 SnowLuma → 等登录 → 起 SnowLuma → 起服务 → 开浏览器
+- **「配置存在」不等于「SnowLuma 在跑」**：上次退出文件留着进程没了，
+  判断依据是端口是否在听。这条真机踩过：第一次启动成功、第二次必失败
+- `pythonw`（无控制台）下 `_log()` 不抛
+- 启动失败不写配置文件
+
+新增 `tools/make_client_bundle.py`
+- Python embeddable 3.12.6（**默认不启用 site**，要重写 `._pth` 才能用 pip）
+- 离线装依赖 → 本库 → 自检（界面文件/浏览器探测/launcher 导入）
+- 产出 140MB 包：python/ 37M + snowluma/ 18M + node/ 89M
+
+**打包时踩过的坑（都值得记住）：**
+
+| 坑 | 症状 | 根因 |
+| --- | --- | --- |
+| package-data 漏 client/webui | wheel 装出来界面白屏 | pyproject 只写了 `webui/*.html` |
+| `WinError 5` 打包必失败 | CreateProcess 拒绝访问 | **传了目录而不是 python.exe**。`str(dir)` 得到文件夹路径，CreateProcess 报「拒绝访问」，看着像权限/杀软问题，其实是参数错 |
+| embeddable 没有 pip | import site 失败 | 要重写 `python3xx._pth` 并加 `Lib\site-packages` |
+| 第二次启动失败 | 配置在但端口没起 | 「配置存在」不等于「进程在跑」，要看端口 |
+
+**真机验证记录（2026-10-22）：**
+- 双击 `start.bat`（无任何参数）→ 自动发现 QQ `1741473279` → 29 好友
+- 界面 16KB 正常渲染，Playwright 截图确认
+- 配置文件正确写到 `%APPDATA%\markovcryptor\client.json`
+- 全量测试 **507 passed**
+
+### 交付包现状
+
+| 包 | 内容 | 用途 |
+| --- | --- | --- |
+| `dist/qqtest-0.3.0-20261021-0613/` | 测试端 + 旧 wheel | probe / alice-bob 演示 |
+| `dist/client_build9/qqclient-0.3.0-20261022-1740/` | **正式客户端**，零安装 | 双击 start.bat |
+
+客户端包还没打 zip（等阶段 6 做完一起）。
