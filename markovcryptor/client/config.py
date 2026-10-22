@@ -64,6 +64,10 @@ class ClientConfig:
     port: int = 0
     #: Set false to skip opening a browser (headless testing).
     open_browser: bool = True
+    #: Where ``*.json`` text models live. Empty means the text channel is off and
+    #: only picture-based covert sending works -- which is a valid configuration,
+    #: not an error, so it is not auto-created.
+    model_folder: Path | None = None
 
     # ------------------------------------------------------------------ loading
 
@@ -123,6 +127,10 @@ class ClientConfig:
             onebot_token=str(onebot.get("token") or ""),
             port=port,
             open_browser=bool(data.get("open_browser", True)),
+            model_folder=(Path(str(data["models"]["folder"])).expanduser()
+                          if isinstance(data.get("models"), dict)
+                          and str(data["models"].get("folder") or "").strip()
+                          else None),
         )
 
     # ------------------------------------------------------------------- saving
@@ -145,6 +153,7 @@ class ClientConfig:
             "onebot": {"url": self.onebot_url, "token": self.onebot_token},
             "port": self.port,
             "open_browser": self.open_browser,
+            "models": {"folder": str(self.model_folder) if self.model_folder else ""},
         }
         try:
             target.parent.mkdir(parents=True, exist_ok=True)

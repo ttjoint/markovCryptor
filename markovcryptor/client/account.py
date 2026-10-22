@@ -31,6 +31,7 @@ from ..terminal.terminal import Packet
 from . import messages as message_parser
 from .conversations import Conversations
 from .directory import Directory
+from .models import ModelLibrary, MultiModelTextChannel
 from .queue import PictureQueue
 
 
@@ -38,11 +39,18 @@ class Account:
     """A logged-in QQ account and everything hanging off it."""
 
     def __init__(self, network, *, psk: str = "pbx1", text_channel=None,
-                 queue: PictureQueue | None = None) -> None:
+                 queue: PictureQueue | None = None,
+                 models: ModelLibrary | None = None) -> None:
         #: A started :class:`~markovcryptor.terminal.onebot.OneBotNetwork`.
         self.network = network
         self.directory = Directory()
         self.queue = queue if queue is not None else PictureQueue()
+        #: Text-channel models, loaded lazily. ``None`` disables the text
+        #: channel entirely, which is the right default for a client that has
+        #: not been pointed at a model folder.
+        self.models = models
+        if text_channel is None and models is not None:
+            text_channel = MultiModelTextChannel(models)
         self.conversations = Conversations(
             network, self.directory,
             psk=psk, text_channel=text_channel,
@@ -70,6 +78,7 @@ class Account:
         self.uin = str(info.get("user_id") or self.uin)
         self.directory.refresh(self.network.friend_list(), owner=self.uin)
         self.conversations.attach()
+        self._load_models()
         self._ready = True
         event("client", "account_ready", uin=self.uin, friends=len(self.directory))
         return self
@@ -96,6 +105,32 @@ class Account:
             raise last
         raise RuntimeError(
             f"等了 {wait:.0f} 秒，OneBot 仍没有回复登录信息")
+
+    def _load_models(self) -> None:
+        """Load one model now, the rest in the background.
+
+        One model is enough to *send*, and costs ~0.1-0.5s. Identification on the
+        receive side needs every model, so the rest load in the background --
+        the window appears immediately, and a message arriving in the first
+        second is simply treated as ordinary text, which is the same thing that
+        happens when the peer uses a model we do not have.
+        """
+        if self.models is None:
+            return
+        if self.models.scan() == 0:
+            event("client", "no_models", level=logging.INFO,
+                  folder=str(self.models.folder))
+            return
+        first = self.models.load_first()
+        if first is not None:
+            event("client", "model_ready", model_name=first.name,
+                  seconds=round(first.load_seconds, 3))
+        self.models.load_in_background()
+
+    @property
+    def text_channel_usable(self) -> bool:
+        """Whether covert *text* sending is possible right now."""
+        return self.models is not None and self.models.usable
 
     @property
     def ready(self) -> bool:

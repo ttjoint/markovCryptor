@@ -127,6 +127,11 @@
   .queuebar .pill {
     background: var(--panel2); border-radius: 12px; padding: 2px 9px;
   }
+  .queuebar select {
+    background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+    border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12px;
+    max-width: 220px;
+  }
   .queuebar button {
     background: var(--panel2); border: 1px solid var(--line); color: var(--text);
     border-radius: 6px; padding: 4px 10px; cursor: pointer; font: inherit; font-size: 12px;
@@ -193,6 +198,12 @@
           <button id="btnRefill">补图</button>
           <button id="btnHandshake">发起密钥交换</button>
           <span id="queueHint" class="sub"></span>
+        </div>
+        <div class="queuebar">
+          <span class="pill" id="modelStat">模型 0/0</span>
+          <select id="modelPick" title="用于加密发出的文本；收方向会尝试所有已加载模型"></select>
+          <button id="btnModelReload">重新扫描</button>
+          <span id="modelHint" class="sub"></span>
         </div>
         <div class="entry">
           <textarea id="input" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
@@ -471,6 +482,32 @@ async function refreshState() {
   $("queueStat").textContent = `队列 ${q.queued}/${q.max}`;
   $("queueHint").textContent = q.folders === 0
     ? "未配置图片文件夹" : `${q.folders} 个文件夹`;
+
+  const m = data.models || { total: 0, loaded: 0, names: [], loading: false };
+  $("modelStat").textContent = `模型 ${m.loaded}/${m.total}`;
+  if (m.total === 0) {
+    $("modelHint").textContent = "未配置模型目录（只能发图片密文）";
+  } else if (m.loading || m.loaded < m.total) {
+    $("modelHint").textContent = "加载中…";
+  } else {
+    $("modelHint").textContent = data.text_channel ? "文本信道可用" : "无可用模型";
+  }
+  // 选项只在变化时重建，否则每 2.5 秒轮询都会重置用户的选择。
+  const wanted = (m.names || []).join(" ");
+  if ($("modelPick").dataset.names !== wanted) {
+    $("modelPick").dataset.names = wanted;
+    const previous = $("modelPick").value;
+    $("modelPick").innerHTML = "";
+    for (const name of m.names || []) {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      $("modelPick").appendChild(opt);
+    }
+    if (previous) $("modelPick").value = previous;
+  }
+  $("modelPick").disabled = (m.names || []).length === 0;
+
   renderList();
 
   // 当前会话如果开着，顺带刷新它的消息。
@@ -552,6 +589,27 @@ $("btnSendText").onclick = () => send("text");
 $("btnSendCovert").onclick = () => send("covert");
 $("btnHandshake").onclick = handshake;
 $("btnRefill").onclick = refill;
+
+$("btnModelReload").onclick = async () => {
+  try {
+    const d = await api("/client/models/reload", { method: "POST" });
+    toast(`重新扫描：已加载 ${d.loaded}/${d.total}`);
+    await refreshState();
+  } catch (e) { toast(e.message); }
+};
+
+$("modelPick").onchange = async () => {
+  const name = $("modelPick").value;
+  if (!name) return;
+  try {
+    await api("/client/models/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    toast("已切换到 " + name);
+  } catch (e) { toast(e.message); }
+};
 
 $("input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send("text"); }

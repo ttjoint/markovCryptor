@@ -349,3 +349,64 @@ Playwright 构造对方消息确认左右布局 + 时间戳渲染正常。截图
 
 **测试**：`HistoryAttributionTest` 3 项，注入「硬编码 mine=False + 丢时间」
 验过能 FAIL。全量 527 passed。
+
+---
+
+## 阶段 6：文本模型 ✅（2026-10-22）
+
+### 设计回顾（为什么这样做）
+
+文本信道**生成**中文载体而非改写已有文本，模型就是载体本身。双方必须各有
+模型，接收方还要知道**是哪个模型**写的才能解。
+
+「不需要协商」已经由帧校验实现了：`codec.py` 用模型指纹做帧校验的密钥，
+解码端把手里每个模型都试一遍，对的那个会验证通过。**线上不传任何模型 ID。**
+
+### 新增 `markovcryptor/client/models.py`
+
+**ModelLibrary —— 懒加载**
+- `scan()` 只列文件名，**不付加载代价**（启动时只看文件名）
+- `load_first()` 同步加载一个（够发送，0.1~0.5s），`load_in_background()`
+  加载其余（识别需要全部模型；后台加载期间到达的消息当作普通文本 —— 这与
+  「对端用了我们没有的模型」是同一种情况，静默即可）
+- 坏文件记一次就不再重试；`load()` 对失败过的 entry 返回 None（**真 bug**：
+  原来返回 entry，调用方会以为加载成功）
+- `identify(covertext)` 返回写入该文本的模型；普通文本和无模型都返回 None，
+  调用方必须同等对待 —— 两种情况都不回复
+
+**MultiModelTextChannel —— 多模型信道**
+- 发送用首选模型；接收**逐个试所有已加载模型**
+- `extract_text()` 对普通文本/未知模型返回 `b""`，**绝不抛异常**：
+  不匹配是正常情况，不是错误（CLIENT.md §7.1 铁律）
+
+### 接线
+
+- `Account` 接受 `models=ModelLibrary(...)`，`start()` 里同步载一个、后台载其余
+- `run.py::_model_library()`：先找配置的目录，再找 exe 旁的 `models/`；都没有
+  返回 None（文本信道关闭，只能发图片密文 —— 这是合法配置，不是错误）
+- API：`GET /client/models`、`POST /client/models/reload`（重新扫描）、
+  `POST /client/models/select`（选发送用模型；收方向永远试全部）
+- 界面：第二行工具栏「模型 4/4」+ 下拉选择 + 重新扫描；
+  下拉只在名字变化时重建，否则 2.5 秒轮询会重置用户选择
+
+### 实测数据（本机）
+
+- 4 个模型全部加载 **0.51s**（比之前记录的单模型 0.53s 快，是热缓存）
+- 编解码往返一致；普通文本正确返回空
+- **跨模型识别成功**：用模型 A 编码、发送端切到模型 B，接收端仍能解出
+  —— 「不需要协商」实测成立
+- 真机：包内 `models/` 目录自动找到，4/4 加载，界面显示「文本信道可用」
+
+### 测试
+
+`tests/test_client_models.py` 23 项 + `ModelsEndpointTest`/`ModelsWithLibraryTest`
+11 项。注入「解码只用首选模型、不做跨模型识别」验证能 FAIL
+（`test_sender_switching_model_still_decodes`）。
+
+**全量 560 passed**。
+
+### 待办（阶段 7 之前）
+
+- [ ] GUI 的模型训练 / 导入 / 导出（现有 CLI 能力：`markovcryptor train`）
+- [ ] 客户端包打 zip（含 models/）
+- [ ] 双机验证：模型 A 的机器发、只有模型 B 的机器收（应静默）

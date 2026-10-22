@@ -96,6 +96,30 @@ def find_snowluma(explicit: Path | None = None) -> Path:
     return candidates[0]
 
 
+def _model_library(cfg: ClientConfig, snowluma_root: Path):
+    """Text models to load, or None when there are none configured.
+
+    Two locations, in order: the configured folder, then ``models/`` beside the
+    executable (which is where the bundle puts the shipped ones). Returning None
+    rather than an empty library keeps "text channel disabled" distinguishable
+    from "text channel enabled but nothing loaded".
+    """
+    from .models import ModelLibrary
+
+    candidates = []
+    if cfg.model_folder is not None:
+        candidates.append(Path(cfg.model_folder))
+    candidates.append(Path(sys.executable).resolve().parent / "models")
+    candidates.append(snowluma_root.parent / "models")
+
+    for folder in candidates:
+        if folder.is_dir() and any(folder.glob("*.json")):
+            _log(f"文本模型目录：{folder}")
+            return ModelLibrary(folder)
+    _log("没有找到文本模型；只能发送图片密文")
+    return None
+
+
 def run(*, snowluma: Path | None = None, config_path: Path | None = None,
         wait: float = launcher.DEFAULT_LOGIN_WAIT,
         open_browser: bool | None = None) -> int:
@@ -149,7 +173,8 @@ def run(*, snowluma: Path | None = None, config_path: Path | None = None,
         _log("还没有配置图片文件夹；握手将无法发起")
 
     queue = PictureQueue(folders=folders, max_items=cfg.max_queue, pick=cfg.pick)
-    account = Account(network, psk=cfg.psk, queue=queue)
+    models = _model_library(cfg, root)
+    account = Account(network, psk=cfg.psk, queue=queue, models=models)
 
     try:
         account.start(wait=launcher.DEFAULT_CONNECT_WAIT)

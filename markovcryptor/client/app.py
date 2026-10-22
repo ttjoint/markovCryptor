@@ -105,6 +105,10 @@ def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
             "ready": account.ready,
             "unread_total": account.conversations.unread_total(),
             "queue": account.queue.stats(),
+            "models": (account.models.status() if account.models is not None
+                       else {"total": 0, "loaded": 0, "folder": "",
+                             "names": [], "loading": False}),
+            "text_channel": account.text_channel_usable,
             "friends": [
                 {"uin": friend.uin, "name": friend.display_name}
                 for friend in account.directory.ordered()
@@ -233,6 +237,54 @@ def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
         answered = account.retry_handshakes()
         return JSONResponse({"ok": True, "added": added, "answered": answered,
                              **account.queue.stats()})
+
+    @app.get("/client/models")
+    def models_state() -> JSONResponse:
+        """What models are available, and whether the text channel can send."""
+        if account.models is None:
+            return JSONResponse({"ok": True, "total": 0, "loaded": 0,
+                                 "names": [], "folder": "", "loading": False,
+                                 "usable": False})
+        return JSONResponse({"ok": True, **account.models.status(),
+                             "usable": account.models.usable})
+
+    @app.post("/client/models/reload")
+    def models_reload() -> JSONResponse:
+        """Re-scan the folder and load anything new.
+
+        Needed after the user drops a ``.json`` model into the folder: without
+        this they would have to restart the program, and nothing in the UI would
+        explain why the new model "did not work".
+        """
+        if account.models is None:
+            raise HTTPException(status_code=409,
+                                detail="没有配置模型目录")
+        before = account.models.loaded_count
+        account.models.scan()
+        account.models.load_in_background()
+        return JSONResponse({"ok": True, "loaded_before": before,
+                             **account.models.status()})
+
+    @app.post("/client/models/select")
+    async def models_select(payload: dict) -> JSONResponse:
+        """Choose which model encodes outgoing messages.
+
+        Receiving still tries every loaded model, so this only affects what our
+        own messages look like -- not what we can read.
+        """
+        name = str(payload.get("name") or "").strip()
+        if account.models is None:
+            raise HTTPException(status_code=409, detail="没有配置模型目录")
+        channel = account.conversations.text_channel
+        if channel is None or not hasattr(channel, "use"):
+            raise HTTPException(status_code=409, detail="文本信道不可用")
+        chosen = next((m for m in account.models.loaded_models()
+                       if (getattr(m, "name", "") or "") == name), None)
+        if chosen is None:
+            raise HTTPException(status_code=404,
+                                detail=f"没有已加载的模型叫 {name!r}")
+        channel.use(chosen)
+        return JSONResponse({"ok": True, "selected": name})
 
     if webui_dir is not None:
         # Mounted last so it does not shadow the API routes above.

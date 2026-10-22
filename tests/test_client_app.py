@@ -374,3 +374,86 @@ class HistoryAttributionTest(_Base):
         self.assertEqual(mine_flags, {"我": True, "他": False})
         self.assertTrue(all("at" in e for e in body["entries"]),
                         "每条都要带时间，前端才画得出时间戳")
+
+
+class ModelsEndpointTest(_Base):
+    """模型状态与切换。
+
+    没有模型时只能发图片密文，界面必须说清楚，不能让用户点了"密文发送"
+    才发现发不出去。
+    """
+
+    def test_state_reports_no_models_by_default(self):
+        body = self.get("/client/state").json()
+        self.assertEqual(body["models"]["total"], 0)
+        self.assertFalse(body["text_channel"],
+                         "没有模型时文本信道必须报不可用")
+
+    def test_models_endpoint_reports_state(self):
+        body = self.get("/client/models").json()
+        self.assertTrue(body["ok"])
+        self.assertIn("usable", body)
+
+    def test_reload_without_folder_is_409(self):
+        r = self.post("/client/models/reload")
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("模型", r.json()["detail"])
+
+    def test_select_unknown_model_is_404(self):
+        r = self.post("/client/models/select", json={"name": "不存在"})
+        self.assertIn(r.status_code, (404, 409))
+
+
+class ModelsWithLibraryTest(_Base):
+    """真的挂上一个模型目录，验证状态、切换、加密发送。"""
+
+    def setUp(self):
+        super().setUp()
+        from markovcryptor.client.models import ModelLibrary
+
+        root = Path(__file__).resolve().parent.parent / "models"
+        if not root.is_dir() or not any(root.glob("*.json")):
+            self.skipTest("仓库里没有模型文件")
+        self.models = ModelLibrary(root)
+        self.models.scan()
+        self.models.load_all()
+        self.account.models = self.models
+        from markovcryptor.client.models import MultiModelTextChannel
+        channel = MultiModelTextChannel(self.models)
+        self.account.conversations.text_channel = channel
+        for conv in self.account.conversations:
+            conv.terminal.use_text_channel(channel)
+
+    def test_state_reports_models_loaded(self):
+        body = self.get("/client/state").json()
+        self.assertGreater(body["models"]["total"], 0)
+        self.assertEqual(body["models"]["loaded"], body["models"]["total"])
+        self.assertTrue(body["text_channel"])
+
+    def test_select_switches_preferred_model(self):
+        name = self.models.status()["names"][-1]
+        r = self.post("/client/models/select", json={"name": name})
+        self.assertEqual(r.status_code, 200, r.text)
+        channel = self.account.conversations.text_channel
+        self.assertEqual(getattr(channel.preferred, "name", ""), name)
+
+    def test_covert_text_send_uses_the_text_channel(self):
+        """握手之后，文本密文应当走中文载体而不是图片。"""
+        bob_dir = self.folder / "bob"
+        bob_dir.mkdir()
+        _make_cover(bob_dir, "b.png")
+        bob_net = self.hub.connect(BOB)
+        bob = Account(bob_net, queue=PictureQueue(folders=[bob_dir], max_items=2),
+                      models=self.models).start()
+
+        self.post("/client/send", json={"peer": BOB, "mode": "handshake"})
+        self.hub.pump()
+        self.assertTrue(bob.conversations.get(ALICE).established)
+
+        r = self.post("/client/send", json={"peer": BOB, "text": "藏起来的句子",
+                                            "mode": "covert"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.hub.pump()
+        conv = self.account.conversations.get(BOB)
+        got = [t for e in conv.snapshot() for t in e.covert]
+        self.assertIn("藏起来的句子", got)
