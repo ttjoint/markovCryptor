@@ -336,3 +336,52 @@ class WebuiSyntaxTest(unittest.TestCase):
                                     encoding="utf-8", errors="replace")
         self.assertEqual(result.returncode, 0,
                          f"JS 语法错误：{result.stderr[-600:]}")
+
+
+class BundleDependencyTest(unittest.TestCase):
+    """打包自检必须在隔离模式下跑，且要真的检查依赖文件。
+
+    实际事故：打出来的包在虚拟机上启动报
+    ``ModuleNotFoundError: No module named 'cryptography'``。
+    原因是自检时包内 Python 从**打包机的用户级 site-packages** 借到了
+    cryptography —— 打包机上当然有，虚拟机上没有。
+
+    这类 bug 最恶劣的地方：自检"通过"了，包看起来是好的，直到换一台
+    干净机器才炸。
+    """
+
+    def _source(self) -> str:
+        root = Path(__file__).resolve().parent.parent
+        return (root / "tools" / "make_client_bundle.py").read_text(encoding="utf-8")
+
+    def test_verify_runs_isolated(self):
+        """自检必须用 -I，否则会读到宿主机的包。"""
+        source = self._source()
+        self.assertIn('"-I"', source,
+                      "自检没有用 -I 隔离，会借用宿主机的依赖")
+
+    def test_verify_scrubs_python_env(self):
+        """PYTHONPATH / PYTHONHOME 之类的泄漏要清掉。"""
+        source = self._source()
+        self.assertIn("_clean_env", source)
+        self.assertIn("PYTHONPATH", source)
+        self.assertIn("PYTHONNOUSERSITE", source)
+
+    def test_verify_imports_the_real_dependencies(self):
+        """自检要真的 import 依赖，不能只 import markovcryptor。"""
+        source = self._source()
+        for name in ("cryptography", "numpy", "reedsolo", "fastapi",
+                     "uvicorn", "websockets"):
+            self.assertIn(name, source, f"自检没验证 {name}")
+
+    def test_verify_checks_files_not_just_imports(self):
+        """还要查文件真的在包内 —— import 成功可能来自宿主机。"""
+        source = self._source()
+        self.assertIn("_verify_site_packages", source)
+        self.assertIn("Lib\" / \"site-packages\"", source)
+
+    def test_single_module_packages_are_recognised(self):
+        """reedsolo 是单文件模块（reedsolo.py），只查目录会误报缺失。"""
+        source = self._source()
+        self.assertIn('.py', source.split("def present")[1][:400],
+                      "present() 要考虑单文件模块")

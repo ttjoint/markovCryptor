@@ -187,6 +187,29 @@ def _wait_executable(exe: Path, *, timeout: float = 30.0) -> None:
                      "多半是杀毒软件锁住了新解压的文件")
 
 
+#: Environment variables that make a *different* Python's packages visible.
+#: The build machine usually has these set (a user-level site-packages, a venv,
+#: or a PYTHONPATH), and the bundled interpreter happily picks them up. That is
+#: how a bundle can pass its own self-check on the build machine and then fail on
+#: a clean one with "No module named 'cryptography'".
+_LEAKY_ENV = ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSTARTUP")
+
+
+def _clean_env() -> dict:
+    """Environment for running the bundled interpreter as if on a clean machine.
+
+    ``-I`` (isolated) already ignores ``PYTHON*`` variables and the user site
+    directory, but a caller's environment can still leak through ``PYTHONHOME``
+    on some builds, so scrub it explicitly as well.
+    """
+    env = dict(os.environ)
+    for name in _LEAKY_ENV:
+        env.pop(name, None)
+    # 用户级 site-packages 的根目录：不删掉的话，即使 -I 没生效也可能被读到。
+    env["PYTHONNOUSERSITE"] = "1"
+    return env
+
+
 def _run(cmd: list[str], what: str) -> None:
     """Run a build step, retrying the Windows "file is busy" race.
 
@@ -208,7 +231,8 @@ def _run(cmd: list[str], what: str) -> None:
         try:
             with open(log, "wb") as out:
                 code = subprocess.call(cmd, stdout=out,
-                                       stderr=subprocess.STDOUT)
+                                       stderr=subprocess.STDOUT,
+                                       env=_clean_env())
         except (PermissionError, OSError) as exc:   # WinError 5, transient
             last = exc
             time.sleep(1.0 + attempt)
@@ -252,10 +276,20 @@ def _verify(python: Path) -> None:
     Checks the two things that fail silently: the client UI file (missing ->
     blank window) and the browser probe (missing -> no window at all).
     """
-    _log("  自检")
+    _log("  自检（隔离模式）")
+
+    # 关键：**必须**用 -I 和干净环境跑。
+    # 打包机上通常装有这些依赖（用户级 site-packages / venv），不隔离的话
+    # 包内 python 会从宿主借包，自检通过、到干净机器上就 ModuleNotFoundError。
+    # 实际就是这样漏出去的：虚拟机启动报 No module named 'cryptography'。
     probe = (
-        "import pathlib, markovcryptor\n"
+        "import sys, pathlib\n"
+        "assert not any('Roaming' in p or 'AppData' in p for p in sys.path), "
+        "f'隔离失败，仍能看到宿主路径: {sys.path}'\n"
+        "import numpy, PIL, reedsolo, cryptography, fastapi, uvicorn, websockets\n"
+        "import markovcryptor\n"
         "root = pathlib.Path(markovcryptor.__file__).parent\n"
+        "assert 'site-packages' in str(root), f'库不在包内: {root}'\n"
         "ui = root / 'client' / 'webui' / 'index.html'\n"
         "assert ui.exists(), f'客户端界面缺失: {ui}'\n"
         "from markovcryptor.client.run import main, find_snowluma\n"
@@ -263,12 +297,42 @@ def _verify(python: Path) -> None:
         "from markovcryptor.client.launcher import discover_endpoint\n"
         "print('OK', ui.stat().st_size)\n"
     )
-    result = subprocess.run([str(python), "-c", probe], capture_output=True,
-                            text=True, encoding="utf-8", errors="replace")
+    result = subprocess.run([str(python), "-I", "-c", probe],
+                            capture_output=True, text=True,
+                            encoding="utf-8", errors="replace",
+                            env=_clean_env())
     if result.returncode != 0 or "OK" not in result.stdout:
-        print(result.stdout[-1200:])
-        print(result.stderr[-1200:])
-        raise SystemExit("自检失败：装出来的包不完整")
+        print(result.stdout[-1500:])
+        print(result.stderr[-1500:])
+        raise SystemExit(
+            "自检失败：包里的依赖不完整。\n"
+            "最常见原因：wheels 目录缺包，或自检没有隔离、借用了宿主的包。")
+
+
+def _verify_site_packages(python: Path) -> None:
+    """Assert the required distributions are physically inside the bundle.
+
+    Importing is not enough -- that is exactly how the host's packages slipped
+    through. This checks the directory, so a bundle that would fail on a clean
+    machine fails here instead.
+    """
+    site = python.parent / "Lib" / "site-packages"
+    required = ["cryptography", "numpy", "PIL", "reedsolo", "fastapi",
+                "uvicorn", "websockets", "markovcryptor"]
+
+    def present(name: str) -> bool:
+        # 有的包是目录（numpy/），有的是单文件模块（reedsolo.py），
+        # 还有的是编译扩展（foo.pyd）。只查目录会误报 reedsolo 缺失。
+        if (site / name).is_dir():
+            return True
+        return any(site.glob(f"{name}.py")) or any(site.glob(f"{name}.*.pyd"))
+
+    missing = [name for name in required if not present(name)]
+    if missing:
+        raise SystemExit(
+            "打包失败：包里缺少这些依赖：" + ", ".join(missing) + "\n"
+            f"检查 wheels 目录是否完整：{site}")
+    _log(f"  包内依赖齐全（{len(required)} 项）")
 
 
 def _copy_snowluma(source: Path, target: Path) -> None:
@@ -319,6 +383,7 @@ def build(*, out: Path, snowluma: Path, wheels: Path,
     # 文件夹路径，CreateProcess 报 WinError 5（"拒绝访问"），看着像权限问题。
     python_exe = target / "python" / "python.exe"
     _install_deps(python_exe, wheels, markovcryptor_wheel)
+    _verify_site_packages(python_exe)
     _verify(python_exe)
 
     _log("[3/5] SnowLuma 与 node")

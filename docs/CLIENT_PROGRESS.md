@@ -696,3 +696,74 @@ conversations.py、webui/index.html）。
 - 布局：`.thread` 579px 高、内容 1340px、内部滚动生效；输入框在视口内
 - 右键消息 → 「复制消息」出现；空白右键 → 无菜单（或只有复制选中内容）
 - 全量 593 passed
+
+---
+
+## 严重事故：交付包缺依赖（用户虚拟机实测，2026-10-22）
+
+### 症状
+
+用户在虚拟机双击 `start.bat`：
+
+```
+ModuleNotFoundError: No module named 'cryptography'
+启动失败（退出码 1）。
+没有日志文件。多半是包不完整。
+```
+
+### 根因：自检被打包机的环境污染了
+
+包内 `python/Lib/site-packages/` 只有 `cffi`、`markovcryptor`、`pip` ——
+**所有第三方依赖都没装进去**。
+
+但打包时的「自检」是通过的。为什么？
+
+因为包内 Python 启动时会读到**打包机的用户级 site-packages**
+（`C:\Users\death\AppData\Roaming\Python\Python312\site-packages`），
+`cryptography` 是从那里借来的。打包机上当然有，虚拟机上没有。
+
+验证：
+```
+包内 python  → import cryptography 成功（位置在 AppData\Roaming\...）
+包内 python -I → ModuleNotFoundError
+```
+
+**这是最恶劣的一类 bug**：自检"通过"、包看起来是好的，直到换一台干净
+机器才炸。而且失败信息（「多半是包不完整」）恰好指对了方向，但没有任何
+东西告诉我们缺哪个。
+
+### 修法（三层）
+
+1. **自检必须隔离**：`python -I` + 清掉 `PYTHONPATH` / `PYTHONHOME` /
+   `PYTHONUSERBASE` / `PYTHONSTARTUP`，并设 `PYTHONNOUSERSITE=1`
+2. **自检要 import 真实依赖**：`numpy, PIL, reedsolo, cryptography,
+   fastapi, uvicorn, websockets` —— 只 import `markovcryptor` 不够，
+   它自己会去借包
+3. **新增 `_verify_site_packages()`**：直接查目录里有没有这些包，
+   **不靠 import**。import 成功可能来自宿主机，查文件不会骗人
+
+第 3 层立刻抓到第二个问题：`reedsolo` 是**单文件模块**（`reedsolo.py`），
+我的检查只找同名目录，误报缺失。改成同时认 `.py` 和 `*.pyd`。
+
+### 顺带发现：wheels 目录曾丢失
+
+`dist/qqtest-*/` 一度不在磁盘上（在回收站里），已还原。
+教训：`dist/` 下的东西即使是"构建产物"，也可能是唯一副本。
+
+### 结果
+
+- 包体 140MB → **237MB**（多了 97MB 依赖，这才是正常的）
+- zip 92MB，3951 个文件逐字节 sha256 一致
+- zip 内确认含 `cryptography/`、`numpy/`、`reedsolo.py`、`PIL/`
+- 真机启动正常：识别 QQ、加载模型、界面可用
+
+### 测试
+
+`BundleDependencyTest` 5 项：自检用 `-I`、清 PYTHON 环境变量、
+import 真实依赖、查文件而非只 import、认单文件模块。
+注入「去掉 -I」验证 FAIL。全量 **598 passed**。
+
+### 教训
+
+**「在打包机上验证通过」不等于「包是好的」。** 打包机的环境总是比目标机器
+丰富。凡是自检，必须在尽可能接近目标机器的环境里跑 —— 做不到就显式隔离。
