@@ -87,9 +87,29 @@ class Entry:
     #: Diagnostic lines from the stego layer (a corrupt frame, a missing slice).
     notes: tuple[str, ...] = ()
 
+    #: QQ's own message id, when we have one.
+    #:
+    #: Used to recognise "this is the same message we already showed". Without
+    #: it, a message that arrived while the conversation was closed got logged
+    #: live, then appeared *again* from history when the user opened it -- the
+    #: same line twice in the timeline.
+    message_id: str | None = None
+
     def is_empty(self) -> bool:
         return not (self.text.strip() or self.images or self.covert
                     or self.unsupported or self.notes)
+
+
+def _fingerprint(entry: "Entry") -> tuple:
+    """Identity of a message without a message id.
+
+    Only used for entries that came from history and have no id -- a best-effort
+    fallback so a live-logged message is not repeated when its history copy
+    arrives. Deliberately includes the timestamp: two messages saying "嗯" at
+    different times are different messages and must both survive.
+    """
+    return (bool(entry.mine), entry.text.strip(), round(entry.at or 0.0, 3),
+            len(entry.images))
 
 
 class Conversation:
@@ -169,18 +189,36 @@ class Conversation:
                 return False
             self._history_merged = True
             # 历史条目必须拿到 seq，否则前端增量渲染会把它们当成"已渲染过"
-            # 全部跳过，界面上一片空白 —— 实际就是这样：合并了 21 条历史，
-            # 一条都没画出来。
+            # 全部跳过，界面上一片空白。
             #
-            # 序号要**比现有条目都小**：历史在时间线上位于最前面，而前端
-            # 用 seq 判断"是否已渲染"。所以先给历史分配一批，再给现有条目
-            # 重新编号到它们之后。
-            base = len(entries)
-            for index, entry in enumerate(entries):
-                entry.seq = index
-            for offset, entry in enumerate(self.entries):
-                entry.seq = base + offset
-            self.entries[:] = list(entries) + self.entries
+            # 但**不能给已有条目重新编号**。实际踩过的坑：这里把已有条目
+            # 重排成 base..base+n（base = len(history)），而 _append 用的是
+            # 全局 _ARRIVAL 计数器 —— 两者互不知情。结果新发的消息拿到
+            # 6、7 这样的小号，而重新编号后的老消息是 20..25，seq 出现回退，
+            # 前端 `seq <= lastSeq` 全跳过：**新消息发出去了但界面不显示**。
+            #
+            # 正确做法：历史用**负数**，天然排在所有实时消息之前，且永不与
+            # _ARRIVAL 分配的正数冲突。已有条目一个都不动。
+            # 去重：未打开会话时收到的消息已经实时记过一条，随后拉历史又
+            # 会来一次。没有这一步，用户点进去会看到同一条消息重复两遍。
+            #
+            # 优先用 QQ 的 message_id（精确）。没有 id 时退回"内容 + 时间戳"
+            # 指纹：历史里偶尔会有没有 id 的条目，宁可少去重一条，也不要
+            # 把两条确实不同的相同内容消息（"嗯"、"好"）错误合并。
+            seen_ids = {e.message_id for e in self.entries if e.message_id}
+            seen_fingerprints = {_fingerprint(e) for e in self.entries}
+
+            fresh: list[Entry] = []
+            for entry in entries:
+                if entry.message_id and entry.message_id in seen_ids:
+                    continue
+                if not entry.message_id and _fingerprint(entry) in seen_fingerprints:
+                    continue
+                fresh.append(entry)
+
+            for index, entry in enumerate(fresh):
+                entry.seq = -(len(fresh) - index)
+            self.entries[:] = list(fresh) + self.entries
             return True
 
     # ---------------------------------------------------------------- inbound
@@ -205,6 +243,8 @@ class Conversation:
             images=images,
             unsupported=parsed.unsupported,
             at=getattr(parsed, "at", 0.0) or 0.0,
+            # 带上 id，合并历史时才能认出"这条已经显示过了"。
+            message_id=getattr(parsed, "message_id", None),
         ))
 
     def record_inbound(self, inbound: Inbound) -> None:

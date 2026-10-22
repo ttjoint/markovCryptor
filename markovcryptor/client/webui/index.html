@@ -338,14 +338,20 @@
     border-radius: 6px; padding: 4px 10px; cursor: pointer; font: inherit; font-size: 12px;
   }
   .composer .entry { display: flex; gap: 8px; }
-  /* 多行输入框：内容多了自己滚，不要把整个 composer 顶高。
-     max-height 约等于 6 行，超过就出滚动条（样式见上面的统一滚动条规则）。 */
+  /* 多行输入框。
+     原来是写死 height:46px —— 只够一行半，写两句话就要靠滚动，很难用。
+     现在由 JS 跟着内容长高（autosize），CSS 只给上下限：
+       46px 约 1 行（空的时候不占地方）
+      168px 约 7 行（再多就自己滚，不把整个窗口顶出去） */
   .composer textarea {
-    max-height: 132px; overflow-y: auto;
-    flex: 1; resize: none; height: 46px; background: var(--panel2);
+    min-height: 46px; max-height: 168px; overflow-y: auto;
+    flex: 1; resize: none; background: var(--panel2);
     border: 1px solid var(--line); border-radius: 8px; color: var(--text);
-    padding: 9px 11px; font: inherit;
+    padding: 11px 12px; font: inherit; line-height: 1.55;
+    /* 高度由 autosize 控制，这里只保证没有跳动感 */
+    transition: height .08s ease-out;
   }
+  .composer textarea:focus { outline: none; border-color: var(--accent); }
   .composer .actions { display: flex; flex-direction: column; gap: 6px; }
   .composer button.send {
     background: var(--accent); color: #fff; border: 0; border-radius: 8px;
@@ -841,11 +847,15 @@ function bubbleFor(entry, peerName, showDate) {
 // 增量渲染状态。每 2.5 秒重建整棵 DOM 的代价是：用户滚上去看历史会被
 // 强行拉回底部、正在复制的选区丢失、消息越多越卡。所以按 seq 记住渲染到
 // 哪一条，只 append 新的。切会话时才整窗重建。
-const R = { peer: null, lastSeq: -1, firstSeq: null, count: 0 };
+// lastSeq 用 null 表示"还没渲染过"，**不能用 -1**。
+// 历史条目的 seq 是负数（见 conversations.prepend_history：负数天然排在
+// 实时消息之前，也不会和 _ARRIVAL 分配的正数冲突），用 -1 当哨兵会把
+// 所有历史当成"已渲染"跳过。
+const R = { peer: null, lastSeq: null, firstSeq: null, count: 0 };
 
 function resetRender(peer) {
   R.peer = peer;
-  R.lastSeq = -1;
+  R.lastSeq = null;
   R.firstSeq = null;
   R.count = 0;
   $("plainThread").innerHTML = "";
@@ -907,7 +917,7 @@ function renderConversation(data) {
   const hasSeq = seqs.every((v) => typeof v === "number");
   const firstSeq = hasSeq && seqs.length ? seqs[0] : null;
   // 历史前插：最早那条比我们渲染过的还早，说明窗口头部多了内容。
-  const prepended = hasSeq && R.lastSeq >= 0 && firstSeq !== null &&
+  const prepended = hasSeq && R.lastSeq !== null && firstSeq !== null &&
                     firstSeq < R.firstSeq;
   const shrank = entries.length < R.count;
   const rebuild = !hasSeq || prepended || shrank;
@@ -918,7 +928,7 @@ function renderConversation(data) {
   if (rebuild) {
     plain.innerHTML = "";
     covert.innerHTML = "";
-    R.lastSeq = -1;
+    R.lastSeq = null;
     R.firstSeq = null;
     R.count = 0;
   }
@@ -927,7 +937,8 @@ function renderConversation(data) {
     .map((e) => new Date(e.at * 1000).toDateString())).size > 1;
 
   for (const entry of entries) {
-    if (!rebuild && typeof entry.seq === "number" && entry.seq <= R.lastSeq) {
+    if (!rebuild && typeof entry.seq === "number"
+        && R.lastSeq !== null && entry.seq <= R.lastSeq) {
       continue;                       // 已经渲染过
     }
     const b = bubbleFor(entry, data.name, showDate);
@@ -936,7 +947,9 @@ function renderConversation(data) {
       covert.appendChild(covertBubbleFor(entry, data.name, showDate));
     }
     if (typeof entry.seq === "number") {
-      R.lastSeq = Math.max(R.lastSeq, entry.seq);
+      R.lastSeq = (R.lastSeq === null)
+        ? entry.seq
+        : Math.max(R.lastSeq, entry.seq);
     }
   }
   if (hasSeq && seqs.length) {
@@ -1083,7 +1096,7 @@ async function sendPlain() {
         peer: S.current, mode: "text", text, images,
       }),
     });
-    $("input").value = "";
+    clearInput("input");              // 清空后要收回去，否则留着一大块空白
     ATTACH.items = [];
     renderAttach();
     const detail = await api(`/client/conversation/${S.current}`);
@@ -1111,7 +1124,7 @@ async function sendCovert() {
         channel: COVERT.channel,
       }),
     });
-    $("covertInput").value = "";
+    clearInput("covertInput");
     const detail = await api(`/client/conversation/${S.current}`);
     renderConversation(detail);
     await refreshState();
@@ -2312,6 +2325,47 @@ function initLifecycle() {
   scheduleProbe(0);
 }
 
+
+// ================================================================= 输入框自适应高度
+
+// 输入框跟着内容长高，到上限再滚。
+//
+// 为什么不用 CSS `field-sizing: content`：那是很新的属性，Chromium 123+
+// 才有，而客户端要跑在 Win10 上（可能配的是较旧的 Chrome/Edge）。
+// 用 scrollHeight 量一次是兼容性最稳的做法。
+const AUTOSIZE_MIN = 46;
+const AUTOSIZE_MAX = 168;
+
+function autosize(el) {
+  if (!el) return;
+  // 先归零再量，否则 scrollHeight 只增不减（元素高度会卡在历史最大值）。
+  el.style.height = AUTOSIZE_MIN + "px";
+  const needed = el.scrollHeight + 2;      // +2 补边框，避免刚好卡出滚动条
+  el.style.height = Math.min(needed, AUTOSIZE_MAX) + "px";
+  // 到上限之后才允许滚，否则内容不足时不该有滚动条
+  el.style.overflowY = needed > AUTOSIZE_MAX ? "auto" : "hidden";
+}
+
+function initAutosize() {
+  for (const id of ["input", "covertInput"]) {
+    const el = $(id);
+    if (!el) continue;
+    el.addEventListener("input", () => autosize(el));
+    // 用键盘删空时 input 会触发，但程序性赋值（测试、发送后清空）不会，
+    // 所以再加一个 change 兜底。真正的清空统一走 clearInput()。
+    el.addEventListener("change", () => autosize(el));
+    autosize(el);
+  }
+}
+
+// 统一"清空并收回"的写法，避免每处都记得调 autosize。
+function clearInput(id) {
+  const el = $(id);
+  if (!el) return;
+  el.value = "";
+  autosize(el);
+}
+
 // ================================================================= 启动
 
 // 必须放在最后：上面用到 const SPLIT / COVERT / ATTACH，
@@ -2320,6 +2374,7 @@ initSplitter();
 initChannelSwitch();
 initAttach();
 initModelDrop();
+initAutosize();
 initLifecycle();
 renderAttach();
 setCovertState("locked");

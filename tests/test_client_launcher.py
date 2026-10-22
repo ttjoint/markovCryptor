@@ -584,3 +584,54 @@ class ScrollbarStyleTest(unittest.TestCase):
         self.assertIn("max-height", body,
                       "输入框内容多了要自己滚，不能把布局顶高")
         self.assertIn("overflow-y: auto", body)
+
+
+class TextareaAutosizeTest(unittest.TestCase):
+    """输入框要跟着内容长高。
+
+    实际反馈：写死 height:46px，只够一行半，写两句话就要靠滚动。
+    """
+
+    def _html(self) -> str:
+        path = (Path(__file__).resolve().parent.parent
+                / "markovcryptor" / "client" / "webui" / "index.html")
+        return path.read_text(encoding="utf-8")
+
+    def test_no_fixed_height(self):
+        html = self._html()
+        start = html.index(".composer textarea {")
+        end = html.index("}", start)
+        body = html[start:end]
+        # 只禁"固定 height"（会覆盖 autosize）；min-height: 46px 是合法的下限。
+        self.assertNotRegex(body, r"(?<!min-)(?<!max-)height: 46px",
+                            "固定高度只够一行半，必须改成 min-height + autosize")
+        self.assertIn("min-height", body)
+        self.assertIn("max-height", body)
+
+    def test_autosize_function_exists_and_is_wired(self):
+        html = self._html()
+        self.assertIn("function autosize(", html)
+        self.assertIn("initAutosize()", html,
+                      "定义了函数还必须真的调用，否则等于没写")
+        # 两个输入框都要接上
+        self.assertIn('["input", "covertInput"]', html)
+
+    def test_autosize_resets_before_measuring(self):
+        """不归零就量 scrollHeight，元素会卡在历史最大值只增不减。"""
+        html = self._html()
+        start = html.index("function autosize(")
+        end = html.index("function initAutosize(", start)
+        body = html[start:end]
+        self.assertIn("el.style.height = AUTOSIZE_MIN", body)
+
+    def test_textarea_cleared_after_send(self):
+        """发送后要收回原高度，否则留一大块空白。"""
+        html = self._html()
+        self.assertIn("function clearInput(", html,
+                      "清空+收回要统一成一个入口，避免每处都记得调 autosize")
+        self.assertIn('clearInput("input")', html)
+        self.assertIn('clearInput("covertInput")', html)
+        # 清空必须真的把值置空
+        start = html.index("function clearInput(")
+        end = html.index("}", start)
+        self.assertIn('el.value = ""', html[start:end])

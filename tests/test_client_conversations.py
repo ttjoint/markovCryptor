@@ -20,6 +20,11 @@ BOB = "20001"
 CAROL = "20002"
 
 
+def _parse(payload):
+    from markovcryptor.client import messages
+    return messages.parse(payload)
+
+
 def _network_with_friends():
     hub = InProcessOneBot()
     hub.friends = {SELF: [
@@ -382,3 +387,149 @@ class LostMessageTest(unittest.TestCase):
         self.assertFalse(self.bob.prepend_history([Entry(text="h")]),
                          "第二次必须被拒绝，否则历史灌两遍")
         self.assertEqual(len(self.bob.snapshot()), 1)
+
+
+class HistorySeqCollisionTest(unittest.TestCase):
+    """历史序号不能和实时消息的序号撞车。
+
+    实际 bug：合并历史时把已有条目重新编号成 base..base+n（base = 历史条数），
+    而 _append 用全局 _ARRIVAL 计数器。两者互不知情，于是新发的消息拿到
+    6、7 这样的小号，重新编号后的老消息却是 20..25 —— seq 出现回退，
+    前端 `seq <= lastSeq` 全部跳过。
+
+    用户看到的现象：消息确实发出去了（QQ 那边收到了），但本地界面不显示。
+    """
+
+    def _convs(self):
+        hub, net = _network_with_friends()
+        return Conversations(net, Directory()), net
+
+    def _entry(self, text):
+        from markovcryptor.client.conversations import Entry
+        return Entry(mine=False, text=text)
+
+    def _inbound(self, conv, text):
+        conv.record_visible(_parse(_message(BOB, text=text)))
+
+    def test_history_never_outranks_live_messages(self):
+        convs, _ = self._convs()
+        conv = convs.ensure(BOB)
+        self._inbound(conv, "实时1")
+        self._inbound(conv, "实时2")
+        live = {e.text: e.seq for e in conv.entries if e.text.startswith("实时")}
+
+        history = [self._entry(f"历史{i}") for i in range(20)]
+        self.assertTrue(conv.prepend_history( history))
+
+        all_seqs = [e.seq for e in conv.entries]
+        self.assertEqual(all_seqs, sorted(all_seqs),
+                         "seq 必须单调递增，否则前端增量渲染会跳过消息")
+
+        after = {e.text: e.seq for e in conv.entries if e.text.startswith("实时")}
+        self.assertEqual(after, live, "已有条目的 seq 不能因为合并历史而改变")
+
+    def test_new_message_after_history_has_greater_seq(self):
+        """合并历史后新发的消息，seq 必须大于所有已存在的。"""
+        convs, _ = self._convs()
+        conv = convs.ensure(BOB)
+        conv.prepend_history( [self._entry(f"历史{i}") for i in range(5)])
+        self._inbound(conv, "新消息")
+
+        seqs = [e.seq for e in conv.entries]
+        self.assertEqual(seqs, sorted(seqs))
+        self.assertEqual(conv.entries[-1].text, "新消息")
+        self.assertEqual(conv.entries[-1].seq, max(seqs),
+                         "最新的消息必须有最大的 seq，否则界面不显示它")
+
+    def test_history_seqs_are_negative_and_ordered(self):
+        convs, _ = self._convs()
+        conv = convs.ensure(BOB)
+        conv.prepend_history( [self._entry(f"历史{i}") for i in range(3)])
+        seqs = [e.seq for e in conv.entries]
+        self.assertTrue(all(v < 0 for v in seqs),
+                        "历史用负数，天然排在实时消息之前且不与 _ARRIVAL 冲突")
+        self.assertEqual(seqs, [-3, -2, -1])
+
+
+class HistoryDuplicateTest(unittest.TestCase):
+    """实时收到的消息不能因为随后拉历史而重复显示。
+
+    实际反馈：未打开会话时对方来信，点进去发现同一条消息复读了两遍。
+
+    原因：消息到达时 _append 实时记了一条；用户点开会话时拉历史，那条消息
+    又从历史里来一次，prepend_history 无条件插入，于是时间线上有两条。
+    """
+
+    def _convs(self):
+        hub, net = _network_with_friends()
+        return Conversations(net, Directory()), net
+
+    def _history_entry(self, text, message_id=None, at=1000.0):
+        from markovcryptor.client.conversations import Entry
+        return Entry(mine=False, text=text, at=at, message_id=message_id)
+
+    def test_same_message_id_is_not_duplicated(self):
+        convs, _ = self._convs()
+        conv = convs.ensure(BOB)
+
+        # 会话关着时收到一条（实时记录）
+        conv.record_visible(_parse(_message(BOB, text="在吗")))
+        self.assertEqual(len(conv.entries), 1)
+
+        # 点开会话，历史里带着同一条（同一个 message_id）
+        conv.prepend_history([self._history_entry("在吗", message_id="1")])
+
+        self.assertEqual(len(conv.entries), 1,
+                         "同一条消息不能出现两次")
+        self.assertEqual(conv.entries[0].text, "在吗")
+
+    def test_different_message_ids_are_both_kept(self):
+        """两条内容相同但 id 不同 —— 是两条真实消息，都要留。"""
+        convs, _ = self._convs()
+        conv = convs.ensure(BOB)
+        conv.record_visible(_parse(_message(BOB, text="嗯")))
+        conv.prepend_history([
+            self._history_entry("嗯", message_id="900", at=900.0),
+        ])
+        self.assertEqual(len(conv.entries), 2,
+                         "不同 id 的相同内容不能被合并")
+
+    def test_history_only_messages_are_all_kept(self):
+        """历史里没出现过的消息当然要全留下。"""
+        convs, _ = self._convs()
+        conv = convs.ensure(BOB)
+        conv.prepend_history([
+            self._history_entry("早", message_id="1", at=1000.0),
+            self._history_entry("在吗", message_id="2", at=1001.0),
+            self._history_entry("忙不忙", message_id="3", at=1002.0),
+        ])
+        self.assertEqual(len(conv.entries), 3)
+
+    def test_entries_without_id_use_content_fingerprint(self):
+        """没有 message_id 时退回内容+时间戳指纹，仍然去重。"""
+        convs, _ = self._convs()
+        conv = convs.ensure(BOB)
+        # 实时记录一条（带 id），历史里来一条同内容同时刻但没有 id
+        from markovcryptor.client.conversations import Entry
+        conv.record_visible(_parse(_message(BOB, text="收到")))
+        conv.entries[0].at = 1234.5
+        conv.entries[0].message_id = None
+        conv.prepend_history([self._history_entry("收到", at=1234.5)])
+        self.assertEqual(len(conv.entries), 1,
+                         "没 id 时要靠内容+时间戳认出重复")
+
+    def test_duplicates_do_not_break_seq_order(self):
+        """去重之后 seq 仍然单调递增，否则界面还是会漏消息。"""
+        convs, _ = self._convs()
+        conv = convs.ensure(BOB)
+        conv.record_visible(_parse(_message(BOB, text="新消息")))
+        # _message 的 message_id 固定是 1 —— 实时那条的 id 就是 "1"。
+        # 历史里用别的 id，避免误撞。
+        conv.prepend_history([
+            self._history_entry("老1", message_id="101", at=900.0),
+            self._history_entry("老2", message_id="103", at=950.0),
+        ])
+        seqs = [e.seq for e in conv.entries]
+        self.assertEqual(seqs, sorted(seqs), "seq 必须单调")
+        self.assertEqual([e.text for e in conv.entries], ["老1", "老2", "新消息"],
+                         "重复的那条被去掉，其余保持时间顺序")

@@ -988,6 +988,9 @@ def _merge_history(account: Account, conversation, peer: str, count: int) -> Non
             text=item.text,
             unsupported=tuple(placeholders),
             at=item.at or 0.0,
+            # 历史条目也要带 id：未打开会话时收到的消息已经实时记过一条，
+            # 合并历史时靠它认出重复。
+            message_id=getattr(item, "message_id", None),
         )
         merged.append(entry)
         if urls:
