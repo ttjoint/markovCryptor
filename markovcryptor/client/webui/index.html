@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>markovCryptor 客户端</title>
+<style>
+  /* 单文件、零依赖、无构建：服务器发出去的就是你编辑的这一份。
+     不引框架——好友列表 + 两个窗格 + 图片队列，手写比引框架省事。 */
+  :root {
+    --bg: #16181d; --panel: #1e2128; --panel2: #242832; --line: #2c313a;
+    --text: #d8dde5; --dim: #8b95a5; --accent: #5aa9e6; --ok: #57b87a;
+    --warn: #d9a441; --err: #d95f5f; --dot: #e05353;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f6f8; --panel: #fff; --panel2: #eef1f5; --line: #d9dde4;
+      --text: #232830; --dim: #66707f; --accent: #1b6fb8;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; display: grid; grid-template-columns: 280px 1fr;
+    font: 14px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: var(--bg); color: var(--text); overflow: hidden;
+  }
+  /* 任何自带 display 的元素被 hidden 时都必须真的消失 —— UA 的 [hidden]
+     会被 display:grid/flex 盖掉，这是测试端踩过的坑，这里一开始就写死。 */
+  [hidden] { display: none !important; }
+
+  /* ---------- 左侧：好友列表 ---------- */
+  aside {
+    display: flex; flex-direction: column; border-right: 1px solid var(--line);
+    background: var(--panel); min-width: 0;
+  }
+  .me {
+    padding: 14px 16px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .avatar {
+    width: 34px; height: 34px; border-radius: 50%; flex: 0 0 auto;
+    background: var(--accent); color: #fff; display: grid; place-items: center;
+    font-weight: 600; font-size: 13px;
+  }
+  .me .who { min-width: 0; }
+  .me .uin { color: var(--dim); font-size: 12px; }
+  .tabs { display: flex; gap: 2px; padding: 8px 10px; }
+  .tabs button {
+    flex: 1; background: none; border: 0; color: var(--dim);
+    padding: 7px 0; border-radius: 6px; cursor: pointer; font: inherit;
+  }
+  .tabs button[aria-selected="true"] { background: var(--panel2); color: var(--text); }
+  .list { flex: 1; overflow-y: auto; padding: 4px 8px 12px; }
+  .row {
+    display: flex; align-items: center; gap: 10px; padding: 9px 10px;
+    border-radius: 8px; cursor: pointer; position: relative;
+  }
+  .row:hover { background: var(--panel2); }
+  .row.active { background: var(--panel2); }
+  .row .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+             white-space: nowrap; }
+  .row .sub { color: var(--dim); font-size: 11px; }
+  .badge {
+    background: var(--dot); color: #fff; font-size: 11px; line-height: 1;
+    padding: 3px 6px; border-radius: 9px; min-width: 18px; text-align: center;
+  }
+  .mark { font-size: 11px; }
+  .mark.est { color: var(--ok); }
+  .mark.wait { color: var(--warn); }
+
+  /* ---------- 右侧：对话 ---------- */
+  main { display: flex; flex-direction: column; min-width: 0; height: 100vh; }
+  .empty { flex: 1; display: grid; place-items: center; color: var(--dim); }
+  .topbar {
+    display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .topbar .title { font-weight: 600; }
+  .topbar .state { font-size: 12px; color: var(--dim); margin-left: auto; }
+  .state .est { color: var(--ok); }
+  .state .wait { color: var(--warn); }
+
+  .panes { flex: 1; display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+  .pane { display: flex; flex-direction: column; min-width: 0; border-left: 1px solid var(--line); }
+  .pane:first-child { border-left: 0; }
+  .pane h2 {
+    font-size: 12px; font-weight: 600; color: var(--dim); margin: 0;
+    padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+    letter-spacing: .02em;
+  }
+  .thread { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex;
+            flex-direction: column; gap: 10px; }
+  .msg { max-width: 86%; }
+  .msg.mine { align-self: flex-end; }
+  .msg.them { align-self: flex-start; }
+  .bubble {
+    padding: 8px 11px; border-radius: 10px; background: var(--panel2);
+    word-break: break-word; white-space: pre-wrap;
+  }
+  .msg.mine .bubble { background: #2e4a63; }
+  .bubble img { max-width: 220px; border-radius: 8px; display: block; margin-top: 6px; }
+  .unsupported { color: var(--dim); font-style: italic; font-size: 12px; }
+  .note { color: var(--warn); font-size: 12px; }
+
+  /* 密文窗 */
+  .covert-thread .bubble { background: #2b2333; border: 1px solid #43324f; }
+
+  /* ---------- 底部：输入 + 队列 ---------- */
+  .composer {
+    border-top: 1px solid var(--line); background: var(--panel);
+    padding: 10px 16px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .queuebar { display: flex; align-items: center; gap: 10px; font-size: 12px;
+              color: var(--dim); flex-wrap: wrap; }
+  .queuebar .pill {
+    background: var(--panel2); border-radius: 12px; padding: 2px 9px;
+  }
+  .queuebar button {
+    background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+    border-radius: 6px; padding: 4px 10px; cursor: pointer; font: inherit; font-size: 12px;
+  }
+  .composer .entry { display: flex; gap: 8px; }
+  .composer textarea {
+    flex: 1; resize: none; height: 46px; background: var(--panel2);
+    border: 1px solid var(--line); border-radius: 8px; color: var(--text);
+    padding: 9px 11px; font: inherit;
+  }
+  .composer .actions { display: flex; flex-direction: column; gap: 6px; }
+  .composer button.send {
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+    padding: 0 18px; cursor: pointer; font: inherit; font-weight: 600;
+  }
+  .composer button.ghost {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 0 12px; cursor: pointer; font: inherit; font-size: 12px;
+  }
+  .composer button:disabled { opacity: .5; cursor: not-allowed; }
+  .toast {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: var(--err); color: #fff; padding: 8px 16px; border-radius: 8px;
+    font-size: 13px; z-index: 50;
+  }
+</style>
+</head>
+<body>
+  <aside>
+    <div class="me">
+      <div class="avatar" id="meAvatar">?</div>
+      <div class="who">
+        <div id="meName">未登录</div>
+        <div class="uin" id="meUin"></div>
+      </div>
+    </div>
+    <div class="tabs">
+      <button id="tabRecent" aria-selected="true">最近</button>
+      <button id="tabFriends" aria-selected="false">好友</button>
+    </div>
+    <div class="list" id="list"></div>
+  </aside>
+
+  <main>
+    <div class="empty" id="empty">选择一个好友开始</div>
+    <div id="chat" hidden style="display:flex;flex-direction:column;height:100%">
+      <div class="topbar">
+        <div class="title" id="peerName"></div>
+        <div class="state" id="peerState"></div>
+      </div>
+      <div class="panes">
+        <div class="pane">
+          <h2>明文（对方在 QQ 里看到的）</h2>
+          <div class="thread" id="plainThread"></div>
+        </div>
+        <div class="pane">
+          <h2>密文（解出来的隐藏内容）</h2>
+          <div class="thread covert-thread" id="covertThread"></div>
+        </div>
+      </div>
+      <div class="composer">
+        <div class="queuebar">
+          <span class="pill" id="queueStat">队列 0/8</span>
+          <button id="btnRefill">补图</button>
+          <button id="btnHandshake">发起密钥交换</button>
+          <span id="queueHint" class="sub"></span>
+        </div>
+        <div class="entry">
+          <textarea id="input" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+          <div class="actions">
+            <button class="send" id="btnSendText">发送</button>
+            <button class="ghost" id="btnSendCovert">密文发送</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+<script>
+"use strict";
+// 全局状态。刻意很浅：一个当前账号、一个当前会话、一份列表。
+// 所有真实数据在服务端内存里，这里只是浏览器侧的视图。
+const S = {
+  uin: "", ready: false,
+  mode: "recent",              // recent | friends
+  current: null,               // 当前打开的 peer
+  conversations: [],           // [{peer,name,unread,established,state_label,last_at}]
+  friends: [],                 // [{uin,name}]
+};
+
+const $ = (id) => document.getElementById(id);
+
+function toast(msg) {
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* 空响应 */ }
+  if (!res.ok) {
+    // 后端把"用户做错了"（队列空了/没握手）放在 detail 里，原样显示，
+    // 不要翻译成"服务器错误"——那会让用户去查网络，方向完全错了。
+    const detail = (data && data.detail) || res.statusText;
+    throw new Error(detail);
+  }
+  return data;
+}
+
+// ---------------------------------------------------------------- 左侧列表
+
+function rowFor(item, isConversation) {
+  const row = document.createElement("div");
+  row.className = "row" + (S.current === item.uin_or_peer ? " active" : "");
+  const peer = isConversation ? item.peer : item.uin;
+  row.dataset.peer = peer;
+  if (S.current === peer) row.classList.add("active");
+
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = (item.name || peer).slice(0, 1);
+
+  const nm = document.createElement("div");
+  nm.className = "nm";
+  const nameLine = document.createElement("div");
+  nameLine.textContent = item.name || peer;
+  nm.appendChild(nameLine);
+  if (isConversation) {
+    const sub = document.createElement("div");
+    sub.className = "sub";
+    sub.textContent = item.established ? "信道已建立" : item.state_label;
+    nm.appendChild(sub);
+  }
+
+  row.append(avatar, nm);
+
+  if (isConversation && item.established) {
+    const mk = document.createElement("span");
+    mk.className = "mark est";
+    mk.textContent = "●";
+    mk.title = "信道已建立";
+    row.appendChild(mk);
+  } else if (isConversation) {
+    const mk = document.createElement("span");
+    mk.className = "mark wait";
+    mk.textContent = "○";
+    mk.title = item.state_label;
+    row.appendChild(mk);
+  }
+
+  if (isConversation && item.unread > 0) {
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    badge.textContent = item.unread;
+    row.appendChild(badge);
+  }
+
+  row.onclick = () => openConversation(peer);
+  return row;
+}
+
+function renderList() {
+  const list = $("list");
+  list.innerHTML = "";
+  if (S.mode === "recent") {
+    if (S.conversations.length === 0) {
+      const p = document.createElement("div");
+      p.className = "sub";
+      p.style.padding = "12px";
+      p.textContent = "还没有会话。收到消息或点开好友就会出现。";
+      list.appendChild(p);
+      return;
+    }
+    for (const c of S.conversations) list.appendChild(rowFor(c, true));
+  } else {
+    for (const f of S.friends) list.appendChild(rowFor(f, false));
+  }
+}
+
+// ---------------------------------------------------------------- 右侧对话
+
+function bubbleFor(entry) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg " + (entry.mine ? "mine" : "them");
+  const b = document.createElement("div");
+  b.className = "bubble";
+  if (entry.text) {
+    const t = document.createElement("div");
+    t.textContent = entry.text;
+    b.appendChild(t);
+  }
+  for (const src of entry.images || []) {
+    const img = document.createElement("img");
+    img.src = src;
+    b.appendChild(img);
+  }
+  for (const line of entry.unsupported || []) {
+    const u = document.createElement("div");
+    u.className = "unsupported";
+    u.textContent = line;
+    b.appendChild(u);
+  }
+  for (const line of entry.notes || []) {
+    const n = document.createElement("div");
+    n.className = "note";
+    n.textContent = line;
+    b.appendChild(n);
+  }
+  if (!b.hasChildNodes()) return null;   // 空条目不画，避免空气泡
+  wrap.appendChild(b);
+  return wrap;
+}
+
+function renderConversation(data) {
+  $("peerName").textContent = data.name || data.peer;
+  const st = $("peerState");
+  st.innerHTML = "";
+  const span = document.createElement("span");
+  span.className = data.established ? "est" : "wait";
+  span.textContent = data.established ? "信道已建立" : data.state_label;
+  st.appendChild(span);
+
+  const plain = $("plainThread");
+  const covert = $("covertThread");
+  plain.innerHTML = "";
+  covert.innerHTML = "";
+
+  for (const entry of data.entries) {
+    const b = bubbleFor(entry);
+    if (!b) continue;
+    plain.appendChild(b);
+    // 密文窗只显示解出来的隐藏内容，独立于明文窗。
+    if ((entry.covert || []).length) {
+      const cw = document.createElement("div");
+      cw.className = "msg " + (entry.mine ? "mine" : "them");
+      const cb = document.createElement("div");
+      cb.className = "bubble";
+      cb.textContent = entry.covert.join("\n");
+      cw.appendChild(cb);
+      covert.appendChild(cw);
+    }
+  }
+  plain.scrollTop = plain.scrollHeight;
+  covert.scrollTop = covert.scrollHeight;
+}
+
+async function openConversation(peer) {
+  S.current = peer;
+  $("empty").hidden = true;
+  $("chat").hidden = false;
+  try {
+    await api(`/client/conversation/${peer}/open`, { method: "POST" });
+    // 首次打开拉一次 QQ 历史；服务端只合并一次，重复点不会重复灌。
+    const data = await api(`/client/conversation/${peer}?history=20`);
+    renderConversation(data);
+    await refreshState();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+// ---------------------------------------------------------------- 状态刷新
+
+async function refreshState() {
+  let data;
+  try { data = await api("/client/state"); }
+  catch (e) { return; }
+  S.uin = data.uin;
+  S.ready = data.ready;
+  S.conversations = data.conversations;
+  S.friends = data.friends;
+
+  $("meName").textContent = data.ready ? "已连接" : "连接中…";
+  $("meUin").textContent = data.uin || "";
+  $("meAvatar").textContent = (data.uin || "?").slice(-2);
+
+  const q = data.queue;
+  $("queueStat").textContent = `队列 ${q.queued}/${q.max}`;
+  $("queueHint").textContent = q.folders === 0
+    ? "未配置图片文件夹" : `${q.folders} 个文件夹`;
+  renderList();
+
+  // 当前会话如果开着，顺带刷新它的消息。
+  if (S.current) {
+    try {
+      const detail = await api(`/client/conversation/${S.current}`);
+      renderConversation(detail);
+    } catch (e) { /* 会话可能已被丢弃 */ }
+  }
+}
+
+// ---------------------------------------------------------------- 动作
+
+async function send(mode) {
+  if (!S.current) return;
+  const text = $("input").value;
+  if (mode === "text" && !text.trim()) return;
+  if (mode === "covert" && !text.trim()) {
+    toast("密文内容不能为空");
+    return;
+  }
+  try {
+    const data = await api("/client/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ peer: S.current, mode, text }),
+    });
+    $("input").value = "";
+    const detail = await api(`/client/conversation/${S.current}`);
+    renderConversation(detail);
+    await refreshState();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function handshake() {
+  if (!S.current) return;
+  try {
+    await api("/client/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ peer: S.current, mode: "handshake" }),
+    });
+    const detail = await api(`/client/conversation/${S.current}`);
+    renderConversation(detail);
+    await refreshState();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function refill() {
+  try {
+    const data = await api("/client/queue/refill", { method: "POST" });
+    toast(`补入 ${data.added} 张${data.answered ? `，补发握手 ${data.answered}` : ""}`);
+    await refreshState();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+// ---------------------------------------------------------------- 事件绑定
+
+$("tabRecent").onclick = () => { S.mode = "recent";
+  $("tabRecent").setAttribute("aria-selected", "true");
+  $("tabFriends").setAttribute("aria-selected", "false"); renderList(); };
+$("tabFriends").onclick = () => { S.mode = "friends";
+  $("tabFriends").setAttribute("aria-selected", "true");
+  $("tabRecent").setAttribute("aria-selected", "false"); renderList(); };
+
+$("btnSendText").onclick = () => send("text");
+$("btnSendCovert").onclick = () => send("covert");
+$("btnHandshake").onclick = handshake;
+$("btnRefill").onclick = refill;
+
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send("text"); }
+});
+
+// 轮询：没有 WebSocket 推送到浏览器，用短轮询就够（单机、一个用户）。
+refreshState();
+setInterval(refreshState, 2500);
+</script>
+</body>
+</html>

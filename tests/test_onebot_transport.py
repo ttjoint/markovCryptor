@@ -711,3 +711,35 @@ class InboundEventTest(unittest.TestCase):
                          "user_id": 20001,
                          "message": [{"type": "text", "data": {"text": "hi"}}]})
         self.assertEqual(seen, ["20001"], "一个回调炸了不能拖累后面那个")
+
+
+class TransportErrorShapeTest(unittest.TestCase):
+    """错误类型必须接受 hints，否则错误处理路径自己会崩。
+
+    实际撞上过：`ask()` 在没连上时抛 `TransportError(..., hints=(...))`，
+    而 `TransportError` 是裸 RuntimeError，不接受关键字参数 —— 于是"QQ 没
+    登录"这个最该说人话的场景，用户看到的是一坨 TypeError traceback。
+    错误路径崩掉比错误本身更难查。
+    """
+
+    def test_accepts_hints(self):
+        from markovcryptor.terminal.transport import TransportError
+
+        exc = TransportError("连不上", hints=("检查 QQ 是否登录",))
+        self.assertEqual(exc.hints, ("检查 QQ 是否登录",))
+        self.assertIn("连不上", str(exc))
+
+    def test_hints_default_to_empty(self):
+        from markovcryptor.terminal.transport import TransportError
+
+        self.assertEqual(TransportError("x").hints, ())
+
+    def test_ask_without_connection_raises_transport_error_not_typeerror(self):
+        """没连上时 ask 抛的必须是 TransportError，不能是 TypeError。"""
+        from markovcryptor.terminal.onebot import OneBotNetwork
+        from markovcryptor.terminal.transport import TransportError
+
+        net = OneBotNetwork("ws://unused", "10001")     # 从未 start()
+        with self.assertRaises(TransportError) as ctx:
+            net.ask("get_login_info")
+        self.assertTrue(ctx.exception.hints, "要带一句可执行的建议")

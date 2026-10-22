@@ -15,7 +15,18 @@ from typing import Callable, Protocol
 
 
 class TransportError(RuntimeError):
-    """The packet could not be handed to the peer (unknown id, closed link, ...)."""
+    """The packet could not be handed to the peer (unknown id, closed link, ...).
+
+    Carries ``hints`` like :class:`~markovcryptor.core.errors.StegoError`, so the
+    CLI and the web layer can print one actionable line under the error instead
+    of making the user guess. Without it, "OneBot 还没连上" reached the user as
+    ``TypeError: takes no keyword arguments`` -- a crash in the error path, which
+    is the worst place to have one.
+    """
+
+    def __init__(self, message: str = "", *, hints: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.hints = tuple(hints)
 
 
 class Network(Protocol):

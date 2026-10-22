@@ -53,12 +53,18 @@ class Account:
 
     # ------------------------------------------------------------------ startup
 
-    def start(self) -> "Account":
-        """Fetch the friend list and start routing inbound messages.
+    def start(self, *, wait: float = 20.0) -> "Account":
+        """Wait for the transport, then fetch friends and start routing.
 
-        Raises whatever the transport raises if QQ is not reachable -- the caller
-        (the launcher) is the one that knows how to say "please log in".
+        ``OneBotNetwork.start()`` only spawns a thread; the socket is not up yet
+        when it returns. Calling ``login_info()`` immediately therefore fails
+        with "还没连上" -- which looks like a broken config but is really just a
+        race. So poll until the connection answers, up to ``wait`` seconds.
+
+        Raises whatever the transport raises once the wait is over, because by
+        then "cannot connect" is the truth and the caller should say so.
         """
+        self._wait_until_connected(wait)
         info = self.network.login_info()
         self.uin = str(info.get("user_id") or self.uin)
         self.directory.refresh(self.network.friend_list(), owner=self.uin)
@@ -66,6 +72,29 @@ class Account:
         self._ready = True
         event("client", "account_ready", uin=self.uin, friends=len(self.directory))
         return self
+
+    def _wait_until_connected(self, wait: float) -> None:
+        """Block until OneBot answers, or give up after ``wait`` seconds.
+
+        Polls rather than inspecting the transport's internals: "can I ask it
+        something" is exactly the property we care about, and it stays correct if
+        the transport changes how it connects.
+        """
+        import time
+
+        deadline = time.monotonic() + max(0.0, wait)
+        last: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                if self.network.login_info().get("user_id"):
+                    return
+            except Exception as exc:               # noqa: BLE001 - retry until deadline
+                last = exc
+            time.sleep(0.4)
+        if last is not None:
+            raise last
+        raise RuntimeError(
+            f"等了 {wait:.0f} 秒，OneBot 仍没有回复登录信息")
 
     @property
     def ready(self) -> bool:

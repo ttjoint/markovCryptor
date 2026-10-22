@@ -101,6 +101,26 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--psk", default="pbx1",
                        help="隐写层共享口令，两侧必须一致；默认 pbx1")
 
+    client = sub.add_parser(
+        "client", help="启动正式客户端（好友列表 + 每好友一条独立信道）")
+    client.add_argument("--host", default="127.0.0.1",
+                        help="监听地址，默认 127.0.0.1（仅本机）")
+    client.add_argument("--port", type=int, default=0,
+                        help="端口，默认 8741（避开 serve 的 8731）")
+    client.add_argument("--onebot", required=True, metavar="UIN=WS[;TOKEN]",
+                        help="本机这个 QQ 号的 OneBot 地址")
+    client.add_argument("--psk", default="pbx1",
+                        help="隐写层共享口令，两侧必须一致；默认 pbx1")
+    client.add_argument("--covers", action="append", default=[], metavar="DIR",
+                        help="待发图片所在文件夹（可重复）；不给则队列为空")
+    client.add_argument("--max-queue", type=int, default=8,
+                        help="图片队列上限，默认 8")
+    client.add_argument("--pick", default="random", choices=("random", "sequential"),
+                        help="取图方式，默认 random")
+    client.add_argument("--model-dir", type=Path, default=default_model_dir())
+    client.add_argument("--no-browser", action="store_true",
+                        help="不自动打开浏览器（调试用）")
+
     qq_init = sub.add_parser(
         "qq-init", help="给 SnowLuma 写一个 QQ 号的 OneBot 配置")
     qq_init.add_argument("--snowluma", type=Path, required=True,
@@ -271,6 +291,64 @@ def _utf8_stdout() -> None:
             pass
 
 
+def _run_client(args) -> int:
+    """Start the chat client: connect OneBot, then serve the UI.
+
+    The account is built *before* the server starts, so a missing QQ login fails
+    loudly here instead of showing an empty friend list in the browser with no
+    explanation.
+    """
+    from pathlib import Path as _Path
+
+    from .client.account import Account
+    from .client.app import DEFAULT_CLIENT_PORT, create_client_app
+    from .client.queue import PictureQueue
+    from .terminal.onebot import OneBotNetwork
+
+    routes = _parse_onebot([args.onebot])
+    uin, spec = next(iter(routes.items()))
+    url, _, token = spec.partition(";")
+
+    network = OneBotNetwork(url, uin, token=token or None).start()
+    queue = PictureQueue(folders=[_Path(d).expanduser() for d in args.covers],
+                         max_items=args.max_queue, pick=args.pick)
+    account = Account(network, psk=args.psk, queue=queue)
+    try:
+        account.start()
+    except Exception as exc:                       # noqa: BLE001 - startup boundary
+        # TransportError 是 RuntimeError，不是 StegoError —— 只抓 StegoError
+        # 的话，"QQ 没登录"会直接崩栈，用户看到一坨 traceback 而不是一句话。
+        print(f"连不上 QQ：{exc}", file=sys.stderr)
+        for hint in getattr(exc, "hints", ()):
+            print(f"  建议：{hint}", file=sys.stderr)
+        print("  确认：QQ 已登录、SnowLuma 已启动、--onebot 的端口和 token 对得上",
+              file=sys.stderr)
+        network.stop()
+        return 2
+
+    port = args.port or DEFAULT_CLIENT_PORT
+    webui = _Path(__file__).with_name("client") / "webui"
+    app = create_client_app(account, webui_dir=webui)
+
+    import uvicorn
+
+    shown = f"http://{args.host}:{port}/"
+    print(f"客户端已启动：{shown}")
+    print(f"  本机 QQ {account.uin}，{len(account.directory)} 个好友，"
+          f"图片队列上限 {queue.max_items}")
+    if not args.covers:
+        print("  注意：没有配置图片文件夹（--covers），握手将无法发起",
+              file=sys.stderr)
+    if not args.no_browser:
+        import webbrowser
+        try:
+            webbrowser.open(shown)
+        except Exception:                          # noqa: BLE001 - headless
+            pass
+    uvicorn.run(app, host=args.host, port=port, log_level="warning")
+    return 0
+
+
 def _parse_onebot(raw: list[str]) -> dict[str, str]:
     """``["3925697820=ws://127.0.0.1:9711/;mkx-..."]`` -> ``{uin: "url;token"}``.
 
@@ -345,6 +423,9 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
                 print(f"  建议：{hint}", file=sys.stderr)
             return 2
         return 0
+
+    if args.command == "client":
+        return _run_client(args)
 
     if args.command == "qq-init":
         from .onebot_config import OneBotSettings, read_settings, write_config
