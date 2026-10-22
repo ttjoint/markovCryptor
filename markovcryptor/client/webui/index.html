@@ -32,7 +32,7 @@
   /* ---------- 左侧：好友列表 ---------- */
   aside {
     display: flex; flex-direction: column; border-right: 1px solid var(--line);
-    background: var(--panel); min-width: 0;
+    background: var(--panel); min-width: 0; min-height: 0; overflow: hidden;
   }
   .me {
     padding: 14px 16px; border-bottom: 1px solid var(--line);
@@ -51,7 +51,7 @@
     padding: 7px 0; border-radius: 6px; cursor: pointer; font: inherit;
   }
   .tabs button[aria-selected="true"] { background: var(--panel2); color: var(--text); }
-  .list { flex: 1; overflow-y: auto; padding: 4px 8px 12px; }
+  .list { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 4px 8px 12px; }
   .row {
     display: flex; align-items: center; gap: 10px; padding: 9px 10px;
     border-radius: 8px; cursor: pointer; position: relative;
@@ -70,9 +70,18 @@
   .mark.wait { color: var(--warn); }
 
   /* ---------- 右侧：对话 ---------- */
-  main { display: flex; flex-direction: column; min-width: 0; height: 100vh; }
+  main {
+    display: flex; flex-direction: column;
+    min-width: 0; min-height: 0; height: 100vh; overflow: hidden;
+  }
+  /* 会话容器本身也是 flex 项，同样要能收缩，否则它的子项再怎么设都白搭。 */
+  #chat {
+    display: flex; flex-direction: column;
+    flex: 1 1 0; min-height: 0; overflow: hidden;
+  }
   .empty { flex: 1; display: grid; place-items: center; color: var(--dim); }
   .topbar {
+    flex: 0 0 auto;
     display: flex; align-items: center; gap: 12px; padding: 12px 20px;
     border-bottom: 1px solid var(--line); background: var(--panel);
   }
@@ -81,16 +90,29 @@
   .state .est { color: var(--ok); }
   .state .wait { color: var(--warn); }
 
-  .panes { flex: 1; display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
-  .pane { display: flex; flex-direction: column; min-width: 0; border-left: 1px solid var(--line); }
+  .panes {
+    flex: 1 1 0; display: grid; grid-template-columns: 1fr 1fr;
+    min-height: 0; overflow: hidden;
+  }
+  .pane {
+    display: flex; flex-direction: column;
+    min-width: 0; min-height: 0; overflow: hidden;
+    border-left: 1px solid var(--line);
+  }
   .pane:first-child { border-left: 0; }
   .pane h2 {
     font-size: 12px; font-weight: 600; color: var(--dim); margin: 0;
     padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
     letter-spacing: .02em;
   }
-  .thread { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex;
-            flex-direction: column; gap: 10px; }
+  /* min-height:0 是这里的关键。flex 项的默认 min-height 是 auto，
+     意思是"不小于内容高度" —— 于是内容一多，overflow-y:auto 永远不生效，
+     整个会话窗被撑高、把下方输入区顶出可视区。这是实际反馈的 bug。 */
+  .thread {
+    flex: 1 1 0; min-height: 0; overflow-y: auto;
+    padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;
+    overscroll-behavior: contain;
+  }
   /* 发出/收到靠三件事一起区分，单靠颜色在浅色主题或色弱时不够：
      位置（左右对齐）、气泡形状（尖角方向）、以及明确的发送者标签。 */
   .msg { max-width: 86%; display: flex; flex-direction: column; gap: 3px; }
@@ -119,6 +141,7 @@
 
   /* ---------- 底部：输入 + 队列 ---------- */
   .composer {
+    flex: 0 0 auto;                 /* 输入区固定，永远不被消息区挤掉 */
     border-top: 1px solid var(--line); background: var(--panel);
     padding: 10px 16px; display: flex; flex-direction: column; gap: 8px;
   }
@@ -218,6 +241,23 @@
   .modellist li .tag { font-size: 11px; color: var(--dim); }
   .modellist li .tag.ok { color: var(--ok); }
   .modellist li .tag.bad { color: var(--err); }
+  /* ---------- 右键菜单 ---------- */
+  /* 这是应用窗口（浏览器 --app 模式），不是网页。默认菜单里的"重新加载"
+     "检查""另存为"对用户没有意义，还会让人以为这是个网页。只给必要的。 */
+  .ctxmenu {
+    position: fixed; z-index: 200; min-width: 150px; padding: 4px;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  }
+  .ctxmenu button {
+    display: block; width: 100%; text-align: left; background: none; border: 0;
+    color: var(--text); padding: 7px 12px; border-radius: 6px; cursor: pointer;
+    font: inherit; font-size: 13px;
+  }
+  .ctxmenu button:hover { background: var(--panel2); }
+  .ctxmenu button:disabled { color: var(--dim); cursor: default; }
+  .ctxmenu button:disabled:hover { background: none; }
+  .ctxmenu .sep { height: 1px; background: var(--line); margin: 4px 6px; }
   .toast {
     position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
     background: var(--err); color: #fff; padding: 8px 16px; border-radius: 8px;
@@ -330,7 +370,7 @@
         <button class="ghost" id="btnOnboardSettings">打开设置</button>
       </div>
     </div>
-    <div id="chat" hidden style="display:flex;flex-direction:column;height:100%">
+    <div id="chat" hidden>
       <div class="topbar">
         <div class="title" id="peerName"></div>
         <div class="state" id="peerState"></div>
@@ -509,6 +549,7 @@ function bubbleFor(entry, peerName, showDate) {
     meta.append(sep, t);
   }
   wrap.appendChild(meta);
+  wrap._entry = entry;                 // 右键菜单靠它取原文
 
   const b = document.createElement("div");
   b.className = "bubble";
@@ -1149,6 +1190,125 @@ $("btnImport").onclick = async () => {
 };
 
 $("btnOnboardSettings").onclick = () => openSheet("general");
+
+
+// ================================================================= 右键菜单
+
+// 屏蔽浏览器默认右键菜单。这是应用窗口（--app 模式），不是网页：
+// "重新加载/检查/另存为/翻译"这些对用户毫无意义，还会让人以为这是个网页。
+// 只提供与上下文相关的几项，其余位置给最必要的一个"复制"。
+let ctxEl = null;
+
+function closeCtx() {
+  if (ctxEl) { ctxEl.remove(); ctxEl = null; }
+}
+
+function showCtx(x, y, items) {
+  closeCtx();
+  const menu = document.createElement("div");
+  menu.className = "ctxmenu";
+  for (const item of items) {
+    if (item === "-") {
+      const sep = document.createElement("div");
+      sep.className = "sep";
+      menu.appendChild(sep);
+      continue;
+    }
+    const btn = document.createElement("button");
+    btn.textContent = item.label;
+    if (item.disabled) btn.disabled = true;
+    btn.onclick = () => { closeCtx(); item.run(); };
+    menu.appendChild(btn);
+  }
+  document.body.appendChild(menu);
+  // 贴边时翻转，别让菜单跑出窗口。
+  const r = menu.getBoundingClientRect();
+  const left = x + r.width > window.innerWidth ? x - r.width : x;
+  const top = y + r.height > window.innerHeight ? y - r.height : y;
+  menu.style.left = Math.max(4, left) + "px";
+  menu.style.top = Math.max(4, top) + "px";
+  ctxEl = menu;
+}
+
+// 取当前选中的文字（气泡里的消息）
+function selectionText() {
+  const sel = window.getSelection();
+  return sel ? String(sel).trim() : "";
+}
+
+// 一条消息的右键菜单：复制全文 + 复制密文（有的话）
+function entryMenu(entry) {
+  const items = [];
+  const plain = (entry.text || "").trim();
+  items.push({
+    label: "复制消息",
+    disabled: !plain,
+    run: () => copyText(plain),
+  });
+  const covert = (entry.covert || []).join("\n").trim();
+  if (covert) {
+    items.push({ label: "复制密文", run: () => copyText(covert) });
+  }
+  const sel = selectionText();
+  if (sel) {
+    items.unshift({ label: "复制选中内容", run: () => copyText(sel) });
+    items.splice(1, 0, "-");
+  }
+  return items;
+}
+
+async function copyText(text) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("已复制");
+  } catch (e) {
+    // 剪贴板 API 需要安全上下文；file:// 或旧浏览器会失败。
+    // 用老办法兜底，别让"复制"按钮什么都不做。
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); toast("已复制"); }
+    catch (_) { toast("复制失败"); }
+    ta.remove();
+  }
+}
+
+document.addEventListener("contextmenu", (e) => {
+  // 输入框保留系统的复制/粘贴菜单 —— 那里系统菜单比我们做得好。
+  const tag = (e.target.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea") return;
+  e.preventDefault();
+
+  const msgEl = e.target.closest(".msg");
+  if (msgEl && msgEl._entry) {
+    showCtx(e.clientX, e.clientY, entryMenu(msgEl._entry));
+    return;
+  }
+  // 其他位置：只给"复制选中内容"（有选中时）或什么也不给。
+  const sel = selectionText();
+  if (sel) {
+    showCtx(e.clientX, e.clientY,
+            [{ label: "复制选中内容", run: () => copyText(sel) }]);
+  }
+});
+
+document.addEventListener("click", closeCtx);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeCtx(); });
+window.addEventListener("blur", closeCtx);
+window.addEventListener("resize", closeCtx);
+
+// 应用窗口里 F5 / Ctrl+R 会重载界面，丢掉当前选中的会话和滚动位置，
+// 而用户没有任何理由需要它。挡掉。
+document.addEventListener("keydown", (e) => {
+  const k = e.key.toLowerCase();
+  if (k === "f5" || ((e.ctrlKey || e.metaKey) && k === "r")) {
+    e.preventDefault();
+  }
+});
 
 // 轮询：没有 WebSocket 推送到浏览器，用短轮询就够（单机、一个用户）。
 // 首次加载要显式兜住：未处理的 rejection 在控制台之外看不见，
