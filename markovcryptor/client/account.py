@@ -109,6 +109,8 @@ class Account:
         self.directory.refresh(self.network.friend_list(), owner=self.uin)
         self.conversations.attach()
         self.conversations.attach_images(self.images)
+        # 告诉会话层本机账号，否则未渲染的消息会把自己的语音说成"对方发的"。
+        self.conversations.attach_self(self.uin)
         self._load_models()
         self._ready = True
         event("client", "account_ready", uin=self.uin, friends=len(self.directory))
@@ -319,7 +321,9 @@ class Account:
         parsed: list[message_parser.ParsedMessage] = []
         for payload in raw:
             try:
-                parsed.append(message_parser.parse(payload))
+                # 传 self_uin：历史里两边都有，要能分清谁发的。
+                parsed.append(message_parser.parse(
+                    payload, self_uin=self.uin))
             except Exception as exc:                # noqa: BLE001
                 event("client", "history_parse_failed", level=logging.WARNING,
                       peer=peer, error=exc)

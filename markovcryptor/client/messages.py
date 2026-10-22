@@ -105,6 +105,10 @@ class ParsedMessage:
     #: carry one (a synthetic event, or an older bridge), which the UI renders
     #: as "no time" rather than inventing one.
     at: float = 0.0
+    #: True when we sent this message ourselves. QQ echoes our own messages back
+    #: when ``reportSelfMessage`` is on, and history contains both sides; without
+    #: this the UI cannot tell "对方发送了语音" from "我发送了语音".
+    mine: bool = False
 
     @property
     def has_content(self) -> bool:
@@ -144,16 +148,29 @@ def segments_of(payload: dict) -> list[dict]:
     return [{"type": "text", "data": {"text": raw}}] if raw else []
 
 
-def parse(payload: dict) -> ParsedMessage:
+def parse(payload: dict, *, self_uin: str | None = None) -> ParsedMessage:
     """Turn one OneBot private-message event into something renderable.
 
     Never raises. A malformed segment is skipped, not turned into an exception:
     this runs on the socket reader, and one odd message must not take down the
     connection.
+
+    ``self_uin`` lets us tell our own messages apart. QQ echoes them back when
+    ``reportSelfMessage`` is on, and history contains both sides -- without it
+    the wording for un-renderable segments would claim *we* sent a voice message
+    was sent by "对方", while the bubble sits on the right.
     """
     texts: list[str] = []
     images: list[ImageRef] = []
     unsupported: list[str] = []
+
+    # 谁发的：QQ 的 sender 字段是权威来源，self_uin 用来判断是不是自己。
+    sender = payload.get("user_id")
+    sender_info = payload.get("sender")
+    if isinstance(sender_info, dict) and sender_info.get("user_id") is not None:
+        sender = sender_info["user_id"]
+    sender_text = str(sender) if sender is not None else ""
+    mine = bool(self_uin) and sender_text == str(self_uin)
 
     for seg in segments_of(payload):
         kind = str(seg.get("type") or "")
@@ -171,26 +188,23 @@ def parse(payload: dict) -> ParsedMessage:
             continue
         else:
             label = _NOT_RENDERED.get(kind) or kind or "未知消息"
+            # 人称按发送者决定：QQ 会把自己发的消息回推，历史里也两边都有。
+            # 写死"对方发送了"会让自己的语音显示成对方发的 —— 而气泡在右边，
+            # 自相矛盾。
+            who = "我发送了" if mine else "对方发送了"
+            line = f"{who} {label}"
             # 同一类连续出现（三个表情）说一次就够，不要刷三行。
-            line = f"对方发送了 {label}"
             if not unsupported or unsupported[-1] != line:
                 unsupported.append(line)
 
-    # ``sender.user_id`` is the authoritative author for history entries, while
-    # a live private-message event only carries a top-level ``user_id`` (the
-    # friend). Prefer the nested one so history can tell who said what.
-    sender = payload.get("user_id")
-    sender_info = payload.get("sender")
-    if isinstance(sender_info, dict) and sender_info.get("user_id") is not None:
-        sender = sender_info["user_id"]
-
     return ParsedMessage(
-        sender=str(sender) if sender is not None else "",
+        sender=sender_text,
         text="".join(texts),
         images=tuple(images),
         unsupported=tuple(unsupported),
         message_id=str(payload.get("message_id")) if payload.get("message_id") is not None else None,
         at=_timestamp(payload),
+        mine=mine,
     )
 
 
@@ -215,10 +229,15 @@ def _timestamp(payload: dict) -> float:
     return 0.0
 
 
-def describe_unsupported(kind: str) -> str:
+def describe_unsupported(kind: str, *, mine: bool = False) -> str:
     """One short line for a segment we do not render.
 
     Exposed so the UI can label a history entry it received as a bare type
     string, without duplicating the wording table.
+
+    ``mine`` picks the pronoun. QQ echoes our own messages back and history has
+    both sides, so "对方发送了语音" would be a lie when *we* sent it -- and a
+    confusing one, because the bubble sits on the right.
     """
-    return f"对方发送了 {_NOT_RENDERED.get(kind) or kind or '未知消息'}"
+    who = "我发送了" if mine else "对方发送了"
+    return f"{who} {_NOT_RENDERED.get(kind) or kind or '未知消息'}"

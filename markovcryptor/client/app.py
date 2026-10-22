@@ -497,6 +497,75 @@ def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
         account.models.load_in_background()
         return JSONResponse({"ok": True, "path": str(target)})
 
+    @app.post("/client/models/upload")
+    async def models_upload(payload: dict) -> JSONResponse:
+        """Accept a model file dropped onto the window.
+
+        Two things happen here, in this order:
+
+        1. **Validate it really is a model** -- by loading it. A user dragging a
+           random ``.json`` in should get a clear "this is not a model", not a
+           file silently copied into the model folder that then shows up as
+           "加载失败" with no explanation.
+        2. **Save it into the default model folder** so it survives a restart.
+           Loading without saving would work until the user closes the window,
+           which is worse than useless: they would think it worked.
+
+        The name comes from the payload (the browser has the real filename); we
+        never trust it as a path -- only the final component is used.
+        """
+        data = str(payload.get("data") or "")
+        name = str(payload.get("name") or "model.json").strip()
+        if not data:
+            raise HTTPException(status_code=422, detail="没有收到文件内容")
+
+        raw = _decode_data_url(data)
+        if len(raw) > 64 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="模型文件不能超过 64MB")
+
+        # 只取文件名，防止 ../ 之类的路径穿越。
+        safe = Path(name).name or "model.json"
+        if not safe.lower().endswith(".json"):
+            safe += ".json"
+
+        # 先验证：能在临时文件里成功 load 才算模型。
+        import tempfile
+
+        from ..model import MarkovModel
+
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+                tmp.write(raw)
+                tmp_path = Path(tmp.name)
+            try:
+                model = MarkovModel.load(tmp_path)
+            finally:
+                tmp_path.unlink(missing_ok=True)
+        except Exception as exc:                    # noqa: BLE001 - user file
+            raise HTTPException(
+                status_code=422,
+                detail=f"这不是可用的文本模型：{exc}") from None
+
+        # 保存到默认模型目录（没配过就自动建）。
+        from .models import ModelLibrary, default_model_folder
+
+        if account.models is None:
+            account.models = ModelLibrary(default_model_folder())
+        folder = account.models.ensure_folder()
+        target = folder / safe
+        try:
+            target.write_bytes(raw)
+        except OSError as exc:
+            raise HTTPException(status_code=500,
+                                detail=f"保存模型失败：{exc}") from None
+
+        account.models.scan()
+        account.models.load_in_background()
+        event("models", "uploaded", path=str(target),
+              model_name=getattr(model, "name", "") or safe)
+        return JSONResponse({"ok": True, "path": str(target),
+                             "name": getattr(model, "name", "") or Path(safe).stem})
+
     @app.post("/client/models/import")
     async def models_import(payload: dict) -> JSONResponse:
         """Copy an existing model file into the model folder."""
@@ -827,19 +896,22 @@ def _merge_history(account: Account, conversation, peer: str, count: int) -> Non
         urls = [ref.locate() for ref in item.images]
         urls = [u for u in urls if u]
 
-        # 图片要真的显示出来（用户明确要求：历史里的图也要看得到）。
-        # 下载不在这里做 —— 二十条历史可能带几十张图，同步拉会把"点开好友"
-        # 变成一次等待。先记占位，插进时间线后再后台补图。
-        if urls and not item.text.strip():
-            placeholders.append("对方发送了 图片")
-
-        if not (item.text.strip() or placeholders):
-            continue
-
         # 归属由 QQ 自己的 sender 决定，不能一律当"对方"。
         # 硬编码 mine=False 会让用户自己发过的话也显示在左边、和对方一模一样,
         # 界面上根本分不出谁说的 —— 这正是实际反馈的问题。
         mine = bool(account.uin) and item.sender == account.uin
+
+        # **图片能下载时不要加占位文字。**
+        # 之前对纯图片消息无条件加一行"对方发送了 图片"，等图片真的下载
+        # 出来之后，就变成一条带着图的消息旁边还写着"对方发送了图片"——
+        # 重复且荒谬。只有拿不到 URL（真的显示不了）时才留一行说明。
+        if item.images and not urls and not item.text.strip():
+            who = "我发送了" if mine else "对方发送了"
+            placeholders.append(f"{who} 图片（无法加载）")
+
+        if not (item.text.strip() or placeholders or urls):
+            continue
+
         entry = Entry(
             mine=mine,
             text=item.text,

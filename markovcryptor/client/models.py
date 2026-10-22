@@ -39,6 +39,24 @@ from ..observability import event
 _MODEL_SUFFIX = ".json"
 
 
+def default_model_folder() -> Path:
+    """Where models live when the user has not configured a folder.
+
+    In the shipped bundle the interpreter sits at ``<包>/python/python.exe`, so
+    ``sys.executable.parent`` is ``<包>/python`` -- not where a user would
+    look. Prefer ``<包>/models`` (the one with README.txt) when the bundle
+    layout is present, and fall back to beside the interpreter otherwise.
+    """
+    import sys
+
+    beside_exe = Path(sys.executable).resolve().parent
+    # 打包形态：<包>/python/python.exe -> 模型放 <包>/models
+    bundle_root = beside_exe.parent
+    if (bundle_root / "models").is_dir():
+        return bundle_root / "models"
+    return beside_exe / "models"
+
+
 @dataclass
 class ModelEntry:
     """One model file, possibly not yet loaded."""
@@ -75,6 +93,19 @@ class ModelLibrary:
         self._loading = False
 
     # ------------------------------------------------------------------ inventory
+
+    def ensure_folder(self, folder: Path | None = None) -> Path:
+        """Point the library at ``folder`` (or the default) and create it.
+
+        Used when the user drops a model file in: we need somewhere to put it
+        even if no folder was configured yet.
+        """
+        target = Path(folder) if folder is not None else (
+            self.folder if self.folder is not None else default_model_folder())
+        target.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            self.folder = target
+        return target
 
     def scan(self) -> int:
         """List model files without loading them. Returns how many were found."""

@@ -261,6 +261,9 @@ class Conversations:
         #: answer comes from that friend's picture queue via this callback.
         self._cover_for = cover_for
         self._items: dict[str, Conversation] = {}
+        #: 本机 QQ 号。用来判断某条消息是不是自己发的 —— QQ 会把我们
+        #: 发的消息回推，历史里也两边都有。由 :meth:`attach_self` 填入。
+        self.uin: str = ""
 
     # ------------------------------------------------------------- accessors
 
@@ -363,6 +366,15 @@ class Conversations:
         """Give the conversation layer somewhere to download pictures from."""
         self.images = cache
 
+    def attach_self(self, uin: str) -> None:
+        """Tell the layer our own QQ number.
+
+        Needed to label un-renderable segments correctly: QQ echoes our own
+        messages back, and "对方发送了语音" would be wrong -- and confusing,
+        because the bubble sits on the right.
+        """
+        self.uin = str(uin or "")
+
     def _on_raw(self, sender: str, payload: dict) -> None:
         """Raw QQ message, before any stego inspection.
 
@@ -371,7 +383,7 @@ class Conversations:
         sinks, so by the time the packet is routed, the destination exists.
         """
         try:
-            parsed = message_parser.parse(payload)
+            parsed = message_parser.parse(payload, self_uin=getattr(self, "uin", None))
         except Exception as exc:                    # noqa: BLE001 - reader thread
             event("client", "parse_failed", level=logging.WARNING,
                   sender=sender, error=exc)

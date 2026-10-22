@@ -507,26 +507,37 @@ class HistorySeqTest(_Base):
 
 
 class HistoryImagePlaceholderTest(_Base):
-    """历史里的图片不下载，但必须留一行占位。
+    """图片能加载时**不要**加占位文字，加载不了才加。
 
-    实际 bug：纯图片的历史消息被合并成**完全空白**的条目 —— 界面上什么都
-    不显示，用户以为消息丢了。拉历史时不下载图片是对的（20 条历史可能带
-    几十张图），但不能因此让消息静默消失。
+    用户反馈：纯图片消息旁边还写着"对方发送了 图片"是重复的 —— 图已经
+    完整显示出来了。占位行只用于真正看不到内容的情况（拿不到 URL）。
     """
 
-    def _history_with_image(self):
+    def _history_with_image(self, url="https://x/a.jpg"):
         from markovcryptor.client.messages import ImageRef, ParsedMessage
         return [ParsedMessage(sender=BOB, text="",
-                              images=(ImageRef(url="https://x/a.jpg"),),
+                              images=(ImageRef(url=url),),
                               at=1000.0)]
 
-    def test_image_only_history_gets_a_placeholder_line(self):
+    def test_image_only_history_has_no_redundant_placeholder(self):
+        """有 URL（能下载）就不该多一行废话。"""
         with mock.patch.object(self.account, "load_history",
                                return_value=self._history_with_image()):
             body = self.get(f"/client/conversation/{BOB}?history=5").json()
+        self.assertEqual(len(body["entries"]), 1,
+                         "图片消息本身要保留，不能整条丢掉")
+        entry = body["entries"][0]
+        self.assertEqual(entry["unsupported"], [],
+                         "图已经能显示，不需要「发送了图片」这种提示")
+
+    def test_image_without_url_gets_a_placeholder(self):
+        """拿不到 URL 就是真的看不到，这时才提示。"""
+        with mock.patch.object(self.account, "load_history",
+                               return_value=self._history_with_image(url=None)):
+            body = self.get(f"/client/conversation/{BOB}?history=5").json()
         self.assertEqual(len(body["entries"]), 1)
         entry = body["entries"][0]
-        self.assertTrue(entry["unsupported"], "必须留一行说明")
+        self.assertTrue(entry["unsupported"], "看不到内容时必须留一行说明")
         self.assertIn("图片", entry["unsupported"][0])
 
     def test_text_plus_image_keeps_the_text_only(self):

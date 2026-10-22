@@ -10,6 +10,7 @@ from __future__ import annotations
 import unittest
 
 from markovcryptor.client import messages
+from markovcryptor.client.messages import describe_unsupported, parse
 
 
 def _event(*segments, user_id=20001, message_id=42):
@@ -162,3 +163,44 @@ class RobustnessTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SelfAttributionTest(unittest.TestCase):
+    """未解析的消息要按**谁发的**选人称。
+
+    QQ 会把自己发的消息回推（reportSelfMessage），历史里也两边都有。
+    写死"对方发送了"会让自己的语音显示成对方发的 —— 而气泡在右边，
+    自相矛盾。用户明确要求：我方发出的未能解析消息也要用我方气泡展示。
+    """
+
+    def _voice(self, sender):
+        return {
+            "post_type": "message", "message_type": "private",
+            "user_id": 20001,
+            "sender": {"user_id": sender},
+            "message": [{"type": "record", "data": {"file": "a.amr"}}],
+            "time": 1750000000,
+        }
+
+    def test_peer_voice_says_peer(self):
+        got = parse(self._voice(20001), self_uin="10001")
+        self.assertFalse(got.mine)
+        self.assertEqual(got.unsupported, ("对方发送了 语音",))
+
+    def test_own_voice_says_me(self):
+        """我方发出的语音必须说"我发送了"，不能说成对方。"""
+        got = parse(self._voice(10001), self_uin="10001")
+        self.assertTrue(got.mine, "自己发的要标记为 mine")
+        self.assertEqual(got.unsupported, ("我发送了 语音",))
+
+    def test_without_self_uin_nothing_is_mine(self):
+        """没传本机账号时不能凭空认领消息。"""
+        got = parse(self._voice(10001))
+        self.assertFalse(got.mine)
+        self.assertEqual(got.unsupported, ("对方发送了 语音",))
+
+    def test_describe_unsupported_picks_pronoun(self):
+        self.assertEqual(describe_unsupported("record"),
+                         "对方发送了 语音")
+        self.assertEqual(describe_unsupported("record", mine=True),
+                         "我发送了 语音")

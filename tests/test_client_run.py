@@ -133,3 +133,66 @@ class StartupLogTest(unittest.TestCase):
             text = log.read_text(encoding="utf-8")
             self.assertIn("启动失败", text)
             self.assertIn("QQ", text)
+
+
+class PortRediscoveryTest(unittest.TestCase):
+    """自己启动了 SnowLuma，就必须重新读端口。
+
+    实际故障（虚拟机重启后）：上次运行留下的 config/onebot_<QQ>.json 里写着
+    3001，这次 SnowLuma 重新分配成 3000。旧代码拿启动前的 3001 去等端口，
+    死等到超时，报"OneBot 端口没起来：ws://127.0.0.1:3001/"。
+    SnowLuma 其实起来了，只是端口不是那个。
+    """
+
+    def test_stale_port_is_not_used_after_starting_snowluma(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snow = _fake_snowluma(root, port=3001)   # 旧配置写 3001
+
+            started = []
+            waited = []
+
+            def fake_start(path, **kwargs):
+                started.append(path)
+                # 启动后 SnowLuma 把端口改成了 3000 —— 这才是真实情况。
+                (snow / "config" / "onebot_1741473279.json").write_text(
+                    json.dumps({"networks": {"wsServers": [
+                        {"host": "127.0.0.1", "port": 3000,
+                         "accessToken": "tok"}]}}), encoding="utf-8")
+                return None
+
+            def fake_wait_onebot(url, timeout=None):
+                waited.append(url)
+                # 只有 3000 是通的；3001 永远不通。
+                return url.endswith(":3000/")
+
+            # run() 后半段会真的连 QQ 并起 HTTP 服务；这里只关心端口选择，
+            # 所以把"连上之后"的部分整体打桩。
+            with mock.patch.object(run_mod.launcher, "start_snowluma", fake_start), \
+                 mock.patch.object(run_mod.launcher, "wait_for_onebot", fake_wait_onebot), \
+                 mock.patch.object(run_mod, "_serve", return_value=0), \
+                 mock.patch.object(run_mod, "_log"):
+                code = run_mod.run(snowluma=snow, open_browser=False)
+
+            self.assertTrue(started, "应当启动了 SnowLuma")
+            self.assertIn("ws://127.0.0.1:3000/", waited,
+                          "启动后必须用新发现的端口，不能用旧配置的 3001")
+            self.assertNotEqual(code, 2,
+                                "端口变了不该导致启动失败")
+
+    def test_reuses_running_instance_without_starting_a_second(self):
+        """已经在听就复用，不要起第二份（会 EADDRINUSE）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snow = _fake_snowluma(root, port=3001)
+
+            started = []
+            with mock.patch.object(run_mod.launcher, "start_snowluma",
+                                   lambda *a, **k: started.append(1)), \
+                 mock.patch.object(run_mod.launcher, "wait_for_onebot",
+                                   lambda url, timeout=None: True), \
+                 mock.patch.object(run_mod, "_serve", return_value=0), \
+                 mock.patch.object(run_mod, "_log"):
+                run_mod.run(snowluma=snow, open_browser=False)
+
+            self.assertEqual(started, [], "已在运行时不该再启动一份")

@@ -357,3 +357,89 @@ class FolderPickerTest(unittest.TestCase):
         with mock.patch.object(app_mod, "_pick_folder_win32",
                                side_effect=OSError("no shell")):
             self.assertIsNone(app_mod._pick_folder("x"))
+
+
+class ModelUploadTest(_Base):
+    """把 .json 拖进窗口就能装模型。
+
+    用户要求：拖进来 → 识别是文本模型 → 直接加载 → 存进运行路径下的默认
+    模型文件夹。四步操作（设置→选目录→拷文件→重新扫描）压成一步。
+    """
+
+    def _real_model_bytes(self) -> bytes:
+        root = Path(__file__).resolve().parent.parent / "models"
+        if not root.is_dir():
+            self.skipTest("仓库里没有模型文件")
+        files = sorted(root.glob("*.json"))
+        if not files:
+            self.skipTest("仓库里没有模型文件")
+        return files[0].read_bytes()
+
+    def _payload(self, raw: bytes, name="拖进来的.json"):
+        import base64
+        return {"name": name,
+                "data": "data:application/json;base64,"
+                        + base64.b64encode(raw).decode("ascii")}
+
+    def test_valid_model_is_saved_and_loaded(self):
+        raw = self._real_model_bytes()
+        target = self.root / "defaultmodels"
+        from markovcryptor.client import models as models_mod
+
+        with mock.patch.object(models_mod, "default_model_folder",
+                               return_value=target):
+            r = self.post("/client/models/upload", json=self._payload(raw))
+
+        self.assertEqual(r.status_code, 200, r.text)
+        saved = Path(r.json()["path"])
+        self.assertTrue(saved.exists(), "必须真的落盘，否则重启就没了")
+        self.assertEqual(saved.read_bytes(), raw, "内容要原样保存")
+        self.assertEqual(saved.parent, target, "要存进默认模型目录")
+        self.assertIsNotNone(self.account.models, "应当建立模型库")
+        self.assertEqual(self.account.models.folder, target)
+
+    def test_invalid_json_is_rejected_and_not_saved(self):
+        """不是模型就明确报错，不能悄悄存进去变成"加载失败"。"""
+        target = self.root / "defaultmodels"
+        from markovcryptor.client import models as models_mod
+
+        with mock.patch.object(models_mod, "default_model_folder",
+                               return_value=target):
+            r = self.post("/client/models/upload",
+                          json=self._payload(b'{"hello": "world"}'))
+
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("模型", r.json()["detail"])
+        self.assertFalse(target.exists() and any(target.glob("*.json")),
+                         "校验失败的文件不该落盘")
+
+    def test_path_traversal_in_name_is_defused(self):
+        """文件名里带 ../ 不能写到目录外面去。"""
+        raw = self._real_model_bytes()
+        target = self.root / "defaultmodels"
+        from markovcryptor.client import models as models_mod
+
+        with mock.patch.object(models_mod, "default_model_folder",
+                               return_value=target):
+            r = self.post("/client/models/upload",
+                          json=self._payload(raw, name="../../evil.json"))
+
+        self.assertEqual(r.status_code, 200, r.text)
+        saved = Path(r.json()["path"])
+        self.assertEqual(saved.parent, target, "只能落在模型目录里")
+        self.assertNotIn("..", str(saved))
+
+    def test_non_json_name_gets_json_suffix(self):
+        raw = self._real_model_bytes()
+        target = self.root / "defaultmodels"
+        from markovcryptor.client import models as models_mod
+
+        with mock.patch.object(models_mod, "default_model_folder",
+                               return_value=target):
+            r = self.post("/client/models/upload",
+                          json=self._payload(raw, name="模型备份"))
+        self.assertTrue(Path(r.json()["path"]).name.endswith(".json"))
+
+    def test_empty_payload_is_rejected(self):
+        r = self.post("/client/models/upload", json={"name": "x.json"})
+        self.assertEqual(r.status_code, 422)

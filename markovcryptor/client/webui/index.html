@@ -379,6 +379,20 @@
   .modellist li .tag { font-size: 11px; color: var(--dim); }
   .modellist li .tag.ok { color: var(--ok); }
   .modellist li .tag.bad { color: var(--err); }
+  /* ---------- 拖入模型的提示层 ---------- */
+  .dropveil {
+    position: fixed; inset: 0; z-index: 400;
+    background: rgba(18, 20, 24, .78);
+    display: grid; place-items: center;
+    pointer-events: none;                 /* 别挡住 drop 事件 */
+  }
+  .dropveil[hidden] { display: none; }
+  .dropbox {
+    border: 2px dashed var(--accent); border-radius: 14px;
+    padding: 28px 44px; font-size: 15px; font-weight: 600;
+    background: rgba(0,0,0,.35);
+  }
+
   /* ---------- 右键菜单 ---------- */
   /* 这是应用窗口（浏览器 --app 模式），不是网页。默认菜单里的"重新加载"
      "检查""另存为"对用户没有意义，还会让人以为这是个网页。只给必要的。 */
@@ -1998,6 +2012,93 @@ async function doHandshake() {
 // 用户只会看到一个永远空着的界面。
 
 setInterval(refreshState, 2500);
+
+// ================================================================= 拖入模型文件
+
+// 把 .json 拖到窗口任意位置 = 安装文本模型。
+// 原来只能"设置 -> 选目录 -> 把文件拷进去 -> 重新扫描"，四步而且要在两个
+// 窗口之间来回切；拖进来一步到位，还会立刻加载。
+//
+// 注意：图片拖到**明文输入区**是发图（见 initAttach），这里只管 .json，
+// 两者用文件类型区分，不会打架。
+function initModelDrop() {
+  let overlay = null;
+
+  const show = (text) => {
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.className = "dropveil";
+      const box = document.createElement("div");
+      box.className = "dropbox";
+      box.id = "dropBoxText";
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+    }
+    const box = overlay.querySelector("#dropBoxText");
+    box.textContent = text;
+    overlay.hidden = false;
+  };
+  const hide = () => { if (overlay) overlay.hidden = true; };
+
+  const isModelFile = (file) =>
+    /\.json$/i.test(file.name || "") || file.type === "application/json";
+
+  document.addEventListener("dragenter", (e) => {
+    if (!e.dataTransfer) return;
+    const hasModel = Array.from(e.dataTransfer.items || [])
+      .some((it) => it.kind === "file" && isModelFile(it));
+    if (hasModel) {
+      e.preventDefault();
+      show("松开以安装文本模型");
+    }
+  });
+
+  document.addEventListener("dragover", (e) => {
+    if (!e.dataTransfer) return;
+    const hasModel = Array.from(e.dataTransfer.items || [])
+      .some((it) => it.kind === "file" && isModelFile(it));
+    if (hasModel) e.preventDefault();
+  });
+
+  document.addEventListener("dragleave", (e) => {
+    // 只有真正离开窗口才收起，划过子元素不算。
+    if (e.relatedTarget === null) hide();
+  });
+
+  document.addEventListener("drop", async (e) => {
+    const files = Array.from((e.dataTransfer || {}).files || []);
+    const models = files.filter(isModelFile);
+    if (!models.length) return;             // 图片交给明文输入区处理
+    e.preventDefault();
+    hide();
+
+    for (const file of models) {
+      if (file.size > 64 * 1024 * 1024) {
+        toast(`${file.name} 太大（超过 64MB）`);
+        continue;
+      }
+      try {
+        const data = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onerror = () => reject(new Error("读取失败"));
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.readAsDataURL(file);
+        });
+        const d = await api("/client/models/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: file.name, data }),
+        });
+        toast(`已安装模型：${d.name}`);
+      } catch (err) {
+        toast(`${file.name}：${err.message}`);
+      }
+    }
+    await refreshState();
+    if (!$("modal").hidden) await loadModelList();
+  });
+}
+
 // ================================================================= 启动
 
 // 必须放在最后：上面用到 const SPLIT / COVERT / ATTACH，
@@ -2005,6 +2106,7 @@ setInterval(refreshState, 2500);
 initSplitter();
 initChannelSwitch();
 initAttach();
+initModelDrop();
 renderAttach();
 setCovertState("locked");
 setChannel("image", { textUsable: false, quiet: true });

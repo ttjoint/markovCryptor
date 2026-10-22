@@ -132,24 +132,40 @@ def run(*, snowluma: Path | None = None, config_path: Path | None = None,
 
         # 配置存在 ≠ SnowLuma 在跑：上次退出后文件留着，进程早没了。
         # 所以判断依据是**端口是否在听**，不是配置文件在不在。
-        # 已经在听就复用（第二份会 EADDRINUSE）；没在听就必须起一份。
-        endpoint = launcher.discover_endpoint(root)
-        if endpoint is not None and launcher.wait_for_onebot(endpoint.url, timeout=1.0):
+        #
+        # 而配置文件里的端口也**不可信**：SnowLuma 每次启动会重新分配
+        # （3000/3001 之类），上次写的 3001 这次可能是 3000。机器重启后
+        # 就撞上过：读到旧配置的 3001，启动后实际在 3000，于是死等 3001
+        # 直到超时，报"OneBot 端口没起来"。
+        #
+        # 因此规则是：旧配置只用来"猜一下是不是已经在跑"，凡是自己启动了
+        # 一份，就必须**重新发现**端口，不能用启动前的值。
+        previous = launcher.discover_endpoint(root)
+        reused = (previous is not None
+                  and launcher.wait_for_onebot(previous.url, timeout=1.0))
+
+        if reused:
+            endpoint = previous
             _log(f"复用已在运行的 SnowLuma，QQ {endpoint.uin}")
-        elif endpoint is not None:
-            _log(f"发现已登录的 QQ {endpoint.uin}，启动 SnowLuma…")
-            launcher.start_snowluma(root)
         else:
-            _log("正在等待 QQ 登录…（SnowLuma 只能挂到已登录的 QQ 上）")
+            if previous is not None:
+                _log(f"发现已登录的 QQ {previous.uin}，启动 SnowLuma…")
+            else:
+                _log("正在等待 QQ 登录…（SnowLuma 只能挂到已登录的 QQ 上）")
             launcher.start_snowluma(root)
+            # 启动之后重新读配置：端口几乎肯定变了。
             endpoint = launcher.wait_for_endpoint(
                 root, timeout=wait,
                 on_wait=lambda: _log("  仍在等待：请打开 QQ 并登录"))
 
         if not launcher.wait_for_onebot(endpoint.url):
+            # 端口对不上是最常见的原因：SnowLuma 起来了，但写在配置里的
+            # 端口和它实际监听的不一致（或者它还卡在初始化里）。
             raise launcher.LauncherError(
                 f"OneBot 端口没起来：{endpoint.url}",
-                hint="看 snowluma/logs 下的日志；也可能是端口被别的程序占了。")
+                hint=("SnowLuma 可能还在初始化，或端口被别的程序占了。"
+                      "看 snowluma/logs/launcher-snowluma.log；"
+                      "重启本程序通常会重新读到正确端口。"))
 
     except launcher.LauncherError as exc:
         _log(f"启动失败：{exc}")
@@ -161,6 +177,18 @@ def run(*, snowluma: Path | None = None, config_path: Path | None = None,
         return 2
 
     # 到这里 QQ 一定在线，可以建账号了。
+    return _serve(endpoint, cfg, config_path=config_path, root=root,
+                  open_browser=open_browser)
+
+
+def _serve(endpoint, cfg, *, config_path: Path | None, root: Path,
+           open_browser: bool | None) -> int:
+    """Wire up the account and run the UI until it exits.
+
+    Split out of :func:`run` so the part that decides *which port to talk to*
+    can be tested on its own -- this half actually opens sockets and blocks on
+    uvicorn, which no unit test should do.
+    """
     from ..terminal.onebot import OneBotNetwork
 
     network = OneBotNetwork(endpoint.url, endpoint.uin,
