@@ -90,16 +90,28 @@
   .state .est { color: var(--ok); }
   .state .wait { color: var(--warn); }
 
+  /* 左右两栏用 flex 而不是 grid：拖动分隔条时直接改 flex-basis，
+     窄到一定程度就把整栏藏掉，grid 做这个要反复改模板。 */
   .panes {
-    flex: 1 1 0; display: grid; grid-template-columns: 1fr 1fr;
-    min-height: 0; overflow: hidden;
+    flex: 1 1 0; display: flex; min-height: 0; overflow: hidden;
+  }
+  .pane.collapsed { display: none; }
+
+  /* 分隔条：6px 的可拖动条，hover 时变亮。 */
+  .splitter {
+    flex: 0 0 6px; cursor: col-resize; background: var(--line);
+    position: relative; transition: background .12s;
+  }
+  .splitter:hover, .splitter.dragging { background: var(--accent); }
+  .splitter::after {
+    /* 加宽可点击区域，视觉上还是细线。 */
+    content: ""; position: absolute; inset: 0 -4px;
   }
   .pane {
     display: flex; flex-direction: column;
-    min-width: 0; min-height: 0; overflow: hidden;
-    border-left: 1px solid var(--line);
+    flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden;
+    position: relative;                 /* 遮挡层靠它定位 */
   }
-  .pane:first-child { border-left: 0; }
   .pane h2 {
     font-size: 12px; font-weight: 600; color: var(--dim); margin: 0;
     padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
@@ -179,6 +191,89 @@
     position: absolute; left: 3px; bottom: 2px; font-size: 10px;
     color: #fff; text-shadow: 0 1px 2px #000;
   }
+  /* ---------- 遮挡层 ---------- */
+  /* 半透明但不全遮：底下的待发图片列表要能看见（用户要在握手前管理它们）。 */
+  .veil {
+    position: absolute; left: 0; right: 0; top: 0; bottom: 0; z-index: 20;
+    background: rgba(18, 20, 24, .72);
+    backdrop-filter: blur(1.5px);
+    display: grid; place-items: center; padding: 20px;
+    text-align: center;
+  }
+  .veil[hidden] { display: none; }
+  .veilbody { max-width: 320px; display: flex; flex-direction: column;
+              align-items: center; gap: 10px; }
+  .veilicon { font-size: 30px; opacity: .85; }
+  .veiltitle { font-size: 15px; font-weight: 600; }
+  .veiltext { font-size: 12px; color: var(--dim); line-height: 1.6; }
+  .veilbtn {
+    margin-top: 4px; background: var(--accent); border: 0; color: #fff;
+    border-radius: 8px; padding: 10px 22px; font: inherit; font-size: 14px;
+    cursor: pointer; font-weight: 600;
+  }
+  .veilbtn:hover { filter: brightness(1.1); }
+  .veilbtn:disabled { opacity: .5; cursor: not-allowed; filter: none; }
+  .veil.warn { background: rgba(60, 46, 20, .78); }
+
+  /* ---------- 图片/文本 信道开关 ---------- */
+  .channelbar {
+    display: flex; align-items: center; gap: 8px; font-size: 12px;
+    flex-wrap: wrap;
+  }
+  .switch {
+    display: inline-flex; align-items: center; position: relative;
+    width: 84px; height: 24px; border-radius: 12px; background: var(--panel2);
+    border: 1px solid var(--line); cursor: pointer; user-select: none;
+    flex: 0 0 auto;
+  }
+  .switch .knob {
+    position: absolute; top: 2px; left: 2px; width: 38px; height: 18px;
+    border-radius: 9px; background: var(--accent); transition: left .16s;
+  }
+  .switch[aria-checked="true"] .knob { left: 42px; }
+  .switch .lab {
+    flex: 1; text-align: center; z-index: 1; font-size: 11px;
+    color: var(--dim); transition: color .16s;
+  }
+  .switch[aria-checked="false"] .lab.image { color: #fff; font-weight: 600; }
+  .switch[aria-checked="true"] .lab.text { color: #fff; font-weight: 600; }
+  .switch.disabled { opacity: .45; cursor: not-allowed; }
+  .switch.disabled .knob { background: var(--dim); }
+  .chanwarn { color: var(--warn); font-size: 12px; }
+
+  /* ---------- 待发队列浮层 ----------
+     挂在密文栏底部，z-index 高于遮挡层。握手前它必须可见可操作：
+     用户要确认"下一张发的是哪张"、把不合适的叉掉。 */
+  .queuefloat {
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 30;
+    background: var(--panel);
+    border-top: 1px solid var(--line);
+    padding: 8px 12px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .queuefloat:has(.queuegrid:not(:empty)) { padding-bottom: 10px; }
+
+  /* ---------- 明文附件（粘贴/拖入的图片） ---------- */
+  .attachbar { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; }
+  .attachbar:empty { display: none; }
+  .attach {
+    position: relative; flex: 0 0 auto; width: 54px; height: 54px;
+    border-radius: 8px; overflow: hidden; border: 1px solid var(--line);
+  }
+  .attach img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .attach .x {
+    position: absolute; top: 2px; right: 2px; width: 17px; height: 17px;
+    border-radius: 50%; border: 0; cursor: pointer; padding: 0;
+    background: rgba(0,0,0,.68); color: #fff; font-size: 11px; line-height: 17px;
+  }
+  .attach .x:hover { background: var(--err); }
+
+  /* 拖拽经过时给个明确的落点提示，否则用户不知道能不能放。 */
+  .composer.dragover { outline: 2px dashed var(--accent); outline-offset: -4px; }
+
+  .hintline { font-size: 11px; color: var(--dim); min-height: 14px; }
+  .hintline.warn { color: var(--warn); }
+
   .composer {
     flex: 0 0 auto;                 /* 输入区固定，永远不被消息区挤掉 */
     border-top: 1px solid var(--line); background: var(--panel);
@@ -194,6 +289,9 @@
     background: var(--panel2); border: 1px solid var(--line); color: var(--text);
     border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12px;
     max-width: 220px;
+  }
+  .queuebar .tiny, .channelbar .tiny {
+    padding: 3px 8px; font-size: 11px;
   }
   .queuebar button {
     background: var(--panel2); border: 1px solid var(--line); color: var(--text);
@@ -415,37 +513,70 @@
         <div class="title" id="peerName"></div>
         <div class="state" id="peerState"></div>
       </div>
-      <div class="panes">
-        <div class="pane">
+      <div class="panes" id="panes">
+        <!-- 左：明文。显示 + 输入是一个单元。 -->
+        <section class="pane" id="panePlain">
           <h2>明文（对方在 QQ 里看到的）</h2>
           <div class="thread" id="plainThread"></div>
-        </div>
-        <div class="pane">
+          <div class="composer" id="plainComposer">
+            <div class="attachbar" id="attachBar" hidden></div>
+            <div class="entry">
+              <textarea id="input" rows="2"
+                placeholder="输入消息，Enter 发送，Shift+Enter 换行。可粘贴或拖入图片"></textarea>
+              <button class="send" id="btnSendText" title="发送（Enter）">发送</button>
+            </div>
+            <div class="hintline" id="plainHint"></div>
+          </div>
+        </section>
+
+        <div class="splitter" id="splitter" title="拖动调整左右宽度，双击恢复均分"></div>
+
+        <!-- 右：密文。同样是一个单元，未握手时整块被遮挡。 -->
+        <section class="pane" id="paneCovert">
           <h2>密文（解出来的隐藏内容）</h2>
           <div class="thread covert-thread" id="covertThread"></div>
-        </div>
-      </div>
-      <div class="composer">
-        <div class="queuebar">
-          <span class="pill" id="queueStat">队列 0/8</span>
-          <button id="btnRefill">补图</button>
-          <button id="btnHandshake">发起密钥交换</button>
-          <span id="queueHint" class="sub"></span>
-        </div>
-        <div class="queuegrid" id="queueGrid"></div>
-        <div class="queuebar">
-          <span class="pill" id="modelStat">模型 0/0</span>
-          <select id="modelPick" title="用于加密发出的文本；收方向会尝试所有已加载模型"></select>
-          <button id="btnModelReload">重新扫描</button>
-          <span id="modelHint" class="sub"></span>
-        </div>
-        <div class="entry">
-          <textarea id="input" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
-          <div class="actions">
-            <button class="send" id="btnSendText">发送</button>
-            <button class="ghost" id="btnSendCovert">密文发送</button>
+
+          <div class="composer" id="covertComposer">
+            <div class="channelbar">
+              <span class="switch" id="channelSwitch" role="switch" aria-checked="false"
+                    tabindex="0" title="切换隐藏载体：图片 / 文本">
+                <span class="knob"></span>
+                <span class="lab image">图片</span>
+                <span class="lab text">文本</span>
+              </span>
+              <select id="modelPick" title="用于加密发出的文本；收方向会尝试所有已加载模型"></select>
+              <span id="modelHint" class="sub"></span>
+              <button id="btnModelReload" class="tiny">重新扫描</button>
+            </div>
+
+            <div class="entry">
+              <textarea id="covertInput" rows="2"
+                placeholder="要隐藏的内容，Enter 发送，Shift+Enter 换行"></textarea>
+              <button class="send" id="btnSendCovert" title="隐藏并发送（Enter）">密文发送</button>
+            </div>
           </div>
-        </div>
+
+          <!-- 遮挡层：未握手 / 图片不足时盖住聊天和输入区。 -->
+          <div class="veil" id="covertVeil">
+            <div class="veilbody">
+              <div class="veilicon" id="veilIcon">🔒</div>
+              <div class="veiltitle" id="veilTitle">尚未握手</div>
+              <div class="veiltext" id="veilText">先与对方建立密钥，才能收发隐藏内容。</div>
+              <button class="veilbtn" id="veilAction">发起握手</button>
+            </div>
+          </div>
+
+          <!-- 待发图片队列：**故意放在遮挡层之后**。用户要在握手前就能看到
+               和管理这些图，所以它们永远浮在遮挡之上。 -->
+          <div class="queuefloat" id="queueFloat">
+            <div class="queuebar">
+              <span class="pill" id="queueStat">队列 0/8</span>
+              <button id="btnRefill" title="从图片文件夹补充待发图片">补图</button>
+              <span id="queueHint" class="sub"></span>
+            </div>
+            <div class="queuegrid" id="queueGrid"></div>
+          </div>
+        </section>
       </div>
     </div>
   </main>
@@ -733,6 +864,9 @@ function renderConversation(data) {
 }
 
 async function openConversation(peer) {
+  // 换会话时重置握手重试计数和遮挡层：每个好友的信道是独立的。
+  COVERT.attempts = 0;
+  setCovertState("locked");
   S.current = peer;
   $("empty").hidden = true;
   $("chat").hidden = false;
@@ -784,32 +918,43 @@ async function refreshState() {
     ? "未配置图片文件夹" : `${q.folders} 个文件夹`;
 
   const m = data.models || { total: 0, loaded: 0, names: [], loading: false };
-  $("modelStat").textContent = `模型 ${m.loaded}/${m.total}`;
-  if (m.total === 0) {
-    $("modelHint").textContent = "未配置模型目录（只能发图片密文）";
-  } else if (m.loading || m.loaded < m.total) {
-    $("modelHint").textContent = "加载中…";
-  } else {
-    $("modelHint").textContent = data.text_channel ? "文本信道可用" : "无可用模型";
-  }
-  // 选项只在变化时重建，否则每 2.5 秒轮询都会重置用户的选择。
-  const wanted = (m.names || []).join(" ");
-  if ($("modelPick").dataset.names !== wanted) {
-    $("modelPick").dataset.names = wanted;
-    const previous = $("modelPick").value;
-    $("modelPick").innerHTML = "";
-    for (const name of m.names || []) {
-      const opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = name;
-      $("modelPick").appendChild(opt);
+  S.textUsable = !!data.text_channel;
+  S.modelNames = m.names || [];
+  // modelStat 已并入信道栏提示，这里只在元素存在时更新。
+
+  // 模型状态变了要重新渲染信道控件：从"无模型"变成"有模型"时，
+  // 开关要恢复可切换、下拉要出现。否则用户配好模型后界面还停在旧样子。
+  renderChannelExtras({ textUsable: S.textUsable, modelNames: S.modelNames });
+
+  // 会话状态决定遮挡层。已建立则露出输入区。
+  if (S.current) {
+    const conv = (data.conversations || []).find((c) => c.peer === S.current);
+    const established = !!(conv && conv.established);
+    S.established = established;
+    if (!established) {
+      setCovertState(COVERT.state === "waiting" ? "waiting" : "locked");
+    } else {
+      setCovertState("ready");
     }
-    if (previous) $("modelPick").value = previous;
   }
-  $("modelPick").disabled = (m.names || []).length === 0;
 
   updateOnboard(data);
   renderList();
+
+  // 图片信道的容量检查。放这里是因为它依赖队列内容，而队列每轮都可能变
+  // （用户往文件夹里加了图）。只提示，不禁用 —— 文本信道仍可能可用。
+  if (S.current && S.established && COVERT.channel === "image") {
+    const cap = data.handshake_capacity || null;
+    if (cap && !cap.enough) {
+      setCovertState("noimage", {
+        message: cap.queued === 0
+          ? "待发图片队列是空的。配置图片文件夹，或点「补图」。"
+          : `队列里 ${cap.queued} 张图，最多只能藏 ${cap.capacity} 字节，装不下。`,
+      });
+    } else if (COVERT.state === "noimage") {
+      setCovertState("ready");
+    }
+  }
 
   // 当前会话如果开着，顺带刷新它的消息。
   if (S.current) {
@@ -828,21 +973,25 @@ async function refreshState() {
 
 // ---------------------------------------------------------------- 动作
 
-async function send(mode) {
+// 明文发送：文本 + 附件合并成**一条**消息。
+// QQ 允许只发图片，所以文本为空但有附件时也要发。
+async function sendPlain() {
   if (!S.current) return;
   const text = $("input").value;
-  if (mode === "text" && !text.trim()) return;
-  if (mode === "covert" && !text.trim()) {
-    toast("密文内容不能为空");
-    return;
-  }
+  const images = ATTACH.items.map((item) => item.data);
+  if (!text.trim() && !images.length) return;
+
   try {
-    const data = await api("/client/send", {
+    await api("/client/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ peer: S.current, mode, text }),
+      body: JSON.stringify({
+        peer: S.current, mode: "text", text, images,
+      }),
     });
     $("input").value = "";
+    ATTACH.items = [];
+    renderAttach();
     const detail = await api(`/client/conversation/${S.current}`);
     renderConversation(detail);
     await refreshState();
@@ -851,7 +1000,33 @@ async function send(mode) {
   }
 }
 
-async function handshake() {
+// 密文发送：走当前选中的信道。
+async function sendCovert() {
+  if (!S.current) return;
+  const text = $("covertInput").value;
+  if (!text.trim()) {
+    toast("密文内容不能为空");
+    return;
+  }
+  try {
+    await api("/client/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        peer: S.current, mode: "covert", text,
+        channel: COVERT.channel,
+      }),
+    });
+    $("covertInput").value = "";
+    const detail = await api(`/client/conversation/${S.current}`);
+    renderConversation(detail);
+    await refreshState();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function handshakeLegacy() {
   if (!S.current) return;
   try {
     await api("/client/send", {
@@ -886,10 +1061,13 @@ $("tabFriends").onclick = () => { S.mode = "friends";
   $("tabFriends").setAttribute("aria-selected", "true");
   $("tabRecent").setAttribute("aria-selected", "false"); renderList(); };
 
-$("btnSendText").onclick = () => send("text");
-$("btnSendCovert").onclick = () => send("covert");
-$("btnHandshake").onclick = handshake;
+$("btnSendText").onclick = sendPlain;
+$("btnSendCovert").onclick = sendCovert;
 $("btnRefill").onclick = refill;
+$("veilAction").onclick = () => {
+  if (COVERT.state === "noimage") { refill(); return; }
+  doHandshake();
+};
 
 $("btnModelReload").onclick = async () => {
   try {
@@ -912,9 +1090,22 @@ $("modelPick").onchange = async () => {
   } catch (e) { toast(e.message); }
 };
 
+// 两个输入框各自 Enter 发送。Shift+Enter 换行 —— 和 QQ 一致。
 $("input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send("text"); }
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    sendPlain();
+  }
 });
+
+$("covertInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    sendCovert();
+  }
+});
+
+
 
 
 // ================================================================= 设置与模型
@@ -1423,11 +1614,402 @@ document.addEventListener("click", (e) => {
   if (img && img.src) openLightbox(img.src);
 });
 
+
+// ================================================================= 左右分栏
+
+// 拖动分隔条改宽度；双击恢复均分；太窄就整栏收起。
+// 宽度存 localStorage：这是界面偏好，不是聊天内容，落盘没有隐私问题。
+const SPLIT = {
+  key: "mkx.split",
+  ratio: 0.5,
+  minPx: 220,
+  dragging: false,
+};
+
+function applySplit() {
+  const panes = $("panes");
+  const plain = $("panePlain");
+  const covert = $("paneCovert");
+  const total = panes.clientWidth - 6;         // 减掉分隔条
+  if (total <= 0) return;
+
+  const plainPx = Math.round(total * SPLIT.ratio);
+  const tooNarrow = plainPx < SPLIT.minPx || (total - plainPx) < SPLIT.minPx;
+
+  // 太窄就藏掉较窄的那一侧 —— 挤成一条 3px 的缝没有意义。
+  if (tooNarrow) {
+    const hidePlain = plainPx < total - plainPx;
+    plain.classList.toggle("collapsed", hidePlain);
+    covert.classList.toggle("collapsed", !hidePlain);
+    $("splitter").hidden = true;
+    // 剩下的那一栏占满
+    (hidePlain ? covert : plain).style.flex = "1 1 100%";
+    return;
+  }
+
+  $("splitter").hidden = false;
+  plain.classList.remove("collapsed");
+  covert.classList.remove("collapsed");
+  plain.style.flex = `0 0 ${plainPx}px`;
+  covert.style.flex = "1 1 0";
+}
+
+function initSplitter() {
+  const splitter = $("splitter");
+  const panes = $("panes");
+
+  const saved = Number(localStorage.getItem(SPLIT.key));
+  if (saved > 0.05 && saved < 0.95) SPLIT.ratio = saved;
+
+  splitter.addEventListener("mousedown", (e) => {
+    SPLIT.dragging = true;
+    splitter.classList.add("dragging");
+    document.body.style.cursor = "col-resize";
+    e.preventDefault();
+  });
+
+  window.addEventListener("mousemove", (e) => {
+    if (!SPLIT.dragging) return;
+    const box = panes.getBoundingClientRect();
+    const ratio = (e.clientX - box.left) / Math.max(1, box.width - 6);
+    SPLIT.ratio = Math.min(0.95, Math.max(0.05, ratio));
+    applySplit();
+  });
+
+  window.addEventListener("mouseup", () => {
+    if (!SPLIT.dragging) return;
+    SPLIT.dragging = false;
+    splitter.classList.remove("dragging");
+    document.body.style.cursor = "";
+    localStorage.setItem(SPLIT.key, String(SPLIT.ratio));
+  });
+
+  splitter.addEventListener("dblclick", () => {
+    SPLIT.ratio = 0.5;
+    localStorage.setItem(SPLIT.key, "0.5");
+    applySplit();
+  });
+
+  window.addEventListener("resize", applySplit);
+  applySplit();
+}
+
+// ================================================================= 密文区状态机
+
+// 密文区只有三种状态，遮挡层的内容由状态决定：
+//   locked   —— 未握手：只有一个「发起握手」大按钮
+//   waiting  —— 已发起：显示"已发起第 n 次握手，等待回应"，仍可再点
+//   ready    —— 已握手：遮挡消失，露出输入框
+//   noimage  —— 已握手但图片装不下：只盖住图片相关部分，并提示
+const COVERT = { state: "locked", attempts: 0, channel: "image" };
+
+function setCovertState(state, extra) {
+  COVERT.state = state;
+  const veil = $("covertVeil");
+  const icon = $("veilIcon");
+  const title = $("veilTitle");
+  const text = $("veilText");
+  const action = $("veilAction");
+  const composer = $("covertComposer");
+
+  veil.classList.remove("warn");
+  action.hidden = false;
+
+  if (state === "locked") {
+    veil.hidden = false;
+    icon.textContent = "🔒";
+    title.textContent = "尚未握手";
+    text.textContent = "先与对方建立密钥，才能收发隐藏内容。";
+    action.textContent = "发起握手";
+    action.disabled = false;
+    composer.classList.add("muted");
+  } else if (state === "waiting") {
+    veil.hidden = false;
+    icon.textContent = "⏳";
+    title.textContent = `已发起第 ${COVERT.attempts} 次握手`;
+    text.textContent = "等待对方回应。对方没收到或没开终端时可以再点一次。";
+    action.textContent = "再发起一次握手";
+    action.disabled = false;
+    composer.classList.add("muted");
+  } else if (state === "noimage") {
+    // 已握手但图片不足：只提示，不挡输入（文本信道仍可能可用）。
+    veil.hidden = false;
+    veil.classList.add("warn");
+    icon.textContent = "!";
+    title.textContent = "图片数量不足";
+    text.textContent = (extra && extra.message)
+      || "待发图片装不下要隐藏的内容。往图片文件夹里加几张图，或改用文本信道。";
+    action.textContent = "补图";
+    action.disabled = false;
+    composer.classList.remove("muted");
+  } else {
+    veil.hidden = true;
+    composer.classList.remove("muted");
+  }
+  updateCovertControls();
+}
+
+// 遮挡显示时，下面的输入框不能操作 —— 但**待发图片列表要能看见并操作**，
+// 用户需要在握手前管理它们。所以只禁用输入区，不禁用队列。
+function updateCovertControls() {
+  const locked = COVERT.state === "locked" || COVERT.state === "waiting";
+  const input = $("covertInput");
+  const btn = $("btnSendCovert");
+  const sw = $("channelSwitch");
+  if (input) input.disabled = locked;
+  if (btn) btn.disabled = locked;
+  if (sw) sw.classList.toggle("disabled", locked);
+}
+
+// ================================================================= 信道开关
+
+function setChannel(channel, opts) {
+  const usableText = !!(opts && opts.textUsable);
+  // 没有模型就不能切到文本 —— 切过去也发不出去，那是骗用户。
+  if (channel === "text" && !usableText) {
+    channel = "image";
+    if (!(opts && opts.quiet)) {
+      toast("未配置文本模型，只能使用图片信道");
+    }
+  }
+  COVERT.channel = channel;
+  const sw = $("channelSwitch");
+  sw.setAttribute("aria-checked", channel === "text" ? "true" : "false");
+  sw.classList.toggle("disabled", !usableText && channel === "image"
+                       && COVERT.state !== "locked"
+                       && COVERT.state !== "waiting");
+  renderChannelExtras(opts || {});
+}
+
+function renderChannelExtras(opts) {
+  const textUsable = !!opts.textUsable;
+  const names = opts.modelNames || [];
+  const pick = $("modelPick");
+  const hint = $("modelHint");
+
+  if (COVERT.channel === "text") {
+    pick.hidden = false;
+    pick.disabled = !textUsable;
+    if (names.length) {
+      const wanted = names.join("\u0000");
+      if (pick.dataset.names !== wanted) {
+        pick.dataset.names = wanted;
+        const previous = pick.value;
+        pick.innerHTML = "";
+        for (const name of names) {
+          const opt = document.createElement("option");
+          opt.value = name;
+          opt.textContent = name;
+          pick.appendChild(opt);
+        }
+        if (previous) pick.value = previous;
+      }
+      hint.className = "sub";
+      hint.textContent = "";
+    } else {
+      pick.hidden = true;
+      hint.className = "chanwarn";
+      hint.textContent = "⚠ 未配置文本模型";
+    }
+  } else {
+    // 图片信道时不需要选模型，但要让用户知道文本信道为什么不能用。
+    pick.hidden = true;
+    if (textUsable) {
+      hint.className = "sub";
+      hint.textContent = "";
+    } else {
+      hint.className = "chanwarn";
+      hint.textContent = "⚠ 未配置文本模型";
+    }
+  }
+}
+
+function initChannelSwitch() {
+  const sw = $("channelSwitch");
+  const toggle = () => {
+    if (COVERT.state === "locked" || COVERT.state === "waiting") return;
+    const textUsable = S.textUsable;
+    if (COVERT.channel === "image" && !textUsable) {
+      toast("未配置文本模型，只能使用图片信道");
+      return;
+    }
+    setChannel(COVERT.channel === "image" ? "text" : "image",
+               { textUsable, modelNames: S.modelNames });
+  };
+  sw.addEventListener("click", toggle);
+  sw.addEventListener("keydown", (e) => {
+    if (e.key === " " || e.key === "Enter") { e.preventDefault(); toggle(); }
+  });
+}
+
+// ================================================================= 明文附件
+
+// 粘贴/拖入的图片先攒在这里，按 Enter 时和文本一起作为**一条**消息发出。
+// QQ 允许只发图，所以文本可以为空。
+const ATTACH = { items: [], max: 9, maxBytes: 8 * 1024 * 1024 };
+
+function renderAttach() {
+  const bar = $("attachBar");
+  bar.innerHTML = "";
+  bar.hidden = ATTACH.items.length === 0;
+  ATTACH.items.forEach((item, index) => {
+    const box = document.createElement("div");
+    box.className = "attach";
+    const img = document.createElement("img");
+    img.src = item.thumb;
+    img.alt = item.name || "";
+    img.title = item.name || "";
+    box.appendChild(img);
+    const x = document.createElement("button");
+    x.className = "x";
+    x.textContent = "×";
+    x.title = "移除这张图";
+    x.onclick = () => { ATTACH.items.splice(index, 1); renderAttach(); };
+    box.appendChild(x);
+    bar.appendChild(box);
+  });
+  updatePlainHint();
+}
+
+function updatePlainHint() {
+  const hint = $("plainHint");
+  if (!hint) return;
+  if (ATTACH.items.length) {
+    hint.className = "hintline";
+    hint.textContent = `将随消息一起发送 ${ATTACH.items.length} 张图片`;
+  } else {
+    hint.className = "hintline";
+    hint.textContent = "";
+  }
+}
+
+// 把 File 读成 data URL，同时生成一个缩略图给界面看。
+// 缩略图在浏览器里做，避免为了预览把整张原图传给服务端再传回来。
+function readImageFile(file) {
+  return new Promise((resolve, reject) => {
+    if (!file.type.startsWith("image/")) {
+      reject(new Error("不是图片"));
+      return;
+    }
+    if (file.size > ATTACH.maxBytes) {
+      reject(new Error("单张图片不能超过 8MB"));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("读取失败"));
+    reader.onload = () => {
+      const dataUrl = String(reader.result || "");
+      const img = new Image();
+      img.onload = () => {
+        const size = 54;
+        const canvas = document.createElement("canvas");
+        const scale = Math.min(size / img.width, size / img.height, 1);
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve({
+          name: file.name || "粘贴的图片",
+          data: dataUrl,
+          thumb: canvas.toDataURL("image/jpeg", 0.7),
+        });
+      };
+      img.onerror = () => reject(new Error("图片无法解码"));
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function addFiles(files) {
+  const list = Array.from(files || []);
+  if (!list.length) return;
+  for (const file of list) {
+    if (ATTACH.items.length >= ATTACH.max) {
+      toast(`最多一次发 ${ATTACH.max} 张图片`);
+      break;
+    }
+    try {
+      ATTACH.items.push(await readImageFile(file));
+    } catch (e) {
+      toast(e.message);
+    }
+  }
+  renderAttach();
+}
+
+function initAttach() {
+  const input = $("input");
+  const composer = $("plainComposer");
+
+  input.addEventListener("paste", async (e) => {
+    const files = [];
+    for (const item of (e.clipboardData || {}).items || []) {
+      if (item.kind === "file") {
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    }
+    if (files.length) {
+      e.preventDefault();          // 别把图片当成路径文本贴进输入框
+      await addFiles(files);
+    }
+  });
+
+  // 拖入：dragover 必须 preventDefault，否则浏览器会直接打开图片。
+  composer.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    composer.classList.add("dragover");
+  });
+  composer.addEventListener("dragleave", () => composer.classList.remove("dragover"));
+  composer.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    composer.classList.remove("dragover");
+    const files = Array.from((e.dataTransfer || {}).files || [])
+      .filter((f) => f.type.startsWith("image/"));
+    if (files.length) await addFiles(files);
+  });
+}
+
+// ================================================================= 握手重试计数
+
+async function doHandshake() {
+  if (!S.current) return;
+  try {
+    const d = await api("/client/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ peer: S.current, mode: "handshake" }),
+    });
+    COVERT.attempts += 1;
+    if (d && d.established) {
+      setCovertState("ready");
+      toast("信道已建立");
+    } else {
+      setCovertState("waiting");
+    }
+    await refreshState();
+  } catch (e) {
+    toast("发起握手失败：" + e.message);
+  }
+}
+
 // 轮询：没有 WebSocket 推送到浏览器，用短轮询就够（单机、一个用户）。
 // 首次加载要显式兜住：未处理的 rejection 在控制台之外看不见，
 // 用户只会看到一个永远空着的界面。
-refreshState().catch((e) => toast("启动失败：" + e.message));
+
 setInterval(refreshState, 2500);
+// ================================================================= 启动
+
+// 必须放在最后：上面用到 const SPLIT / COVERT / ATTACH，
+// 提前调用会撞上 "Cannot access before initialization"（暂时性死区）。
+initSplitter();
+initChannelSwitch();
+initAttach();
+renderAttach();
+setCovertState("locked");
+setChannel("image", { textUsable: false, quiet: true });
+
+refreshState().catch((e) => toast("启动失败：" + e.message));
 </script>
 </body>
 </html>

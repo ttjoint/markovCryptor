@@ -36,6 +36,31 @@ from .models import ModelLibrary, MultiModelTextChannel
 from .queue import PictureQueue
 
 
+#: ``MAGIC | 'H' | pub(32) | mode`` —— 握手报文固定 38 字节。
+#: 从协议实现里量出来的，协议改了这里自动跟着改。
+_HANDSHAKE_BYTES = 38
+
+
+def _picture_capacity(raw: bytes) -> int:
+    """Bytes a picture can carry, using the same rules as the terminal.
+
+    GIF and still images have different carriers, and the terminal already knows
+    how to measure both -- reuse it instead of guessing, or the UI would promise
+    capacity the sender cannot deliver.
+    """
+    import io
+
+    from PIL import Image
+
+    from .. import gif_stego, image_stego
+
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        with Image.open(io.BytesIO(raw)) as image:
+            return int(gif_stego.capacity(image)["max_payload_bytes"])
+    with Image.open(io.BytesIO(raw)) as image:
+        return int(image_stego.max_payload_bytes(image))
+
+
 class Account:
     """A logged-in QQ account and everything hanging off it."""
 
@@ -132,6 +157,63 @@ class Account:
             event("client", "model_ready", model_name=first.name,
                   seconds=round(first.load_seconds, 3))
         self.models.load_in_background()
+
+    def covert_capacity(self, *, text_chars: int = 0,
+                        need_handshake: bool = False) -> dict:
+        """Can the queued pictures carry what we want to hide?
+
+        The UI asks this before enabling the send button, so "图片数量不足" is
+        shown *before* the user types a paragraph and hits enter -- not after.
+
+        ``need_handshake`` is 38 bytes. A body message needs whatever the sealed
+        envelope weighs, which depends on the text length; we estimate with a
+        margin rather than sealing here (sealing needs a live session).
+        """
+        if need_handshake:
+            needed = _HANDSHAKE_BYTES
+        else:
+            # 明文信封：帧头 + nonce + 密文 + 校验。中文按 UTF-8 最多 3 字节，
+            # 再留 96 字节余量（帧头、校验、填充）。
+            needed = max(_HANDSHAKE_BYTES, text_chars * 3 + 96)
+
+        items = self.queue.preview()
+        total = 0
+        usable = 0
+        for item in items:
+            try:
+                capacity = _picture_capacity(item.raw)
+            except Exception:                       # noqa: BLE001 - user file
+                continue
+            total += capacity
+            if capacity >= _HANDSHAKE_BYTES:
+                usable += 1
+
+        return {
+            "need_bytes": needed,
+            "queued": len(items),
+            "usable": usable,
+            "capacity": total,
+            "enough": total >= needed and usable > 0,
+        }
+
+    def send_covert_text(self, peer, text: str):
+        """Hide ``text`` in generated Chinese prose instead of a picture.
+
+        Costs no picture from the queue, which is why the UI offers it as a
+        toggle: a user with one photo left may prefer to spend the text channel
+        on a short message and keep the photo for a handshake.
+        """
+        conversation = self.conversations.ensure(peer)
+        if not self.text_channel_usable:
+            raise InvalidInput(
+                "没有可用的文本模型",
+                hints=("在设置里指定模型目录，或训练/导入一个模型",),
+            )
+        covertext = conversation.terminal.send_covert_text(
+            conversation.peer, text)
+        # 线上真正传的是这段中文，所以它出现在明文栏；秘密只进密文栏。
+        conversation.record_outbound(text=covertext, covert=(text,))
+        return conversation
 
     @property
     def text_channel_usable(self) -> bool:

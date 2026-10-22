@@ -116,6 +116,8 @@ def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
                        else {"total": 0, "loaded": 0, "folder": "",
                              "names": [], "loading": False}),
             "text_channel": account.text_channel_usable,
+            # 队列装得下握手吗？界面靠它在未握手时决定能否点"发起握手"。
+            "handshake_capacity": account.covert_capacity(need_handshake=True),
             "friends": [
                 {"uin": friend.uin, "name": friend.display_name}
                 for friend in account.directory.ordered()
@@ -184,11 +186,32 @@ def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
         if mode not in ("text", "covert", "handshake"):
             raise HTTPException(status_code=422, detail=f"未知模式：{mode}")
 
+        # 明文可以带图：QQ 允许只发图、也允许图文同一条。
+        images = payload.get("images") or []
+        raw_images: tuple[bytes, ...] = ()
+        if images:
+            if not isinstance(images, list):
+                raise HTTPException(status_code=422, detail="images 必须是数组")
+            raw_images = tuple(_decode_data_url(str(item)) for item in images)
+        channel = str(payload.get("channel") or "image")
+        if channel not in ("image", "text"):
+            raise HTTPException(status_code=422, detail=f"未知信道：{channel}")
+
+        if mode == "text" and not text.strip() and not raw_images:
+            raise HTTPException(status_code=422, detail="消息是空的")
+
         try:
             if mode == "text":
-                account.send_text(peer, text)
+                if raw_images:
+                    account.send_pictures(peer, raw_images, text=text or None)
+                else:
+                    account.send_text(peer, text)
             elif mode == "covert":
-                account.send_covert(peer, text)
+                # 信道由界面上的开关决定，不在服务端猜。
+                if channel == "text":
+                    account.send_covert_text(peer, text)
+                else:
+                    account.send_covert(peer, text)
             else:
                 account.start_handshake(peer)
         except HTTPException:
@@ -563,6 +586,32 @@ def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
 #: 缩略图边长。队列里一次最多十张，原图直接内联会让 /client/state 变成
 #: 几 MB 的响应，而 2.5 秒轮询一次。
 _THUMB_SIZE = 96
+
+
+def _decode_data_url(value: str) -> bytes:
+    """Turn ``data:image/png;base64,...`` into bytes.
+
+    The browser hands pasted and dropped pictures over as data URLs, so the
+    server needs to undo that before it has an image at all.
+    """
+    if value.startswith("data:"):
+        header, _, body = value.partition(",")
+        if ";base64" not in header:
+            raise HTTPException(status_code=422, detail="只支持 base64 编码的图片")
+        try:
+            raw = base64.b64decode(body, validate=True)
+        except Exception:
+            raise HTTPException(status_code=422, detail="图片数据不是合法 base64") from None
+    else:
+        try:
+            raw = base64.b64decode(value, validate=True)
+        except Exception:
+            raise HTTPException(status_code=422, detail="图片数据不是合法 base64") from None
+    if not raw:
+        raise HTTPException(status_code=422, detail="图片是空的")
+    if len(raw) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="单张图片不能超过 8MB")
+    return raw
 
 
 def _thumbnail(raw: bytes) -> str | None:
