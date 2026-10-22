@@ -457,3 +457,86 @@ class ModelsWithLibraryTest(_Base):
         conv = self.account.conversations.get(BOB)
         got = [t for e in conv.snapshot() for t in e.covert]
         self.assertIn("藏起来的句子", got)
+
+
+class HistorySeqTest(_Base):
+    """历史条目必须拿到递增的 seq，否则前端增量渲染会把它们全跳过。
+
+    实际 bug：prepend_history 没有给条目赋 seq，它们全是 0；前端判断
+    "seq <= 已渲染到的 seq 就跳过"，于是合并了 21 条历史却一条都没画出来。
+    界面上表现为"点开好友看不到聊天记录"。
+    """
+
+    def _history(self, n=3):
+        from markovcryptor.client.messages import ParsedMessage
+        return [ParsedMessage(sender=BOB, text=f"历史{i}", at=1000.0 + i)
+                for i in range(n)]
+
+    def test_history_entries_get_distinct_increasing_seq(self):
+        with mock.patch.object(self.account, "load_history",
+                               return_value=self._history(3)):
+            body = self.get(f"/client/conversation/{BOB}?history=5").json()
+        seqs = [e["seq"] for e in body["entries"]]
+        self.assertEqual(len(seqs), 3)
+        self.assertEqual(seqs, sorted(seqs), "历史必须按顺序递增")
+        self.assertEqual(len(set(seqs)), len(seqs),
+                         "不能有重复 seq —— 重复会让前端跳过条目")
+
+    def test_history_seq_is_below_existing_messages(self):
+        """历史在时间线最前面，seq 必须比已有消息小，否则排序错乱。"""
+        conv = self.account.conversations.ensure(BOB)
+        conv.record_outbound(text="新消息")
+        with mock.patch.object(self.account, "load_history",
+                               return_value=self._history(2)):
+            body = self.get(f"/client/conversation/{BOB}?history=5").json()
+        entries = body["entries"]
+        self.assertEqual(entries[0]["text"], "历史0")
+        self.assertEqual(entries[-1]["text"], "新消息")
+        seqs = [e["seq"] for e in entries]
+        self.assertEqual(seqs, sorted(seqs), "整条时间线的 seq 必须单调递增")
+        self.assertEqual(len(set(seqs)), len(seqs), "seq 不能重复")
+
+    def test_all_entries_have_seq(self):
+        """每条都必须带 seq，前端才能做增量渲染。"""
+        with mock.patch.object(self.account, "load_history",
+                               return_value=self._history(2)):
+            body = self.get(f"/client/conversation/{BOB}?history=5").json()
+        for entry in body["entries"]:
+            self.assertIn("seq", entry)
+            self.assertIsInstance(entry["seq"], int)
+
+
+class HistoryImagePlaceholderTest(_Base):
+    """历史里的图片不下载，但必须留一行占位。
+
+    实际 bug：纯图片的历史消息被合并成**完全空白**的条目 —— 界面上什么都
+    不显示，用户以为消息丢了。拉历史时不下载图片是对的（20 条历史可能带
+    几十张图），但不能因此让消息静默消失。
+    """
+
+    def _history_with_image(self):
+        from markovcryptor.client.messages import ImageRef, ParsedMessage
+        return [ParsedMessage(sender=BOB, text="",
+                              images=(ImageRef(url="https://x/a.jpg"),),
+                              at=1000.0)]
+
+    def test_image_only_history_gets_a_placeholder_line(self):
+        with mock.patch.object(self.account, "load_history",
+                               return_value=self._history_with_image()):
+            body = self.get(f"/client/conversation/{BOB}?history=5").json()
+        self.assertEqual(len(body["entries"]), 1)
+        entry = body["entries"][0]
+        self.assertTrue(entry["unsupported"], "必须留一行说明")
+        self.assertIn("图片", entry["unsupported"][0])
+
+    def test_text_plus_image_keeps_the_text_only(self):
+        """有文字就不再加占位行 —— 文字本身已经说明了这条消息。"""
+        from markovcryptor.client.messages import ImageRef, ParsedMessage
+        parsed = [ParsedMessage(sender=BOB, text="看这个",
+                                images=(ImageRef(url="https://x/a.jpg"),),
+                                at=1000.0)]
+        with mock.patch.object(self.account, "load_history", return_value=parsed):
+            body = self.get(f"/client/conversation/{BOB}?history=5").json()
+        entry = body["entries"][0]
+        self.assertEqual(entry["text"], "看这个")
+        self.assertEqual(entry["unsupported"], [])

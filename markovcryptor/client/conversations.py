@@ -168,8 +168,18 @@ class Conversation:
             if self._history_merged:
                 return False
             self._history_merged = True
-            # 在锁内做整体替换。此时若有入站消息 append，它会排在 merged 之后，
-            # 不会像"先快照再切片赋值"那样被抹掉。
+            # 历史条目必须拿到 seq，否则前端增量渲染会把它们当成"已渲染过"
+            # 全部跳过，界面上一片空白 —— 实际就是这样：合并了 21 条历史，
+            # 一条都没画出来。
+            #
+            # 序号要**比现有条目都小**：历史在时间线上位于最前面，而前端
+            # 用 seq 判断"是否已渲染"。所以先给历史分配一批，再给现有条目
+            # 重新编号到它们之后。
+            base = len(entries)
+            for index, entry in enumerate(entries):
+                entry.seq = index
+            for offset, entry in enumerate(self.entries):
+                entry.seq = base + offset
             self.entries[:] = list(entries) + self.entries
             return True
 

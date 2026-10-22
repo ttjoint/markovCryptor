@@ -537,26 +537,74 @@ def _model_folder(account: Account) -> Path | None:
 
 
 def _pick_folder(title: str) -> str | None:
-    """Native folder picker on the server's machine.
+    """Native folder picker, via the Win32 shell API.
 
-    Uses tkinter, which ships with the bundled Python. Returns ``None`` when no
-    display is available (the UI then lets the user type a path) rather than
-    raising: a stripped build must not make settings unusable.
+    **Not tkinter.** tkinter must own the thread that created its root window,
+    and this runs on a uvicorn worker thread -- so ``filedialog.askdirectory()``
+    blocks forever, the HTTP request never returns, and the button looks dead.
+    That was the actual bug: the dialog never appeared and nothing errored.
+
+    ``SHBrowseForFolder`` has no such constraint. Returns ``None`` when the user
+    cancels or the platform is not Windows (the UI then lets them type a path).
     """
     try:
-        import tkinter
-        from tkinter import filedialog
-
-        root = tkinter.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        chosen = filedialog.askdirectory(title=title)
-        root.destroy()
-        return chosen or None
+        return _pick_folder_win32(title)
     except Exception as exc:                        # noqa: BLE001 - optional
         event("client", "folder_picker_unavailable", level=logging.WARNING,
               error=exc)
         return None
+
+
+def _pick_folder_win32(title: str) -> str | None:
+    """``SHBrowseForFolderW`` with a caller-supplied title."""
+    import ctypes
+    from ctypes import wintypes
+
+    class BROWSEINFOW(ctypes.Structure):
+        _fields_ = [
+            ("hwndOwner", wintypes.HWND),
+            ("pidlRoot", ctypes.c_void_p),
+            ("pszDisplayName", wintypes.LPWSTR),
+            ("lpszTitle", wintypes.LPCWSTR),
+            ("ulFlags", wintypes.UINT),
+            ("lpfn", ctypes.c_void_p),
+            ("lParam", wintypes.LPARAM),
+            ("iImage", ctypes.c_int),
+        ]
+
+    shell32 = ctypes.windll.shell32
+    ole32 = ctypes.windll.ole32
+
+    # 对话框要求当前线程已初始化 COM；uvicorn 的工作线程通常没有。
+    ole32.CoInitialize(None)
+    try:
+        display = ctypes.create_unicode_buffer(260)
+        info = BROWSEINFOW()
+        info.hwndOwner = None
+        info.pidlRoot = None
+        info.pszDisplayName = display
+        info.lpszTitle = title
+        # BIF_RETURNONLYFSDIRS(0x1) | BIF_NEWDIALOGSTYLE(0x40)
+        # 新版对话框才有可输入路径的地址栏，老式那个很难用。
+        info.ulFlags = 0x1 | 0x40
+        info.lpfn = None
+        info.lParam = 0
+        info.iImage = 0
+
+        pidl = shell32.SHBrowseForFolderW(ctypes.byref(info))
+        if not pidl:
+            return None                         # 用户取消
+
+        try:
+            path = ctypes.create_unicode_buffer(1024)
+            if not shell32.SHGetPathFromIDListW(pidl, path):
+                return None
+            return path.value or None
+        finally:
+            # 不释放这块 pidl 就是内存泄漏 —— 每次点一次按钮漏一点。
+            ole32.CoTaskMemFree(pidl)
+    finally:
+        ole32.CoUninitialize()
 
 
 def _merge_history(account: Account, conversation, peer: str, count: int) -> None:
@@ -577,15 +625,24 @@ def _merge_history(account: Account, conversation, peer: str, count: int) -> Non
 
     merged: list = []
     for item in parsed:
-        if not (item.text.strip() or item.images or item.unsupported):
+        # 历史里的图片**不下载**：拉 20 条历史顺带下几十张图既慢又占内存，
+        # 而用户多半只是想知道"之前聊了什么"。但要留一行占位，否则这些
+        # 消息会变成完全空白的条目 —— 界面上看着像丢了消息。
+        placeholders = list(item.unsupported)
+        if item.images and not item.text.strip():
+            placeholders.append("对方发送了 图片")
+
+        if not (item.text.strip() or placeholders):
             continue
+
         # 归属由 QQ 自己的 sender 决定，不能一律当"对方"。
         # 硬编码 mine=False 会让用户自己发过的话也显示在左边、和对方一模一样,
         # 界面上根本分不出谁说的 —— 这正是实际反馈的问题。
+        mine = bool(account.uin) and item.sender == account.uin
         merged.append(Entry(
-            mine=bool(account.uin) and item.sender == account.uin,
+            mine=mine,
             text=item.text,
-            unsupported=item.unsupported,
+            unsupported=tuple(placeholders),
             at=item.at or 0.0,
         ))
     # 去重与插入在会话的锁内一次完成：先快照再切片赋值会抹掉期间到达的

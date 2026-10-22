@@ -295,3 +295,65 @@ class DeleteWhileLoadingTest(_Base):
         r = self.post("/client/models/delete", json={"name": target.stem})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertFalse(target.exists())
+
+
+class FolderPickerTest(unittest.TestCase):
+    """选择文件夹按钮必须能真的返回，不能永远挂着。
+
+    实际 bug：原来用 tkinter 的 askdirectory，它要求调用方是创建 Tk 根窗口的
+    那个线程。这个函数跑在 uvicorn 的工作线程里，于是对话框永远不返回、
+    HTTP 请求一直挂着 —— 用户看到的就是"按钮无效"，而且没有任何报错。
+    """
+
+    def test_picker_returns_instead_of_blocking(self):
+        """在工作线程里调用，必须在几秒内返回（不要求真的弹出对话框）。"""
+        import threading
+        import time
+
+        from markovcryptor.client import app as app_mod
+
+        done = {}
+        started = time.monotonic()
+
+        def worker():
+            done["value"] = app_mod._pick_folder("测试")
+            done["elapsed"] = time.monotonic() - started
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        thread.join(timeout=10.0)
+
+        self.assertFalse(thread.is_alive(),
+                         "选择对话框阻塞了 —— 界面会表现为按钮无效")
+        self.assertIn("value", done)
+        self.assertLess(done["elapsed"], 10.0)
+
+    def test_picker_does_not_use_tkinter(self):
+        """tkinter 的对话框依赖主线程，不能用在服务端工作线程里。"""
+        import inspect
+
+        from markovcryptor.client import app as app_mod
+
+        source = inspect.getsource(app_mod._pick_folder)
+        helper = inspect.getsource(app_mod._pick_folder_win32)
+        # 只看代码，不看注释/文档字符串 —— 文档里正好在解释"为什么不用 tkinter"。
+        code = chr(10).join(
+            line for line in (source + helper).splitlines()
+            if not line.lstrip().startswith("#")
+            and not line.lstrip().startswith('"')
+            and "``" not in line)
+        self.assertNotIn("askdirectory(", code,
+                         "不能用 tkinter 的 askdirectory")
+        self.assertNotIn("import tkinter", code, "不能引入 tkinter")
+        self.assertIn("SHBrowseForFolder", helper,
+                      "应当用 Win32 的 SHBrowseForFolder")
+
+    def test_picker_failure_is_none_not_an_exception(self):
+        """拿不到对话框要返回 None，让界面退回手填路径。"""
+        from unittest import mock
+
+        from markovcryptor.client import app as app_mod
+
+        with mock.patch.object(app_mod, "_pick_folder_win32",
+                               side_effect=OSError("no shell")):
+            self.assertIsNone(app_mod._pick_folder("x"))
