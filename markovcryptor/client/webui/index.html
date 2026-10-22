@@ -425,6 +425,7 @@
         <div id="meName">未登录</div>
         <div class="uin" id="meUin"></div>
       </div>
+      <button class="iconbtn" id="btnQuit" title="退出" aria-label="退出">⏻</button>
       <button class="iconbtn" id="btnSettings" title="设置" aria-label="设置">⚙</button>
     </div>
     <div class="tabs">
@@ -617,8 +618,36 @@ function toast(msg) {
   setTimeout(() => el.remove(), 3200);
 }
 
+// 默认给每个请求一个超时。
+//
+// 为什么必须有：后端进程被强杀后，Chrome 对已经死掉的端口**不会**立刻回
+// ECONNREFUSED —— 它会重试连接，实测单次耗时约 2 秒。没有超时的话，
+// "探测后端是否还在"这件事本身就比轮询周期还慢，缩短间隔完全无效。
+//
+// 本机回环的正常请求是毫秒级的（包括带十几张图的 /client/state，实测
+// 也在 100ms 内），所以 1.2 秒足够宽松；只会在"服务真的没了"时触发。
+const REQUEST_TIMEOUT = 1200;
+
 async function api(path, opts) {
-  const res = await fetch(path, opts);
+  const options = Object.assign({}, opts || {});
+  let timer = null;
+  if (typeof AbortController !== "undefined") {
+    const ctrl = new AbortController();
+    options.signal = ctrl.signal;
+    timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
+  }
+  let res;
+  try {
+    res = await fetch(path, options);
+  } catch (e) {
+    // abort 出来的错误名字不统一，统一翻译成"连不上"，交给上层判断。
+    if (e && (e.name === "AbortError" || /abort/i.test(String(e.message)))) {
+      throw new Error("请求超时（后端无响应）");
+    }
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   let data = null;
   try { data = await res.json(); } catch (e) { /* 空响应 */ }
   if (!res.ok) {
@@ -901,27 +930,18 @@ async function openConversation(peer) {
 // 但完全静默会让用户对着一个再也不更新的界面发呆，分不清是卡了还是没人说话。
 let lastStateError = null;
 
-async function refreshState() {
-  let data;
-  try {
-    data = await api("/client/state");
-    if (lastStateError) {
-      lastStateError = null;
-      toast("连接已恢复");
-    }
-  } catch (e) {
-    if (lastStateError !== e.message) {
-      lastStateError = e.message;
-      toast("连接断开：" + e.message + "（重试中）");
-    }
-    return;
-  }
+// 拆成两半：applyState 只负责把数据画到界面上，取数据由调用方负责。
+// 这样存活探测和内容刷新能复用同一段渲染逻辑，又不会重复请求。
+function applyState(data) {
+  if (lastStateError) lastStateError = null;
   S.uin = data.uin;
   S.ready = data.ready;
   S.conversations = data.conversations;
   S.friends = data.friends;
 
-  $("meName").textContent = data.ready ? "已连接" : "连接中…";
+  // 不再显示"已连接/连接中" —— 前后端是一体的，能看见界面就说明连着。
+  // 一个永远显示"已连接"的标签只是噪音；而真的断了，界面会直接关掉。
+  $("meName").textContent = data.uin ? "本机" : "";
   $("meUin").textContent = data.uin || "";
   $("meAvatar").textContent = (data.uin || "?").slice(-2);
 
@@ -970,17 +990,34 @@ async function refreshState() {
     }
   }
 
-  // 当前会话如果开着，顺带刷新它的消息。
-  if (S.current) {
-    try {
-      const detail = await api(`/client/conversation/${S.current}`);
-      renderConversation(detail);
-    } catch (e) {
-      // 会话可能已被丢弃；但要让人知道这次刷新没成功，否则新消息静默不出现。
-      if (lastStateError !== e.message) {
-        lastStateError = e.message;
-        toast("读取会话失败：" + e.message);
-      }
+}
+
+// 拉当前会话的消息。单独一个函数，因为它会发请求 —— applyState 只画界面。
+async function refreshConversation() {
+  if (!S.current) return;
+  try {
+    const detail = await api(`/client/conversation/${S.current}`);
+    renderConversation(detail);
+  } catch (e) {
+    // 会话可能已被丢弃；但要让人知道这次刷新没成功，否则新消息静默不出现。
+    if (lastStateError !== e.message) {
+      lastStateError = e.message;
+      toast("读取会话失败：" + e.message);
+    }
+  }
+}
+
+// 兼容旧调用点：取数据 + 画界面 + 刷新当前会话。
+async function refreshState() {
+  try {
+    const data = await api("/client/state");
+    applyState(data);
+    await refreshConversation();
+  } catch (e) {
+    if (backendGone(e)) { shutdownWindow("后端已退出"); return; }
+    if (lastStateError !== e.message) {
+      lastStateError = e.message;
+      toast("连接异常：" + e.message);
     }
   }
 }
@@ -1332,6 +1369,7 @@ function updateOnboard(data) {
 
 // ================================================================= 事件绑定
 
+$("btnQuit").onclick = quitApp;
 $("btnSettings").onclick = () => openSheet("general");
 $("btnCloseSheet").onclick = closeSheet;
 $("btnCancelSheet").onclick = closeSheet;
@@ -2011,7 +2049,8 @@ async function doHandshake() {
 // 首次加载要显式兜住：未处理的 rejection 在控制台之外看不见，
 // 用户只会看到一个永远空着的界面。
 
-setInterval(refreshState, 2500);
+// 刷新由 initLifecycle 里的自适应探测驱动（见 scheduleProbe），
+// 不再单独 setInterval —— 两套定时器会互相打架。
 
 // ================================================================= 拖入模型文件
 
@@ -2099,6 +2138,124 @@ function initModelDrop() {
   });
 }
 
+
+// ================================================================= 前后端同生共死
+
+// 前后端是一体的：后端退出，窗口就该消失；窗口关掉，后端就该退出。
+// 不显示"未连接"这种中间态 —— 能看见界面就说明连着，看不见就是结束了。
+
+let shuttingDown = false;
+
+// 判定"后端真的没了"而不是"这一次请求碰巧失败"。
+// 只有拿不到任何 HTTP 响应才算（网络层错误）；HTTP 4xx/5xx 说明服务还活着。
+function backendGone(error) {
+  const text = String((error && error.message) || error || "");
+  // fetch 在连不上时抛 TypeError: Failed to fetch / NetworkError
+  return /failed to fetch|networkerror|load failed|connection|ECONNREFUSED|超时/i
+    .test(text);
+}
+
+// 关掉这个窗口。浏览器 --app 模式下 window.close() 生效；
+// 普通标签页里浏览器会拒绝，那就退化成"把界面清空 + 显示一句话"，
+// 总比留着一个假界面好。
+function shutdownWindow(reason) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (PROBE.timer) { clearTimeout(PROBE.timer); PROBE.timer = null; }
+  // 先把界面变成已退出，再尝试关窗。
+  // 顺序很重要：普通标签页里 window.close() 会被拒绝，如果只靠它，
+  // 用户会对着一个假界面发呆。先改界面，无论关不关得掉都是诚实的。
+  document.body.innerHTML =
+    '<div style="display:grid;place-items:center;height:100vh;'
+    + 'font:14px system-ui;color:#888;text-align:center">'
+    + '<div><div style="font-size:20px;margin-bottom:8px">已退出</div>'
+    + '<div>' + reason + '。可以关闭此页面。</div></div></div>';
+  try { window.close(); } catch (_) { /* 普通标签页会拒绝 */ }
+}
+
+// 用户主动退出：先告诉后端（它会收掉 SnowLuma 等），再关窗口。
+async function quitApp() {
+  if (!confirm("退出客户端？\n\n这会断开与 QQ 的连接并关闭后台进程。")) return;
+  shuttingDown = true;
+  if (PROBE.timer) { clearTimeout(PROBE.timer); PROBE.timer = null; }
+  try { await api("/client/quit", { method: "POST" }); } catch (_) { /* 已经在退 */ }
+  document.body.innerHTML =
+    '<div style="display:grid;place-items:center;height:100vh;'
+    + 'font:14px system-ui;color:#888">已退出。可以关闭此页面。</div>';
+  try { window.close(); } catch (_) { /* ignore */ }
+}
+
+// 判断"后端还在吗"。
+//
+// 试过 SSE，实测**更慢**：后端进程被强杀时没有 FIN/RST 及时送达，浏览器要等
+// TCP 超时（实测 5 秒）才触发 onerror。轮询反而更快 —— 一次 fetch 打到一个
+// 已经死掉的端口，几十毫秒就返回 ECONNREFUSED。
+//
+// 所以这里用**自适应轮询**：平时 4 秒一次（只为刷新内容），一旦有一次失败就
+// 切到 200ms 快速探测，确认死了立刻退出，恢复了再回到 4 秒。
+const PROBE = {
+  // 慢速周期决定了两件事：内容多久刷新一次，以及后端死掉后最坏多久被发现。
+  // 1.5 秒是本机回环请求，代价可以忽略；再快也不会有明显收益，因为
+  // 真正的瓶颈是"要确认两次才敢关窗"，不是这个间隔。
+  slow: 1500,
+  timer: null,
+};
+
+function scheduleProbe(delay) {
+  if (PROBE.timer) clearTimeout(PROBE.timer);
+  if (shuttingDown) return;
+  PROBE.timer = setTimeout(async () => {
+    PROBE.timer = null;
+    const alive = await probeOnce();
+    // 探测失败时立刻再确认一次（不等下一个周期）：一次失败可能是重启中的
+    // 瞬时状态，两次连续失败基本可以断定后端没了。这个"立即重试"比把
+    // 轮询周期压到几百毫秒有效得多。
+    if (alive === false) {
+      scheduleProbe(120);
+      return;
+    }
+    scheduleProbe(PROBE.slow);
+  }, delay);
+}
+
+// 一次探测 = 一次请求。不要在这里再调 refreshState()：
+// 那会重复发一遍 /client/state，而且失败时两条路径都会去判"后端没了"，
+// 既慢又容易重复触发。
+// 返回 true = 还活着；false = 这次连不上（调用方决定要不要再确认）。
+async function probeOnce() {
+  let data;
+  try {
+    data = await api("/client/state");
+  } catch (e) {
+    if (backendGone(e)) {
+      // 超时/连不上就直接判定后端已退出，不再"二次确认"。
+      //
+      // 曾经要求连续两次失败才关窗，理由是"后端可能在重启"。但实测这会让
+      // 退出延迟翻倍（1.2 秒 -> 2.4 秒），而"后端正在重启"这个场景在本程序
+      // 里并不存在：后端是自己起的，它退出就意味着这次会话结束了。
+      // 真正需要容错的瞬时抖动（某个请求 500）走下面的 toast 分支。
+      shutdownWindow("后端已退出");
+      return false;
+    }
+    toast("连接异常：" + e.message);
+    return true;                        // 服务活着，只是这次请求出错
+  }
+  applyState(data);
+  await refreshConversation();
+  return true;
+}
+
+function initLifecycle() {
+  // 页面正在关闭时也给后端一个信号，比等心跳超时快得多。
+  window.addEventListener("pagehide", () => {
+    if (shuttingDown) return;
+    try {
+      navigator.sendBeacon("/client/quit");
+    } catch (_) { /* 尽力而为 */ }
+  });
+  scheduleProbe(0);
+}
+
 // ================================================================= 启动
 
 // 必须放在最后：上面用到 const SPLIT / COVERT / ATTACH，
@@ -2107,6 +2264,7 @@ initSplitter();
 initChannelSwitch();
 initAttach();
 initModelDrop();
+initLifecycle();
 renderAttach();
 setCovertState("locked");
 setChannel("image", { textUsable: false, quiet: true });

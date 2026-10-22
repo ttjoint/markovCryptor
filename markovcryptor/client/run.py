@@ -24,6 +24,7 @@ from pathlib import Path
 from ..observability import event
 from . import browser as browser_mod
 from . import launcher
+from . import lifecycle
 from .account import Account
 from .app import DEFAULT_CLIENT_PORT, create_client_app
 from .config import ClientConfig
@@ -122,8 +123,12 @@ def _model_library(cfg: ClientConfig, snowluma_root: Path):
 
 def run(*, snowluma: Path | None = None, config_path: Path | None = None,
         wait: float = launcher.DEFAULT_LOGIN_WAIT,
-        open_browser: bool | None = None) -> int:
+        open_browser: bool | None = None,
+        owned: "lifecycle.OwnedProcesses | None" = None) -> int:
     """Start everything. Returns a process exit code."""
+    from .lifecycle import OwnedProcesses
+
+    owned = owned if owned is not None else OwnedProcesses()
     cfg = ClientConfig.load(config_path)
 
     try:
@@ -152,7 +157,9 @@ def run(*, snowluma: Path | None = None, config_path: Path | None = None,
                 _log(f"发现已登录的 QQ {previous.uin}，启动 SnowLuma…")
             else:
                 _log("正在等待 QQ 登录…（SnowLuma 只能挂到已登录的 QQ 上）")
-            launcher.start_snowluma(root)
+            # 记下来：退出时要收掉。只收**我们自己起的**那一份 ——
+            # 用户手动开的 SnowLuma 不能因为关这个客户端就被杀掉。
+            owned.add("SnowLuma", launcher.start_snowluma(root))
             # 启动之后重新读配置：端口几乎肯定变了。
             endpoint = launcher.wait_for_endpoint(
                 root, timeout=wait,
@@ -178,11 +185,11 @@ def run(*, snowluma: Path | None = None, config_path: Path | None = None,
 
     # 到这里 QQ 一定在线，可以建账号了。
     return _serve(endpoint, cfg, config_path=config_path, root=root,
-                  open_browser=open_browser)
+                  open_browser=open_browser, owned=owned)
 
 
 def _serve(endpoint, cfg, *, config_path: Path | None, root: Path,
-           open_browser: bool | None) -> int:
+           open_browser: bool | None, owned=None) -> int:
     """Wire up the account and run the UI until it exits.
 
     Split out of :func:`run` so the part that decides *which port to talk to*
@@ -220,7 +227,14 @@ def _serve(endpoint, cfg, *, config_path: Path | None, root: Path,
 
     port = cfg.port or DEFAULT_CLIENT_PORT
     webui = Path(__file__).resolve().with_name("webui")
-    app = create_client_app(account, webui_dir=webui)
+
+    # 前端关掉 / 后端该退出的统一收尾。必须幂等：看门狗、用户点退出、
+    # Ctrl+C 三条路都可能触发它。
+    shutdown = _make_shutdown(account, network, owned)
+
+    watchdog = lifecycle.LivenessWatchdog(on_expire=shutdown).start()
+    app = create_client_app(account, webui_dir=webui,
+                            watchdog=watchdog, on_quit=shutdown)
     url = f"http://127.0.0.1:{port}/"
 
     _log(f"客户端已启动：{url}")
@@ -231,15 +245,60 @@ def _serve(endpoint, cfg, *, config_path: Path | None, root: Path,
     if should_open:
         label = browser_mod.open_ui(url)
         _log(f"  浏览器：{label}")
+        _log("  关闭窗口即退出；后端也会在前端消失后自行退出。")
 
     import uvicorn
 
     try:
-        uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+        # 不用 uvicorn.run()：它装自己的信号处理并且不给我们"主动停"的把手。
+        # 用 Server + 一个监视线程，就能在用户点退出时优雅收尾。
+        config = uvicorn.Config(app, host="127.0.0.1", port=port,
+                                log_level="warning")
+        server = uvicorn.Server(config)
+
+        def watch_quit():
+            # 前端点了退出 / 看门狗超时 / 后端被要求关 —— 统一从这里停。
+            while not server.should_exit:
+                if app.state.quit_requested or watchdog.fired:
+                    server.should_exit = True
+                    break
+                time.sleep(0.3)
+
+        threading.Thread(target=watch_quit, name="quit-watch", daemon=True).start()
+        server.run()
     finally:
-        network.stop()
-        account.close()
+        watchdog.stop()
+        shutdown()
     return 0
+
+
+def _make_shutdown(account, network, owned) -> "callable":
+    """Build the idempotent teardown used by every exit path."""
+    done = threading.Event()
+
+    def shutdown() -> None:
+        if done.is_set():
+            return
+        done.set()
+        event("lifecycle", "shutdown_begin")
+        # 先断 QQ：让 QQ 那边立刻看到我们下线，而不是等 websocket 超时。
+        try:
+            account.close()
+        except Exception as exc:                    # noqa: BLE001 - shutdown path
+            event("lifecycle", "account_close_failed", level=logging.WARNING,
+                  error=exc)
+        try:
+            network.stop()
+        except Exception:                           # noqa: BLE001
+            pass
+        # 再收掉自己起的子进程（SnowLuma 会连带它的 node 子进程）。
+        if owned is not None:
+            killed = owned.terminate_all()
+            if killed:
+                event("lifecycle", "shutdown_done", killed=",".join(killed))
+        event("lifecycle", "shutdown_end")
+
+    return shutdown
 
 
 def main(argv: list[str] | None = None) -> int:

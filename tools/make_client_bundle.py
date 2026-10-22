@@ -65,6 +65,7 @@ if errorlevel 1 (
   echo 启动失败。上面那几行说明了原因。
   pause
 )
+exit
 """
 
 START_PS1 = r"""# 一键启动客户端。由 tools/make_client_bundle.py 生成。
@@ -91,11 +92,33 @@ if (-not (Test-Path $node)) {
 $env:PATH = (Join-Path $here "node") + ";" + $env:PATH
 
 $logFile = Join-Path $env:APPDATA "markovcryptor\client.log"
+
+# 用 pythonw 跑：它是 GUI 子系统程序，不会留一个黑框在那儿。
+# 但 pythonw 没有 stdout，失败时用户什么都看不到 —— 所以启动**先探测**
+# 能不能起来：用 python（有控制台）跑一个极短的预检，通过了再用 pythonw
+# 正式跑。这样黑框只在真正需要看错误的时候出现。
+$pyw = Join-Path $here "python\pythonw.exe"
+if (-not (Test-Path $pyw)) { $pyw = $py }
+
 Write-Host "正在启动…（第一次会等 QQ 登录）" -ForegroundColor Cyan
-& $py -X utf8 -m markovcryptor.client.run --snowluma (Join-Path $here "snowluma")
-$code = $LASTEXITCODE
+
+# 预检：能不能 import、能不能找到 SnowLuma。只跑 2 秒，不碰网络。
+& $py -X utf8 -c "import markovcryptor.client.run, sys; sys.exit(0)" 2>$null
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "包不完整：Python 依赖装不上。" -ForegroundColor Red
+  & $py -X utf8 -c "import markovcryptor.client.run" 2>&1 | Select-Object -Last 8
+  exit 1
+}
+
+# 正式启动：无控制台。退出码通过 Start-Process -Wait 拿回来。
+$proc = Start-Process -FilePath $pyw -ArgumentList @(
+  "-X", "utf8", "-m", "markovcryptor.client.run",
+  "--snowluma", (Join-Path $here "snowluma")
+) -PassThru -Wait -WindowStyle Hidden
+$code = $proc.ExitCode
+
 if ($code -ne 0) {
-  # 失败原因必须看得见。pythonw 没有控制台时，日志文件是唯一的线索。
+  # 失败原因必须看得见 —— 这时才值得占用一个控制台。
   Write-Host ""
   Write-Host "启动失败（退出码 $code）。" -ForegroundColor Red
   if (Test-Path $logFile) {

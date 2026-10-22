@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import base64
 import logging
+import threading
 import shutil
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..core.errors import StegoError
@@ -97,11 +98,81 @@ def _data_url(raw: bytes) -> str:
     return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
 
 
-def create_client_app(account: Account, *, webui_dir=None) -> FastAPI:
-    """Build the ASGI app for one logged-in account."""
+def create_client_app(account: Account, *, webui_dir=None,
+                      watchdog=None, on_quit=None) -> FastAPI:
+    """Build the ASGI app for one logged-in account.
+
+    ``watchdog`` 让后端知道前端还活着；``on_quit`` 是用户主动点"退出"时
+    要跑的回调（通常是把 SnowLuma 一起收掉）。
+    """
     app = FastAPI(title="markovcryptor client",
                   description="单账号 QQ 混淆通信客户端（仅本机回环）")
     app.state.account = account
+    app.state.watchdog = watchdog
+    app.state.quit_requested = False
+
+    @app.post("/client/ping")
+    def ping() -> JSONResponse:
+        """前端心跳。顺带告诉它服务还活着、以及该多久来一次。"""
+        if watchdog is not None:
+            watchdog.beat()
+        from .lifecycle import DEFAULT_BEAT_INTERVAL
+
+        return JSONResponse({"ok": True, "interval": DEFAULT_BEAT_INTERVAL})
+
+    @app.get("/client/events")
+    def events(request: Request):
+        """Server-Sent Events: 后端主动告诉前端"我还活着 / 我要走了"。
+
+        为什么需要它：只靠前端轮询，后端死掉后最多要等一个轮询周期（2.5 秒）
+        才被发现，用户看到的是"窗口卡了一会儿才关"。SSE 连接一断，浏览器
+        **立刻**触发 onerror —— 不用等下一轮。
+
+        这里只发心跳注释行，不推业务数据：业务数据仍在 /client/state 里轮询，
+        那是"画界面"用的；这条流只负责"还连着吗"。
+        """
+        import asyncio
+
+        async def stream():
+            while True:
+                # 前端还活着就把看门狗喂一下，顺手证明连接有效。
+                if watchdog is not None:
+                    watchdog.beat()
+                if app.state.quit_requested:
+                    yield "event: quit\ndata: bye\n\n"
+                    return
+                # 注释行（以 : 开头）是合法的 SSE 心跳，浏览器不会派发事件，
+                # 但会让连接保持活跃、也能立刻感知断开。
+                yield ": ping\n\n"
+                await asyncio.sleep(2.0)
+
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
+
+    @app.post("/client/quit")
+    async def quit_client() -> JSONResponse:
+        """用户点了退出。
+
+        先回响应再触发退出 —— 否则浏览器拿到的是连接被重置，界面上会显示
+        一个莫名其妙的错误，而用户明明只是点了"退出"。
+        """
+        app.state.quit_requested = True
+        event("client", "quit_requested")
+
+        def run_quit():
+            # 给响应一点时间真的发出去，再开始拆。
+            import time
+            time.sleep(0.25)
+            if on_quit is not None:
+                try:
+                    on_quit()
+                except Exception as exc:            # noqa: BLE001 - shutdown path
+                    event("client", "quit_handler_failed",
+                          level=logging.WARNING, error=exc)
+
+        threading.Thread(target=run_quit, name="quit", daemon=True).start()
+        return JSONResponse({"ok": True})
 
     @app.get("/client/state")
     def state() -> JSONResponse:
