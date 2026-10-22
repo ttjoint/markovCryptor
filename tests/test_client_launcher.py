@@ -385,3 +385,130 @@ class BundleDependencyTest(unittest.TestCase):
         source = self._source()
         self.assertIn('.py', source.split("def present")[1][:400],
                       "present() 要考虑单文件模块")
+
+
+class BundlePrivacyTest(unittest.TestCase):
+    """交付包里不能有账号相关的任何东西。
+
+    实际踩到：发给用户的包里有
+      snowluma/config/onebot_1741473279.json  -> 账号 + OneBot 明文访问令牌
+      snowluma/config/webui.json              -> WebUI 密码哈希和盐
+      snowluma/data/1741473279/*.db           -> 聊天记录、身份库
+      snowluma/logs/*.log                     -> 说过的话
+
+    这些是打包机上跑过真 QQ 留下的。包是给别人的，带出去就是泄漏，
+    而且对方拿到也没用（不是他的账号）。
+    """
+
+    def _module(self):
+        import importlib
+
+        return importlib.import_module("tools.make_client_bundle")
+
+    def _make_tree(self, root: Path) -> Path:
+        sl = root / "snowluma"
+        (sl / "config").mkdir(parents=True)
+        (sl / "data" / "1741473279").mkdir(parents=True)
+        (sl / "logs").mkdir(parents=True)
+        (sl / "index.mjs").write_text("// code", encoding="utf-8")
+        (sl / "config" / "onebot_1741473279.json").write_text(
+            '{"accessToken": "secret"}', encoding="utf-8")
+        (sl / "config" / "webui.json").write_text(
+            '{"passwordHash": "deadbeef"}', encoding="utf-8")
+        (sl / "config" / "runtime.json").write_text("{}", encoding="utf-8")
+        (sl / "data" / "1741473279" / "messages.db").write_bytes(b"SQLite")
+        (sl / "logs" / "snowluma-2026-10-23.log").write_text("hi", encoding="utf-8")
+        return sl
+
+    def test_scrub_removes_account_config_and_data(self):
+        import tempfile
+
+        mod = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            sl = self._make_tree(Path(tmp))
+            mod._scrub_personal_state(sl)
+
+            self.assertEqual(list((sl / "config").iterdir()), [],
+                             "config 目录要清空（但要保留目录本身）")
+            self.assertTrue((sl / "config").is_dir(),
+                            "SnowLuma 期望 config/ 存在")
+            self.assertFalse((sl / "data").exists(), "聊天数据库必须删掉")
+            self.assertFalse((sl / "logs").exists(), "日志必须删掉")
+            self.assertTrue((sl / "index.mjs").exists(), "程序文件要保留")
+
+    def test_verify_rejects_leftover_account_files(self):
+        import tempfile
+
+        mod = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._make_tree(root)
+            with self.assertRaises(SystemExit) as ctx:
+                mod._verify_no_personal_state(root)
+            message = str(ctx.exception)
+            self.assertIn("账号", message)
+            self.assertIn("onebot_", message)
+
+    def test_verify_passes_on_a_clean_tree(self):
+        import tempfile
+
+        mod = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sl = self._make_tree(root)
+            mod._scrub_personal_state(sl)
+            mod._verify_no_personal_state(root)     # 不该抛
+
+    def test_verify_ignores_bundled_packages(self):
+        """site-packages 里可能有叫 config.json 的，那不是我们的账号信息。"""
+        import tempfile
+
+        mod = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "snowluma" / "config").mkdir(parents=True)
+            lib = root / "python" / "Lib" / "site-packages" / "somepkg"
+            lib.mkdir(parents=True)
+            (lib / "config.json").write_text("{}", encoding="utf-8")
+            (lib / "data").mkdir()
+            (lib / "data" / "x.db").write_bytes(b"x")
+            mod._verify_no_personal_state(root)     # 不该抛
+
+    def test_verify_catches_a_stray_db_under_snowluma(self):
+        import tempfile
+
+        mod = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "snowluma").mkdir()
+            (root / "snowluma" / "snowluma_identity.db").write_bytes(b"x")
+            with self.assertRaises(SystemExit):
+                mod._verify_no_personal_state(root)
+
+    def test_build_pipeline_actually_scrubs_and_verifies(self):
+        """光有函数不够 —— 构建流程必须真的调用它们。
+
+        实际教训：先写了 _scrub_personal_state，但没挂进 build()，
+        包里的账号文件照样发了出去。
+        """
+        import inspect
+
+        mod = self._module()
+        # 清理挂在 _copy_snowluma 里（它由 build 调用），最终校验在 build 尾部。
+        chain = (inspect.getsource(mod.build)
+                 + inspect.getsource(mod._copy_snowluma))
+        self.assertIn("_scrub_personal_state", chain,
+                      "构建流程没调用清理函数")
+        self.assertIn("_verify_no_personal_state", inspect.getsource(mod.build),
+                      "构建流程没做最终校验")
+
+    def test_manifest_does_not_list_a_qq_number(self):
+        """manifest 是纯包信息，不该出现具体账号。"""
+        import re
+
+        root = Path(__file__).resolve().parent.parent
+        source = (root / "tools" / "make_client_bundle.py").read_text(
+            encoding="utf-8")
+        # 1741473279 是打包机的账号，绝不该出现在脚本里
+        self.assertNotIn("1741473279", source)
+        self.assertNotIn("3925697820", source)

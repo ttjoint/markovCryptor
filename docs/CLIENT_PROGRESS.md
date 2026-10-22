@@ -842,3 +842,91 @@ state 改成 `WAITING`。于是对端一重握手，本端立刻失去可用密�
 给两条真联网/真打包的测试打上标记。发版前用 `-m slow` 单独跑。
 
 **310 秒 → 106 秒（快 3 倍）**，623 passed（2 条 slow 默认跳过）。
+
+---
+
+## 交付包隐私与体积治理（2026-10-22）
+
+### 问题 1：包里带着打包机的账号信息
+
+用户指出：*"打包文件中不应包含填入具体账号信息的 snowluma 配置文件及其他涉及
+个性化的配置项"*。
+
+审计发现包里确实有：
+
+| 文件 | 内容 |
+| --- | --- |
+| `snowluma/config/onebot_1741473279.json` | **账号 + OneBot 明文 accessToken** |
+| `snowluma/config/webui.json` | WebUI 密码哈希 + 盐 |
+| `snowluma/data/1741473279/messages.db` | 聊天记录 |
+| `snowluma/data/1741473279/snowluma_identity.db` | 身份库 |
+| `snowluma/logs/*.log` | 说过的话 |
+
+根因：我手动同步代码时把整个 `snowluma/` 拷进了包（打包脚本本身只建空
+`config/`，是对的）。
+
+修法两层：
+1. `_scrub_personal_state()`：清空 `config/`、删掉 `data/` `logs/` `cache/` `tmp/`，
+   挂在 `_copy_snowluma()` 里
+2. `_verify_no_personal_state()`：对**成品包**做最终扫描，发现任何
+   `onebot_*.json` / `webui.json` / `runtime.json` / `snowluma/data/` /
+   `snowluma/logs/` / `snowluma` 下的 `.db` 就直接让构建失败
+
+为什么必须做成"失败"而不是"警告"：这些文件一旦发出去，对方的包里有别人的
+账号和令牌，而且**不可从包本身恢复** —— 属于静默泄漏。
+
+### 问题 2：体积冗余
+
+用户问：*"是否包含其他可能冗余的文件、可裁剪的内容或者仍然可以压缩体积的
+方式？model 似乎也不必随包附带"*。
+
+审计结果（裁剪前 237MB）：
+
+| 项 | 大小 | 处置 |
+| --- | --- | --- |
+| `pip` | 12 MB | 删（只用来装东西，装完无用） |
+| `__pycache__`（182 个） | 29 MB | 删（Python 会按需重编） |
+| numpy 的 tests/f2py/distutils | ~4 MB | 删（运行时不引用） |
+| `models/`（4 个模型） | 11 MB | **删，改成空目录 + 说明** |
+| `node.exe` | 89 MB | 保留（SnowLuma 硬依赖） |
+
+**关于 models/**：用户的判断是对的。模型是拿自己的语料训练的，别人的模型对他
+没用；而且这些模型来自有版权的书，附带分发还有法律问题。改成 `models/README.txt`
+说明"为什么是空的、怎么获得、要不要和对方用同一个模型"。
+
+实测无模型时的行为符合预期：日志「没有找到文本模型；只能发送图片密文」，
+界面「模型 0/0 / 未配置模型目录（只能发送图片密文）」，图片密文照常可用。
+
+**关于 node.exe**：89MB 是单项最大头，deflate 可压到 33MB。评估过 SEA
+（Single Executable Application）方案，但需要改 SnowLuma 的入口方式，风险高于
+收益 —— 而用户实际下载的是 zip，压缩由 zip 完成，包内目录大小不影响交付体积。
+
+裁剪安全验证：删完后在隔离模式（`-I`）下逐个 import numpy/PIL/reedsolo/
+cryptography/fastapi/uvicorn/websockets/markovcryptor，并实测 X25519 生成、
+PIL 编码、numpy 运算，全部正常。
+
+### 结果
+
+| | 之前 | 现在 |
+| --- | --- | --- |
+| 包目录 | 237 MB | **209 MB**（裁剪 34 MB，含新 wheel） |
+| zip | 92 MB | **77 MB** |
+| 账号残留 | 有（token/密码哈希/数据库/日志） | **无** |
+| models/ | 4 个第三方模型 11MB | README.txt 说明 |
+| 文件数 | 3951 | 2159 |
+| 全量回归 | 106 秒 | **94 秒** |
+
+zip 与目录逐字节 sha256 一致（2159 文件，0 缺失/0 多余/0 差异）。
+
+### 测试
+
+`BundlePrivacyTest` 7 项：清理函数删除账号配置/数据库/日志但保留 config 目录；
+校验函数拒绝残留、放行干净包、忽略 site-packages 里的同名文件、抓得住散落的
+`.db`；**构建流程真的调用了这两个函数**（只写函数不挂进流程，包照样发出去）；
+脚本里不出现任何真实 QQ 号。
+
+### 教训
+
+**「构建产物」不等于「可以直接分发」。** 打包机是跑过真账号的机器，它的
+`config/`、`data/`、`logs/` 都是个人数据。清理必须做成构建流程的强制步骤 +
+成品扫描，而不是靠人记得手动清。

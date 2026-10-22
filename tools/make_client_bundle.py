@@ -309,6 +309,64 @@ def _verify(python: Path) -> None:
             "最常见原因：wheels 目录缺包，或自检没有隔离、借用了宿主的包。")
 
 
+#: 运行期用不到的包/目录。删之前必须确认没人 import：
+#: - pip：只用来装东西，装完就没用了（12 MB）
+#: - numpy 的 tests/f2py/distutils：测试与构建工具，运行时零引用（~4 MB）
+#: - __pycache__：首次 import 会重建，但不重建也能用（省下解压时间更值）
+_PRUNE_PACKAGES = ("pip", "setuptools", "wheel", "pkg_resources")
+_PRUNE_SUBDIRS = (
+    "numpy/tests", "numpy/random/tests", "numpy/f2py", "numpy/distutils",
+    "numpy/ma/tests", "numpy/linalg/tests", "numpy/fft/tests",
+    "numpy/polynomial/tests", "numpy/testing/tests",
+    "PIL/tests",
+)
+
+
+def _prune_bundle(root: Path) -> None:
+    """Drop what a shipped client never loads.
+
+    Everything removed here is either a build tool (pip, f2py), a test suite, or
+    a byte-code cache that Python regenerates on demand. None of it is imported
+    at runtime, so removing it changes behaviour not at all and saves tens of
+    megabytes.
+    """
+    site = root / "python" / "Lib" / "site-packages"
+    saved = 0
+
+    def _size(path: Path) -> int:
+        if path.is_file():
+            return path.stat().st_size
+        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+    for name in _PRUNE_PACKAGES:
+        target = site / name
+        if target.exists():
+            saved += _size(target)
+            shutil.rmtree(target, ignore_errors=True)
+
+    for relative in _PRUNE_SUBDIRS:
+        target = site / relative
+        if target.exists():
+            saved += _size(target)
+            shutil.rmtree(target, ignore_errors=True)
+
+    # 散落的 __pycache__：删掉后 Python 会用源码重新编译，功能不受影响。
+    for cache in list(root.rglob("__pycache__")):
+        if "node_modules" in str(cache):
+            continue
+        saved += _size(cache)
+        shutil.rmtree(cache, ignore_errors=True)
+
+    # pip 留下的入口脚本，没有 pip 就是死文件。
+    scripts = root / "python" / "Scripts"
+    if scripts.exists():
+        saved += _size(scripts)
+        shutil.rmtree(scripts, ignore_errors=True)
+
+    if saved:
+        _log(f"  裁剪掉 {saved / 1048576:.0f} MB 运行期用不到的内容")
+
+
 def _verify_site_packages(python: Path) -> None:
     """Assert the required distributions are physically inside the bundle.
 
@@ -354,6 +412,119 @@ def _copy_snowluma(source: Path, target: Path) -> None:
             shutil.copytree(item, target / name, dirs_exist_ok=True)
     # config/ 留空目录：SnowLuma 自己往里写 onebot_<QQ号>.json。
     (target / "config").mkdir(exist_ok=True)
+    _scrub_personal_state(target)
+
+
+#: SnowLuma 运行时会写这些东西，其中任何一样都不该跟着交付包发出去：
+#: 里面有账号、访问令牌、密码哈希、聊天数据库和日志。
+_PERSONAL_DIRS = ("config", "data", "logs", "cache", "tmp")
+
+
+def _scrub_personal_state(snowluma_root: Path) -> None:
+    """Remove everything SnowLuma wrote while running on the build machine.
+
+    The build machine has a real QQ account hooked up, so ``snowluma/`` there
+    contains:
+
+    * ``config/onebot_<QQ>.json`` -- the account number and the OneBot **access
+      token** in clear text
+    * ``config/webui.json`` -- WebUI password hash and salt
+    * ``data/<QQ>/*.db`` -- message history, reactions, identity
+    * ``logs/*.log`` -- everything that was said
+
+    None of that belongs in a package handed to someone else. It is also not
+    recoverable from the package alone, so leaving it in is a silent leak rather
+    than a convenience.
+
+    ``config/`` is kept as an *empty directory* because SnowLuma expects it to
+    exist and writes into it on first run.
+    """
+    for name in _PERSONAL_DIRS:
+        folder = snowluma_root / name
+        if not folder.exists():
+            continue
+        if name == "config":
+            # 目录保留，内容清空。
+            for item in folder.iterdir():
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+            continue
+        shutil.rmtree(folder)
+    (snowluma_root / "config").mkdir(exist_ok=True)
+
+
+def _verify_no_personal_state(root: Path) -> None:
+    """Fail the build if any account-specific file survived.
+
+    Runs over the finished package, not just SnowLuma, so a stray config dropped
+    anywhere is caught too.
+    """
+    offenders: list[str] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = str(path.relative_to(root)).replace("\\", "/")
+        lowered = relative.lower()
+        if "/site-packages/" in lowered or "/node_modules/" in lowered:
+            continue
+
+        name = path.name.lower()
+        if name.startswith("onebot_") and name.endswith(".json"):
+            offenders.append(relative)
+        elif lowered.endswith("snowluma/config/webui.json"):
+            offenders.append(relative)
+        elif lowered.endswith("snowluma/config/runtime.json"):
+            # 这个只有端口和日志策略，但它是运行期产物，不该预置。
+            offenders.append(relative)
+        elif "/snowluma/data/" in lowered:
+            offenders.append(relative)
+        elif "/snowluma/logs/" in lowered:
+            offenders.append(relative)
+        elif name.endswith(".db") and "snowluma" in lowered:
+            offenders.append(relative)
+
+    if offenders:
+        shown = "\n  ".join(offenders[:10])
+        raise SystemExit(
+            "打包失败：交付包里混进了账号相关的文件，必须先清掉：\n  "
+            + shown
+            + "\n（OneBot 令牌、WebUI 密码哈希、聊天数据库、日志都属于个人数据）"
+        )
+
+
+#: 文本模型不放包里：它们是拿用户自己的语料训练的，别人的模型对他也没用，
+#: 而且模型文件往往来自有版权的书。这里只留一个说明，告诉用户怎么弄。
+MODELS_README = """这个目录放文本模型（*.json）。
+
+为什么是空的
+------------
+文本密文需要一方持有中文马尔可夫模型。模型是从语料训练出来的，体积几 MB，
+而且往往来自有版权的书 —— 所以不随包分发，需要你自己准备。
+
+没有模型会怎样
+--------------
+- 图片密文照常可用（握手和图片收发都不依赖模型）
+- 文本密文不可用，界面上「模型 0/0」并提示「文本信道不可用」
+
+怎么获得模型
+------------
+1. 自己训练：客户端里 齿轮 -> 文本模型 -> 选一个 UTF-8 中文语料文件 -> 开始训练
+   （一部小说、文集都行，几 MB 通常几秒训完）
+2. 用别处拿到的：把对方的 .json 文件复制进这个目录，然后点「重新扫描」
+
+和对方要不要用同一个模型
+------------------------
+不用。接收端会把手里所有模型逐个试，认得出是哪个模型写的就解出来；
+认不出就当普通文本静默忽略。所以双方各自用自己的模型也能通信。
+"""
+
+
+def _write_models_readme(folder: Path) -> None:
+    """Create an empty models/ directory with an explanation."""
+    folder.mkdir(exist_ok=True)
+    (folder / "README.txt").write_text(MODELS_README, encoding="utf-8")
 
 
 def _find_node() -> Path:
@@ -385,6 +556,9 @@ def build(*, out: Path, snowluma: Path, wheels: Path,
     _install_deps(python_exe, wheels, markovcryptor_wheel)
     _verify_site_packages(python_exe)
     _verify(python_exe)
+    # 校验通过之后再裁：裁完还要再验一次，否则可能删掉真正在用的东西。
+    _prune_bundle(target)
+    _verify(python_exe)
 
     _log("[3/5] SnowLuma 与 node")
     _copy_snowluma(snowluma, target / "snowluma")
@@ -393,6 +567,7 @@ def build(*, out: Path, snowluma: Path, wheels: Path,
     shutil.copy2(_find_node(), node_dir / "node.exe")
 
     _log("[4/5] 启动脚本")
+    _write_models_readme(target / "models")
     (target / "start.bat").write_bytes(START_BAT.replace("\n", "\r\n").encode("utf-8"))
     (target / "start.ps1").write_bytes(
         b"\xef\xbb\xbf" + START_PS1.replace("\n", "\r\n").encode("utf-8"))
@@ -412,6 +587,9 @@ def build(*, out: Path, snowluma: Path, wheels: Path,
     }
     (target / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _log("[检查] 确认没有账号相关的残留")
+    _verify_no_personal_state(target)
 
     size = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
     _log(f"完成：{target}  ({size / 1048576:.0f} MB)")
