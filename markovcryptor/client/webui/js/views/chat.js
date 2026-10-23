@@ -6,7 +6,7 @@
 // 历史消息的 seq 是**负数**，实时消息是全局递增的正数。两者不能混（曾经
 // 撞过车，导致新消息被前端当成旧消息全部跳过）。
 
-import { $, toast } from "../core/dom.js";
+import { $, toast, clone } from "../core/dom.js";
 import { api } from "../core/api.js";
 import { S, COVERT } from "../core/store.js";
 import { fmtTime, avatarFor, setAvatar } from "../core/format.js";
@@ -25,29 +25,19 @@ export function setHooks(next) {
 // 时间戳：只显示 时:分。历史消息可能跨天，跨天时补上日期。
 
 export function bubbleFor(entry, peerName, showDate) {
-  const wrap = document.createElement("div");
-  wrap.className = "msg " + (entry.mine ? "mine" : "them");
+  const wrap = clone("tpl-msg");               // 结构见 index.html 的 <template>
+  if (!wrap) return null;
+  wrap.classList.add(entry.mine ? "mine" : "them");
+  wrap._entry = entry;                         // 右键菜单靠它取原文
 
-  // 谁说的 + 什么时候，放在气泡上方。位置本身已经区分了方向，
-  // 这行是给"看不清颜色"和"历史消息跨天"的情况兜底。
-  const meta = document.createElement("div");
-  meta.className = "meta";
-  const who = document.createElement("span");
-  who.className = "who";
-  who.textContent = entry.mine ? "我" : (peerName || "对方");
-  meta.appendChild(who);
-  const stamp = fmtTime(entry.at, showDate);
-  if (stamp) {
-    const sep = document.createTextNode(" · ");
-    const t = document.createElement("span");
-    t.textContent = stamp;
-    meta.append(sep, t);
-  }
-  wrap.appendChild(meta);
-  wrap._entry = entry;                 // 右键菜单靠它取原文
+  // 谁说的 + 什么时候，放在气泡上方。
+  wrap.querySelector(".who").textContent = entry.mine ? "我" : (peerName || "对方");
+  wrap.querySelector(".stamp").textContent = (() => {
+    const stamp = fmtTime(entry.at, showDate);
+    return stamp ? " · " + stamp : "";
+  })();
 
-  const b = document.createElement("div");
-  b.className = "bubble";
+  const b = wrap.querySelector(".bubble");
   if (entry.text) {
     const t = document.createElement("div");
     t.textContent = entry.text;
@@ -59,20 +49,20 @@ export function bubbleFor(entry, peerName, showDate) {
     b.appendChild(img);
   }
   for (const line of entry.unsupported || []) {
-    const u = document.createElement("div");
-    u.className = "unsupported";
-    u.textContent = line;
-    b.appendChild(u);
+    appendLine(b, "unsupported", line);
   }
   for (const line of entry.notes || []) {
-    const n = document.createElement("div");
-    n.className = "note";
-    n.textContent = line;
-    b.appendChild(n);
+    appendLine(b, "note", line);
   }
-  if (!b.hasChildNodes()) return null;   // 空条目不画，避免空气泡
-  wrap.appendChild(b);
+  if (!b.hasChildNodes()) return null;         // 空条目不画，避免空气泡
   return wrap;
+}
+
+function appendLine(parent, className, text) {
+  const el = document.createElement("div");
+  el.className = className;
+  el.textContent = text;
+  parent.appendChild(el);
 }
 
 // 增量渲染状态。每 2.5 秒重建整棵 DOM 的代价是：用户滚上去看历史会被

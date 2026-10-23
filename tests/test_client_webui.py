@@ -129,22 +129,32 @@ class StructureTest(unittest.TestCase):
         self.assertEqual(self.imbalance, [],
                          "HTML 标签不配对：" + "; ".join(self.imbalance))
 
-    def test_body_has_exactly_three_children(self):
-        """body 是 grid：idbar / workspace / modal。
+    def test_body_layout_children(self):
+        """body 是 grid：idbar / workspace / modal 三块。
 
-        多一个兄弟元素就多一行 grid，布局整体错位。
+        多一个"参与布局"的兄弟元素就多一行 grid，布局整体错位。
+        <template> 不算：它不参与渲染（内容不在文档流里），
+        所以单独排除，而不是把期望数字改成 6 —— 那样以后再加模板
+        又得改测试，反而失去意义。
         """
-        body = self._nodes(tag=None) if False else [
-            n for n, t in self.tree.tag_of.items() if t == "body"
-        ]
+        body = [n for n, t in self.tree.tag_of.items() if t == "body"]
         self.assertEqual(len(body), 1)
         kids = [k for k in self._direct_children(body[0])
-                if self._tag(k) in CHECKED]
+                if self._tag(k) in CHECKED and self._tag(k) != "template"]
         kinds = [f"<{self._tag(k)}"
                  f"{'#' + self.tree.attrs_of[k]['id'] if self.tree.attrs_of[k].get('id') else ''}>"
                  for k in kids]
         self.assertEqual(len(kids), 3,
-                         f"body 应当只有 3 个元素子节点，实际 {len(kids)}: {kinds}")
+                         f"body 应当只有 3 个布局元素，实际 {len(kids)}: {kinds}")
+
+    def test_templates_exist(self):
+        """JS 用 clone(id) 取模板；少一个就是整块列表空白。"""
+        ids = {self.tree.attrs_of[n].get("id")
+               for n, t in self.tree.tag_of.items() if t == "template"}
+        for expected in ("tpl-msg", "tpl-row", "tpl-qthumb"):
+            with self.subTest(template=expected):
+                self.assertIn(expected, ids)
+                self.assertNotIn("undefined", ids)
 
     def test_modal_is_direct_child_of_body(self):
         """#modal 放进 .workspace 会占掉一个 grid 格子，把 #chat 挤走。"""

@@ -6,7 +6,7 @@
 // ATTACH 是纯浏览器侧状态：用户选了哪些图、还没发出去。真实队列在服务端，
 // 这里只是预览。
 
-import { $, toast } from "../core/dom.js";
+import { $, toast, clone } from "../core/dom.js";
 import { api } from "../core/api.js";
 
 // 刷新状态的入口由 app.js 注入 —— composer 改完队列要重新拉一次 state，
@@ -26,27 +26,24 @@ export function renderQueue(items) {
   if (grid.dataset.sig === signature) return;
   grid.dataset.sig = signature;
   grid.innerHTML = "";
+
   (items || []).forEach((item, index) => {
-    const box = document.createElement("div");
-    box.className = "qthumb";
+    const box = clone("tpl-qthumb");       // 结构见 index.html 的 <template>
+    if (!box) return;
+    const img = box.querySelector("img");
     if (item.thumb) {
-      const img = document.createElement("img");
       img.src = item.thumb;
       img.alt = item.name || "";
       img.title = item.name || "";
-      box.appendChild(img);
     } else {
       // 缩略图生成失败也要占位，否则用户会以为队列里没东西。
       const ph = document.createElement("div");
-      ph.style.cssText = "width:100%;height:100%;display:grid;place-items:center;font-size:10px;color:var(--dim)";
+      ph.style.cssText = "width:100%;height:100%;display:grid;"
+                       + "place-items:center;font-size:10px;color:var(--dim)";
       ph.textContent = "无预览";
-      box.appendChild(ph);
+      img.replaceWith(ph);
     }
-    const x = document.createElement("button");
-    x.className = "x";
-    x.textContent = "×";
-    x.title = "从队列移除（不会删你的文件）";
-    x.onclick = async (ev) => {
+    box.querySelector(".x").onclick = async (ev) => {
       ev.stopPropagation();
       try {
         const d = await api("/client/queue/remove", {
@@ -58,7 +55,6 @@ export function renderQueue(items) {
         await refresh();
       } catch (e) { toast(e.message); }
     };
-    box.appendChild(x);
     grid.appendChild(box);
   });
 }

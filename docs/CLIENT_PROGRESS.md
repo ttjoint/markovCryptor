@@ -1671,3 +1671,45 @@ await import('./js/views/composer.js')   // 在页面上下文里逐个试，
 ```
 
 比看 `pageerror` 有用得多 —— 后者只会说"某某 is not defined"。
+
+## 重构阶段 C：settings + app.js + template 化（2026-10-23）
+
+### C-1 应用层拆分
+
+| 文件 | 行数 | 内容 |
+| --- | --- | --- |
+| `panels/settings.js` | 383 | 设置面板、模型管理、模型拖入、全部面板交互 |
+| `app.js` | 489 | 状态刷新、发送动作、空状态、分栏、存活探测 |
+| `index.html` | **312** | 只剩结构与启动顺序 |
+
+`index.html` 从最初的 **2590 行降到 312 行**。
+
+有一处反向依赖需要说明：`settings.js` 里训练/导入模型后要刷新状态，
+于是它 `import { refreshState } from "../app.js"`。这是「面板 → 应用层」
+单向依赖，不算循环（`app.js` 也 import settings，但只在运行时调用
+`installSettings()`，不在模块求值期用它的导出）。
+
+### C-2 template 化
+
+把三处手工 `createElement` 拼装改成 `<template>` + `cloneNode`：
+
+| 模板 | 用在哪 | 收拢了什么 |
+| --- | --- | --- |
+| `tpl-msg` | `chat.bubbleFor` | 60 行 createElement → 30 行 |
+| `tpl-row` | `list.rowFor` | 分支删 `sub`/`mark`/`badge` 而不是逐个建 |
+| `tpl-qthumb` | `composer.renderQueue` | 缩略图 + 删除按钮 |
+
+新增 `core/dom.js` 的 `clone(templateId)`：找不到模板时 **console.error 并
+返回 null**，不静默返回 undefined —— 后者会让调用方在后面某行莫名崩掉。
+
+模板放在 `body` 末尾，不参与渲染，因此不影响 grid 布局。
+
+### 测试
+
+`test_body_has_exactly_three_children` 因新增 template 而失败 —— 但这正是
+测试该做的事。改成**排除 `<template>` 再数 3 个布局元素**，而不是把期望
+数字改成 6：后者以后每加一个模板都要改测试，防线就废了。
+
+新增 `test_templates_exist`（注入改名验证过能 FAIL）。
+
+15 passed, 26 subtests。

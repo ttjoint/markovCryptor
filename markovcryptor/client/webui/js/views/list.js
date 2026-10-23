@@ -4,7 +4,7 @@
 // chat 视图的职责。直接 import 会让 list 和 chat 互相依赖，进而变成
 // 循环引用 —— ES module 的循环引用不会报错，只会在运行时拿到 undefined。
 
-import { $ } from "../core/dom.js";
+import { $, clone } from "../core/dom.js";
 import { S } from "../core/store.js";
 import { avatarFor, setAvatar } from "../core/format.js";
 
@@ -16,58 +16,45 @@ export function setOpener(fn) {
 }
 
 export function rowFor(item, isConversation) {
-  const row = document.createElement("div");
-  row.className = "row" + (S.current === item.uin_or_peer ? " active" : "");
-
-  // 好友行也带头像：一眼认人比读名字快。
-  const av = document.createElement("div");
-  av.className = "avatar small";
-  // 最近列表的对端不一定是好友，后端已按号码兜底生成了 avatar。
-  setAvatar(av, item.avatar || avatarFor(item.peer || item.uin),
-            item.name || item.peer || item.uin);
-  row.appendChild(av);
+  const row = clone("tpl-row");           // 结构见 index.html 的 <template>
+  if (!row) return null;
 
   const peer = isConversation ? item.peer : item.uin;
   row.dataset.peer = peer;
   if (S.current === peer) row.classList.add("active");
 
-  const nm = document.createElement("div");
-  nm.className = "nm";
-  const nameLine = document.createElement("div");
-  nameLine.textContent = item.name || peer;
-  nm.appendChild(nameLine);
+  // 好友行也带头像：一眼认人比读名字快。
+  // 最近列表的对端不一定是好友，后端已按号码兜底生成了 avatar。
+  setAvatar(row.querySelector(".avatar"),
+            item.avatar || avatarFor(peer),
+            item.name || peer);
+
+  row.querySelector(".name").textContent = item.name || peer;
+
+  const sub = row.querySelector(".sub");
   if (isConversation) {
-    const sub = document.createElement("div");
-    sub.className = "sub";
     sub.textContent = item.established ? "信道已建立" : item.state_label;
-    nm.appendChild(sub);
-  }
-  row.append(nm);
-
-  if (isConversation && item.established) {
-    const mk = document.createElement("span");
-    mk.className = "mark est";
-    mk.textContent = "●";
-    mk.title = "信道已建立";
-    row.appendChild(mk);
-  } else if (isConversation) {
-    const mk = document.createElement("span");
-    mk.className = "mark wait";
-    mk.textContent = "○";
-    mk.title = item.state_label;
-    row.appendChild(mk);
+  } else {
+    sub.remove();                          // 好友行没有副标题
   }
 
+  const mark = row.querySelector(".mark");
+  if (isConversation) {
+    mark.classList.add(item.established ? "est" : "wait");
+    mark.textContent = item.established ? "●" : "○";
+    mark.title = item.established ? "信道已建立" : item.state_label;
+  } else {
+    mark.remove();
+  }
+
+  const badge = row.querySelector(".badge");
   if (isConversation && item.unread > 0) {
-    const badge = document.createElement("span");
-    badge.className = "badge";
     badge.textContent = item.unread;
-    row.appendChild(badge);
+  } else {
+    badge.remove();
   }
 
-  row.onclick = () => {
-    if (openPeer) openPeer(peer);
-  };
+  row.onclick = () => { if (openPeer) openPeer(peer); };
   return row;
 }
 
