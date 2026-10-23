@@ -32,6 +32,17 @@ _WS_THICKFRAME = 0x00040000
 _WS_MINIMIZEBOX = 0x00020000
 _WS_MAXIMIZEBOX = 0x00010000
 _WS_SYSMENU = 0x00080000
+#: 必须**加上**这个位。
+#:
+#: 只清掉 CAPTION/THICKFRAME 是不够的：窗口仍然是 WS_OVERLAPPEDWINDOW 语义，
+#: 窗口矩形比客户区大一圈（实测宽 14px、高 7px），Windows 11 的 DWM 会在那一圈
+#: 画圆角和阴影 —— 用户看到的就是"外面还有一层窗体"。
+#:
+#: 真正的无边框窗口是 WS_POPUP：窗口矩形等于客户区，DWM 没有可装饰的东西。
+#:
+#: 注意写成有符号值：SetWindowLongW 的 style 参数是 LONG（32 位有符号），
+#: 直接传 0x80000000（Python 里是正数 2^31）会 ArgumentError 溢出。
+_WS_POPUP = -0x80000000
 
 _GWL_STYLE = -16
 _SWP_NOSIZE = 0x0001
@@ -42,6 +53,7 @@ _SWP_FRAMECHANGED = 0x0020
 
 _SW_MINIMIZE = 6
 _SW_RESTORE = 9
+_SW_MAXIMIZE = 3
 
 
 def _user32():
@@ -101,11 +113,21 @@ def find_window_for_pid(pid: int, *, timeout: float = 12.0) -> int | None:
 
     found: list[int] = []
 
+    u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    u.GetClassNameW.restype = ctypes.c_int
+
     @_c.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     def _visit(hwnd, _lparam):
         owner = wintypes.DWORD()
         u.GetWindowThreadProcessId(hwnd, _c.byref(owner))
-        if owner.value == pid and u.IsWindowVisible(hwnd):
+        if owner.value != pid or not u.IsWindowVisible(hwnd):
+            return True
+        # Chromium 同时有 Chrome_WidgetWin_0（隐藏的辅助窗口）和
+        # Chrome_WidgetWin_1（真正的顶层窗口）。按类名挑，否则可能改到一个
+        # 谁也看不见的窗口，然后以为成功了。
+        name = _c.create_unicode_buffer(256)
+        u.GetClassNameW(hwnd, name, 256)
+        if name.value == "Chrome_WidgetWin_1":
             found.append(hwnd)
             return False                            # stop enumerating
         return True
@@ -136,7 +158,12 @@ def strip_frame(hwnd: int) -> bool:
     # 这几个按钮我们自己画，留着系统的会出现两套。
     remove = (_WS_CAPTION | _WS_THICKFRAME | _WS_MINIMIZEBOX
               | _WS_MAXIMIZEBOX | _WS_SYSMENU)
-    new_style = style & ~remove
+    # 再加 WS_POPUP：没有它，窗口矩形永远比客户区大一圈，
+    # Win11 的 DWM 就在那一圈画圆角和阴影，看起来还是"有个窗体"。
+    # 用掩码做位运算时要注意符号：style 本身可能已经是负数（高位被置位）。
+    base = style & ~remove
+    new_style = base | _WS_POPUP
+
     if new_style == style:
         return True                                 # 已经是无边框了
     u.SetWindowLongW(hwnd, _GWL_STYLE, new_style)
@@ -144,6 +171,15 @@ def strip_frame(hwnd: int) -> bool:
                    _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOZORDER
                    | _SWP_NOACTIVATE | _SWP_FRAMECHANGED)
     event("window", "frame_stripped", hwnd=hwnd)
+
+    # 去掉标题栏后，Windows 仍然会在窗口矩形的四周留一圈非客户区，
+    # 实测窗口停在 (+12,+12)、比客户区大 14x7 —— 用户看到的就是
+    # "外面还有一层窗体"。改窗口尺寸消不掉这圈（它是 Chromium 自己算的）。
+    #
+    # 可靠的做法是**最大化**：最大化后窗口矩形会超出屏幕 7px（那部分是不可见
+    # 的阴影，本来就不该看见），客户区正好铺满屏幕，视觉上就是纯净的无边框。
+    u.ShowWindow(hwnd, _SW_MAXIMIZE)
+    event("window", "maximized", hwnd=hwnd)
     return True
 
 
