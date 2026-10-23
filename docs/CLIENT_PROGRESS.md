@@ -1472,3 +1472,63 @@ Chromium 同时有 `Chrome_WidgetWin_0`（隐藏辅助窗口）和 `Chrome_Widge
 实测（Playwright）：`窗口标题: 'KC - 术力口宝贝（1741473279）'`、
 设置按钮 40×34、退出/最小化计数 0、无 JS 错误；截图确认横栏文字正确。
 针对性回归 109 passed。
+
+---
+
+## 最近头像 + 输入栏丢失 + 标签计数 + 齿轮图标（2026-10-23）
+
+用户报四项：最近栏头像没同步；输入栏不见了；最近/好友要带总数；设置按钮
+换成大号 SVG 齿轮。
+
+### 输入栏丢失 —— DOM 结构被之前的一次修复弄坏了
+
+排查链（值得记下来，因为每一环都像"正确的修复"）：
+
+1. 最初以为 `.workspace` 缺 `min-height:0`，加上 —— 无效
+2. 以为 `#chat` 需要 `height:100%`，加上 —— 反而多出 82px
+3. 以为缺 `grid-template-rows:1fr`，加上 —— `#chat` 塌成 0
+4. 以为 body 缺 `height:100vh`，加上 —— body 行高对了（82+818），
+   但 `.workspace` 仍是 900
+5. **根因**：DOM 检查发现 `.workspace` 有 **3 个**子元素 ——
+   `aside`、`#modal`、`#chat`。`#modal` 是之前修 `</main>` 位置时被错放进
+   来的，它占了 grid 第 2 行，把 `#chat` 挤到 `auto` 行
+6. 移出 `#modal` 时又把 `#empty` 一起动了，结果 `#empty` 没闭合、
+   `#chat` 被包进了 `#empty` 里 —— `chat.parentElement.id === "empty"`
+7. 补上闭合，再把 `#empty`（原本裹在一个多余的 `<main>` 里）移进
+   `.workspace` 与 `#chat` 同格互斥
+
+最终布局约束（全部必要，缺一个就崩）：
+
+```css
+body { height: 100vh; grid-template-rows: auto minmax(0, 1fr); }
+.workspace { display:grid; grid-template-columns:280px 1fr;
+             grid-template-rows:1fr; min-height:0; overflow:hidden;
+             height:100%; }
+#chat, .empty { grid-column:2; grid-row:1; }   /* 同格互斥 */
+#chat { display:flex; flex-direction:column; min-height:0; overflow:hidden; }
+```
+
+教训：**布局问题要先用 `getComputedStyle` 把祖先链的高度和 display 打出来**，
+不要凭"缺哪个属性"猜。这次猜了 4 次，每次看起来都合理，全错。
+
+### 最近栏头像
+
+后端 `/client/state` 的 `conversations[]` 没有 `avatar` 字段（好友列表有）。
+加 `_peer_avatar(account, peer)`：优先好友记录里缓存的 URL，否则按号码现拼
+（陌生人也能发消息，他们的行也需要头像）。
+
+### 标签计数
+
+state 加 `counts: {conversations, friends}`；标签页渲染成
+`最近 (1) / 好友 (29)`，小号、淡色、tabular-nums。
+
+### 设置按钮
+
+文本 `⚙` 换成内联 SVG 齿轮（24×24 viewBox，描边风格，跟随 currentColor），
+尺寸从 32×28/14px 改为 **40×40**，与头像同尺寸。
+
+### 实测
+
+四项全过：最近列表头像 1/1、输入栏完整可见（y=822，高 46）、
+`最近 (1) / 好友 (29)`、齿轮 SVG 40×40；页面无滚动（900=900）、无 JS 错误。
+针对性回归 98 passed。

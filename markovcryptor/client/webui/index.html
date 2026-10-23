@@ -56,7 +56,9 @@
     /* 上下两行：顶部身份栏（固定高）+ 工作区（占满剩余）。
        原来是一行两列、左栏里塞着"本机"，于是整个窗口外面还套着一个
        "客户端"的框子感觉。现在最顶部直接就是自己。 */
-    display: grid; grid-template-rows: auto 1fr;
+    /* 必须显式给高度，否则 1fr 会按内容撑（而不是按视口剩余），
+       输入栏被推到屏幕外。 */
+    height: 100vh; display: grid; grid-template-rows: auto minmax(0, 1fr);
     font: 14px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
     background: var(--bg); color: var(--text); overflow: hidden;
     /* 让整个窗口可以拖动（Chromium --app 下没有标题栏） */
@@ -92,14 +94,24 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .idbar .uin { font-size: 11px; color: var(--dim); }
+  /* 标签页上的计数：小一号、淡一点，不抢标签本身的主体感。 */
+  .tabs .cnt {
+    margin-left: 5px; font-size: 11px; color: var(--dim); font-weight: 400;
+    font-variant-numeric: tabular-nums;
+  }
+  .tabs button[aria-selected="true"] .cnt { color: var(--accent); }
+
   .winbtns { display: flex; gap: 2px; -webkit-app-region: no-drag; }
   /* 只剩设置一个按钮了，放大到能一眼看见、也好点。 */
+  /* 与头像同尺寸（40px 圆角方块），视觉上成为身份栏的一部分。 */
   .winbtns .iconbtn {
-    width: 40px; height: 34px; border-radius: 8px;
+    width: 40px; height: 40px; border-radius: 10px;
     display: grid; place-items: center;
-    font-size: 20px; line-height: 1; padding: 0;
+    padding: 0; color: var(--dim);
+    transition: background .12s, color .12s;
   }
   .winbtns .iconbtn:hover { background: var(--panel2); color: var(--accent); }
+  .winbtns .iconbtn svg { display: block; }
 
   /* 在线状态点：绿=在线，灰=未知/离线。 */
   .dot {
@@ -111,9 +123,19 @@
 
   /* 工作区：左侧好友列表 + 右侧会话，左右并排。 */
   .workspace {
-    display: grid; grid-template-columns: 280px 1fr;
-    min-height: 0; overflow: hidden;
+    display: grid;
+    /* 显式一行 1fr：不给 grid-template-rows 时行高是 auto，
+       内容多高就多高，#chat 会塌成 topbar 那么高。 */
+    grid-template-columns: 280px 1fr;
+    grid-template-rows: 1fr;
+    /* 必须显式 min-height:0 + overflow:hidden：它是 body 的 grid 行（1fr），
+       默认 min-height:auto 会让内容把自己撑破，输入栏被推出屏幕外。 */
+    min-height: 0; min-width: 0; overflow: hidden;
+    /* 没有这行时 grid 容器会被内容撑到 body 的 100vh，
+       而不是被限制在「body 第二行」的 818px 里。 */
+    height: 100%;
   }
+  .workspace > * { min-height: 0; min-width: 0; }
 
   /* 头像：圆形，未加载时是一个带首字的占位圆。
      尺寸比原来大一档 —— 之前的首字母圆是 34px，换成正圆头像后行内那圈
@@ -169,9 +191,19 @@
   /* 会话容器本身也是 flex 项，同样要能收缩，否则它的子项再怎么设都白搭。 */
   #chat {
     display: flex; flex-direction: column;
-    flex: 1 1 0; min-height: 0; overflow: hidden;
+    /* 与 .empty 同占 workspace 的第 2 格（第 1 行），谁显示由 hidden 决定。
+       **不要写 height:100%**：grid 行高已经是剩余空间，再叠加 100% 会按
+       整行高度算，比可用空间多出 idbar 的高度（82px），输入栏被推出屏幕。 */
+    grid-column: 2; grid-row: 1;
+    min-height: 0; overflow: hidden;
   }
-  .empty { flex: 1; display: grid; place-items: center; color: var(--dim); }
+  /* 空状态是 #chat 的覆盖层，不是它的兄弟格子 ——
+     两个都占 grid-column:2 会互相挤压，把 #chat 压成 0 高。 */
+  .empty {
+    grid-column: 2; grid-row: 1;
+    display: grid; place-items: center; color: var(--dim);
+    min-height: 0; overflow: auto;
+  }
   .topbar {
     flex: 0 0 auto;
     display: flex; align-items: center; gap: 12px; padding: 12px 20px;
@@ -545,18 +577,112 @@
       <span class="dot" id="meDot" title="在线状态"></span>
     </div>
     <div class="winbtns">
-      <button class="iconbtn" id="btnSettings" title="设置" aria-label="设置">⚙</button>
+      <button class="iconbtn" id="btnSettings" title="设置" aria-label="设置">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none"
+             stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3.1"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.36.4.66.74.86.3.18.64.28.98.28H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
     </div>
   </header>
 
   <main class="workspace">
     <aside>
       <div class="tabs">
-        <button id="tabRecent" aria-selected="true">最近</button>
-        <button id="tabFriends" aria-selected="false">好友</button>
+        <button id="tabRecent" aria-selected="true">最近<span class="cnt" id="cntRecent"></span></button>
+        <button id="tabFriends" aria-selected="false">好友<span class="cnt" id="cntFriends"></span></button>
       </div>
       <div class="list" id="list"></div>
     </aside>
+
+    <!-- 空状态与 #chat 占同一格（grid-column:2），二者互斥显示。 -->
+    <div class="empty" id="empty">
+      <div class="onboard" id="onboard">
+        <h3>还没有开始对话</h3>
+        <ol>
+          <li id="obQueue">图片文件夹：<b>未配置</b> —— 握手和图片密文都需要它</li>
+          <li id="obModel">文本模型：<b>未加载</b> —— 文本密文需要它</li>
+          <li>在左侧「好友」里点一个人，或在「最近」里等消息</li>
+        </ol>
+        <button class="ghost" id="btnOnboardSettings">打开设置</button>
+      </div>
+    </div>
+
+    <div id="chat" hidden>
+      <div class="topbar">
+        <div class="avatar small" id="peerAvatar"></div>
+        <div class="title" id="peerName"></div>
+        <div class="state" id="peerState"></div>
+      </div>
+      <div class="panes" id="panes">
+        <!-- 左：明文。显示 + 输入是一个单元。 -->
+        <section class="pane" id="panePlain">
+          <h2>明文（对方在 QQ 里看到的）</h2>
+          <div class="thread" id="plainThread"></div>
+          <div class="composer" id="plainComposer">
+            <div class="attachbar" id="attachBar" hidden></div>
+            <div class="entry">
+              <textarea id="input" rows="2"
+                placeholder="输入消息，Enter 发送，Shift+Enter 换行。可粘贴或拖入图片"></textarea>
+              <button class="send" id="btnSendText" title="发送（Enter）">发送</button>
+            </div>
+            <div class="hintline" id="plainHint"></div>
+          </div>
+        </section>
+
+        <div class="splitter" id="splitter" title="拖动调整左右宽度，双击恢复均分"></div>
+
+        <!-- 右：密文。同样是一个单元，未握手时整块被遮挡。 -->
+        <section class="pane" id="paneCovert">
+          <h2>密文（解出来的隐藏内容）</h2>
+          <div class="thread covert-thread" id="covertThread"></div>
+
+          <div class="composer" id="covertComposer">
+            <div class="channelbar">
+              <span class="switch" id="channelSwitch" role="switch" aria-checked="false"
+                    tabindex="0" title="切换隐藏载体：图片 / 文本">
+                <span class="knob"></span>
+                <span class="lab image">图片</span>
+                <span class="lab text">文本</span>
+              </span>
+              <select id="modelPick" title="用于加密发出的文本；收方向会尝试所有已加载模型"></select>
+              <span id="modelHint" class="sub"></span>
+              <button id="btnModelReload" class="tiny">重新扫描</button>
+            </div>
+
+            <div class="entry">
+              <textarea id="covertInput" rows="2"
+                placeholder="要隐藏的内容，Enter 发送，Shift+Enter 换行"></textarea>
+              <button class="send" id="btnSendCovert" title="隐藏并发送（Enter）">密文发送</button>
+            </div>
+          </div>
+
+          <!-- 遮挡层：未握手 / 图片不足时盖住聊天和输入区。 -->
+          <div class="veil" id="covertVeil">
+            <div class="veilbody">
+              <div class="veilicon" id="veilIcon">🔒</div>
+              <div class="veiltitle" id="veilTitle">尚未握手</div>
+              <div class="veiltext" id="veilText">先与对方建立密钥，才能收发隐藏内容。</div>
+              <button class="veilbtn" id="veilAction">发起握手</button>
+            </div>
+          </div>
+
+          <!-- 待发图片队列：**故意放在遮挡层之后**。用户要在握手前就能看到
+               和管理这些图，所以它们永远浮在遮挡之上。 -->
+          <div class="queuefloat" id="queueFloat">
+            <div class="queuebar">
+              <span class="pill" id="queueStat">队列 0/8</span>
+              <button id="btnRefill" title="从图片文件夹补充待发图片">补图</button>
+              <span id="queueHint" class="sub"></span>
+            </div>
+            <div class="queuegrid" id="queueGrid"></div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
 
   <div class="modal" id="modal" hidden>
     <div class="sheet">
@@ -634,93 +760,7 @@
     </div>
   </div>
 
-  <main>
-    <div class="empty" id="empty">
-      <div class="onboard" id="onboard">
-        <h3>还没有开始对话</h3>
-        <ol>
-          <li id="obQueue">图片文件夹：<b>未配置</b> —— 握手和图片密文都需要它</li>
-          <li id="obModel">文本模型：<b>未加载</b> —— 文本密文需要它</li>
-          <li>在左侧「好友」里点一个人，或在「最近」里等消息</li>
-        </ol>
-        <button class="ghost" id="btnOnboardSettings">打开设置</button>
-      </div>
-    </div>
-    <div id="chat" hidden>
-      <div class="topbar">
-        <div class="avatar small" id="peerAvatar"></div>
-        <div class="title" id="peerName"></div>
-        <div class="state" id="peerState"></div>
-      </div>
-      <div class="panes" id="panes">
-        <!-- 左：明文。显示 + 输入是一个单元。 -->
-        <section class="pane" id="panePlain">
-          <h2>明文（对方在 QQ 里看到的）</h2>
-          <div class="thread" id="plainThread"></div>
-          <div class="composer" id="plainComposer">
-            <div class="attachbar" id="attachBar" hidden></div>
-            <div class="entry">
-              <textarea id="input" rows="2"
-                placeholder="输入消息，Enter 发送，Shift+Enter 换行。可粘贴或拖入图片"></textarea>
-              <button class="send" id="btnSendText" title="发送（Enter）">发送</button>
-            </div>
-            <div class="hintline" id="plainHint"></div>
-          </div>
-        </section>
 
-        <div class="splitter" id="splitter" title="拖动调整左右宽度，双击恢复均分"></div>
-
-        <!-- 右：密文。同样是一个单元，未握手时整块被遮挡。 -->
-        <section class="pane" id="paneCovert">
-          <h2>密文（解出来的隐藏内容）</h2>
-          <div class="thread covert-thread" id="covertThread"></div>
-
-          <div class="composer" id="covertComposer">
-            <div class="channelbar">
-              <span class="switch" id="channelSwitch" role="switch" aria-checked="false"
-                    tabindex="0" title="切换隐藏载体：图片 / 文本">
-                <span class="knob"></span>
-                <span class="lab image">图片</span>
-                <span class="lab text">文本</span>
-              </span>
-              <select id="modelPick" title="用于加密发出的文本；收方向会尝试所有已加载模型"></select>
-              <span id="modelHint" class="sub"></span>
-              <button id="btnModelReload" class="tiny">重新扫描</button>
-            </div>
-
-            <div class="entry">
-              <textarea id="covertInput" rows="2"
-                placeholder="要隐藏的内容，Enter 发送，Shift+Enter 换行"></textarea>
-              <button class="send" id="btnSendCovert" title="隐藏并发送（Enter）">密文发送</button>
-            </div>
-          </div>
-
-          <!-- 遮挡层：未握手 / 图片不足时盖住聊天和输入区。 -->
-          <div class="veil" id="covertVeil">
-            <div class="veilbody">
-              <div class="veilicon" id="veilIcon">🔒</div>
-              <div class="veiltitle" id="veilTitle">尚未握手</div>
-              <div class="veiltext" id="veilText">先与对方建立密钥，才能收发隐藏内容。</div>
-              <button class="veilbtn" id="veilAction">发起握手</button>
-            </div>
-          </div>
-
-          <!-- 待发图片队列：**故意放在遮挡层之后**。用户要在握手前就能看到
-               和管理这些图，所以它们永远浮在遮挡之上。 -->
-          <div class="queuefloat" id="queueFloat">
-            <div class="queuebar">
-              <span class="pill" id="queueStat">队列 0/8</span>
-              <button id="btnRefill" title="从图片文件夹补充待发图片">补图</button>
-              <span id="queueHint" class="sub"></span>
-            </div>
-            <div class="queuegrid" id="queueGrid"></div>
-          </div>
-        </section>
-      </div>
-    </div>
-  </main>
-
-  </main>
 
 <script>
 "use strict";
@@ -793,8 +833,9 @@ function rowFor(item, isConversation) {
   // 好友行也带头像：一眼认人比读名字快。
   const av = document.createElement("div");
   av.className = "avatar small";
-  setAvatar(av, item.avatar || avatarFor(item.uin_or_peer),
-            item.name || item.uin_or_peer);
+  // 最近列表的对端不一定是好友，后端已按号码兜底生成了 avatar。
+  setAvatar(av, item.avatar || avatarFor(item.peer || item.uin),
+            item.name || item.peer || item.uin);
   row.appendChild(av);
   const peer = isConversation ? item.peer : item.uin;
   row.dataset.peer = peer;
@@ -1077,6 +1118,16 @@ function applyState(data) {
   S.ready = data.ready;
   S.conversations = data.conversations;
   S.friends = data.friends;
+
+  // 标签页计数。后端给了 counts 就用它（会话数包含尚未渲染的），
+  // 否则退回数组长度。
+  const counts = data.counts || {};
+  const nConv = counts.conversations !== undefined
+    ? counts.conversations : (data.conversations || []).length;
+  const nFriend = counts.friends !== undefined
+    ? counts.friends : (data.friends || []).length;
+  $("cntRecent").textContent = nConv ? `(${nConv})` : "";
+  $("cntFriends").textContent = nFriend ? `(${nFriend})` : "";
 
   // 顶部显示真实的自己：昵称 + QQ 号 + 头像 + 在线点。
   // 原来写的是"本机"两个字 —— 那是在描述一个位置，不是在说"我是谁"。

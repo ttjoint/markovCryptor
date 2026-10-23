@@ -228,9 +228,17 @@ def create_client_app(account: Account, *, webui_dir=None,
                     "established": conversation.established,
                     "state_label": conversation.state_label,
                     "last_at": conversation.last_at,
+                    # 最近列表也要头像。好友列表里有，但会话的对端不一定是
+                    # 好友（陌生人也能发消息），所以这里按号码现拼一个兜底。
+                    "avatar": _peer_avatar(account, conversation.peer),
                 }
                 for conversation in account.conversations.ordered()
             ],
+            # 两个标签页的总数，界面直接显示"最近 (12) / 好友 (29)"。
+            "counts": {
+                "conversations": len(account.conversations),
+                "friends": len(account.directory),
+            },
         })
 
     @app.get("/client/conversation/{peer}")
@@ -779,6 +787,21 @@ def _decode_data_url(value: str) -> bytes:
     if len(raw) > 8 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="单张图片不能超过 8MB")
     return raw
+
+
+def _peer_avatar(account: Account, peer: str) -> str:
+    """Avatar URL for a conversation peer.
+
+    Prefers the friend record (which may carry a cached URL) and falls back to
+    building one from the QQ number -- a stranger can message you, and their row
+    still needs a picture.
+    """
+    from .directory import avatar_url
+
+    friend = account.directory.get(peer)
+    if friend is not None and friend.avatar:
+        return friend.avatar
+    return avatar_url(peer)
 
 
 def _thumbnail(raw: bytes) -> str | None:
