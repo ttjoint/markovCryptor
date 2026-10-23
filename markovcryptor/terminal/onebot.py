@@ -449,6 +449,33 @@ class OneBotNetwork:
         """当前账号 ``{user_id, nickname}``；用来确认 QQ 真的登上了。"""
         return dict(self.ask("get_login_info") or {})
 
+    def stranger_info(self, uin: str) -> dict:
+        """A contact's profile: ``{user_id, nickname, sex, age, ...}``.
+
+        Works for friends and strangers alike, which is what we want: a stranger
+        can message you, and their row still needs a name.
+        """
+        return dict(self.ask("get_stranger_info",
+                             {"user_id": int(str(uin)),
+                              "no_cache": False}) or {})
+
+    def avatar_url(self, uin: str, size: int = 100) -> str:
+        """QQ's public avatar URL for ``uin``.
+
+        Built locally rather than asked for over OneBot: the host is stable,
+        needs no round trip, and works even when the bridge is slow. ``size``
+        must be one of 0/40/100/140/640 as far as QQ's CDN cares; we use 100.
+        """
+        return f"https://q1.qlogo.cn/g?b=qq&nk={uin}&s={int(size)}"
+
+    def online_status(self) -> dict:
+        """This account's own status: ``{online, good, ...}``.
+
+        SnowLuma exposes ``get_status``; not every bridge does, so callers must
+        treat a failure as "unknown" rather than "offline".
+        """
+        return dict(self.ask("get_status") or {})
+
     def friend_history(self, peer: str, count: int = 20) -> list[dict]:
         """与某个好友的历史消息，最新在后。"""
         data = self.ask("get_friend_msg_history",
@@ -769,6 +796,16 @@ class InProcessOneBotNetwork(OneBotNetwork):
         """
         return self.hub.reply(self.self_id, action, dict(params or {}))
 
+    def stranger_info(self, uin: str) -> dict:
+        return dict(self.hub.reply(self.self_id, "get_stranger_info",
+                                   {"user_id": int(str(uin))}) or {})
+
+    def avatar_url(self, uin: str, size: int = 100) -> str:
+        return f"https://q1.qlogo.cn/g?b=qq&nk={uin}&s={int(size)}"
+
+    def online_status(self) -> dict:
+        return {"online": True, "good": True}
+
     def start(self) -> "InProcessOneBotNetwork":
         self.hub.accounts[self.self_id] = self   # already "connected"
         return self
@@ -804,6 +841,12 @@ class InProcessOneBot:
         """What the fake server answers. Mirrors the real OneBot data shapes."""
         if action == "get_login_info":
             return {"user_id": int(uin), "nickname": f"账号{uin}"}
+        if action == "get_stranger_info":
+            target = str(params.get("user_id"))
+            for friend in (self.friends or {}).get(str(uin), []):
+                if str(friend.get("user_id")) == target:
+                    return dict(friend)
+            return {"user_id": int(target), "nickname": f"账号{target}"}
         if action == "get_friend_list":
             if self.friends is None:
                 return []

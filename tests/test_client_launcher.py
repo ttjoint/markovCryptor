@@ -117,36 +117,48 @@ class ExeParsingTest(unittest.TestCase):
 
 
 class OpenUiTest(unittest.TestCase):
-    def test_chromium_uses_app_mode(self):
+    """open_ui 返回 (label, pid)。
+
+    pid 是"我们自己起的那个浏览器进程"，用来事后找到窗口去掉系统标题栏。
+    拿不到 pid（标签页模式）就不能碰任何窗口 —— 用户已有的浏览器绝不能
+    因为开了这个应用而被改样式。
+    """
+
+    def test_chromium_uses_app_mode_and_reports_pid(self):
         with mock.patch.object(browser.subprocess, "Popen") as popen:
-            label = browser.open_ui("http://127.0.0.1:8741/",
-                                    browser=r"C:\x\chrome.exe")
+            popen.return_value.pid = 4321
+            label, pid = browser.open_ui("http://127.0.0.1:8741/",
+                                         browser=r"C:\x\chrome.exe")
         self.assertIn("--app", label)
+        self.assertEqual(pid, 4321, "要拿到 pid 才能找到窗口去标题栏")
         args = popen.call_args[0][0]
         self.assertTrue(any("--app=http://127.0.0.1:8741/" in a for a in args),
                         f"要用 --app 开无地址栏窗口，实际：{args}")
 
-    def test_firefox_falls_back_to_a_tab(self):
+    def test_firefox_falls_back_to_a_tab_without_pid(self):
         """Firefox 没有 --app，降级为普通窗口是可接受的（已写进文档）。"""
-        with mock.patch.object(browser.subprocess, "Popen") as popen, \
+        with mock.patch.object(browser.subprocess, "Popen"), \
              mock.patch.object(browser.os, "startfile", create=True) as startfile:
-            label = browser.open_ui("http://127.0.0.1:8741/",
-                                    browser=r"C:\x\firefox.exe")
+            label, pid = browser.open_ui("http://127.0.0.1:8741/",
+                                         browser=r"C:\x\firefox.exe")
         self.assertIn("标签页", label)
         startfile.assert_called_once()
+        self.assertIsNone(pid, "标签页不是我们起的窗口，不能去改它")
 
     def test_no_browser_reports_none(self):
         with mock.patch.object(browser, "find_default_browser", return_value=None):
-            self.assertEqual(browser.open_ui("http://x/"), "none")
+            self.assertEqual(browser.open_ui("http://x/"), ("none", None))
 
     def test_app_mode_failure_falls_back_to_tab(self):
         """--app 失败不能什么都不显示。"""
         with mock.patch.object(browser.subprocess, "Popen",
                                side_effect=OSError("nope")), \
              mock.patch.object(browser.os, "startfile", create=True) as startfile:
-            label = browser.open_ui("http://x/", browser=r"C:\x\chrome.exe")
+            label, pid = browser.open_ui("http://x/",
+                                         browser=r"C:\x\chrome.exe")
         self.assertIn("标签页", label)
         startfile.assert_called_once()
+        self.assertIsNone(pid)
 
 
 def _write_snowluma_config(root: Path, uin="1741473279", port=3001,

@@ -14,6 +14,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+def avatar_url(uin: str, size: int = 100) -> str:
+    """QQ's public avatar URL for ``uin``.
+
+    ``q1.qlogo.cn`` is the endpoint QQ's own clients use. Building it here means
+    the friend list can render names and placeholder circles instantly while the
+    images stream in, with no extra OneBot round trip per friend (29 friends
+    would otherwise be 29 blocking calls at startup).
+    """
+    return f"https://q1.qlogo.cn/g?b=qq&nk={uin}&s={int(size)}"
+
+
 @dataclass(frozen=True)
 class Friend:
     """One row in the friend list."""
@@ -21,6 +32,10 @@ class Friend:
     uin: str
     nickname: str = ""
     remark: str = ""
+    #: Avatar URL. QQ's CDN is stable and needs no round trip, so we build it
+    #: locally instead of asking the bridge -- the list renders immediately and
+    #: images stream in afterwards.
+    avatar: str = ""
 
     @property
     def display_name(self) -> str:
@@ -43,6 +58,10 @@ class Directory:
         self._friends: dict[str, Friend] = {}
         #: The account these friends belong to, filled by ``refresh``.
         self.owner: str = ""
+        #: Our own nickname and avatar, for the header. Empty until login_info
+        #: comes back; the UI shows the number meanwhile rather than a blank.
+        self.self_nickname: str = ""
+        self.self_avatar: str = ""
 
     def __len__(self) -> int:
         return len(self._friends)
@@ -94,10 +113,28 @@ class Directory:
                 uin=key,
                 nickname=str(row.get("nickname") or ""),
                 remark=str(row.get("remark") or ""),
+                avatar=avatar_url(key),
             )
         self._friends = found
         if owner:
             self.owner = str(owner)
+
+    # ---------------------------------------------------------------- 本机
+
+    def set_self(self, uin: str, nickname: str = "", avatar: str = "") -> None:
+        """Record our own profile, for the header row.
+
+        Kept separate from ``_friends``: we are not our own friend, and mixing
+        them in would put a row for ourselves in the contact list.
+        """
+        self.owner = str(uin or "")
+        self.self_nickname = str(nickname or "")
+        self.self_avatar = str(avatar or "") or avatar_url(self.owner)
+
+    @property
+    def self_name(self) -> str:
+        """Our own display name: real nickname, falling back to the number."""
+        return self.self_nickname.strip() or self.owner
 
     def clear(self) -> None:
         self._friends.clear()

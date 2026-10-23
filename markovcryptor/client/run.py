@@ -258,9 +258,16 @@ def _serve(endpoint, cfg, *, config_path: Path | None, root: Path,
 
     should_open = cfg.open_browser if open_browser is None else open_browser
     if should_open:
-        label = browser_mod.open_ui(url)
+        label, browser_pid = browser_mod.open_ui(url)
         _log(f"  浏览器：{label}")
         _log("  关闭窗口即退出；后端也会在前端消失后自行退出。")
+        if browser_pid:
+            # --app 模式仍带系统标题栏。几秒后窗口才存在，所以放后台线程，
+            # 不阻塞 uvicorn 起来 —— 用户在等的是这个窗口。
+            threading.Thread(
+                target=_adopt_window,
+                args=(browser_pid, app),
+                name="window-adopt", daemon=True).start()
 
     import uvicorn
 
@@ -285,6 +292,26 @@ def _serve(endpoint, cfg, *, config_path: Path | None, root: Path,
         watchdog.stop()
         shutdown()
     return 0
+
+
+def _adopt_window(pid: int, app) -> None:
+    """Strip the OS title bar once our Chromium window exists.
+
+    Best-effort: if it fails (non-Windows, changed flags, window closed early)
+    the app still works, it just keeps its caption.
+    """
+    from . import window as window_mod
+
+    try:
+        hwnd = window_mod.prepare(pid)
+    except Exception as exc:                        # noqa: BLE001 - cosmetic
+        event("window", "adopt_failed", level=logging.DEBUG, error=exc)
+        return
+    if hwnd:
+        app.state.window_handle = hwnd
+        _log("  已隐藏系统标题栏")
+    else:
+        event("window", "adopt_skipped", level=logging.DEBUG, pid=pid)
 
 
 def _make_shutdown(account, network, owned) -> "callable":

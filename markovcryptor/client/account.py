@@ -87,6 +87,9 @@ class Account:
             cover_for=self._cover_for,
         )
         self._ready = False
+        #: True/False when the bridge told us, None when it does not support
+        #: ``get_status``. The UI shows "未知" for None instead of guessing.
+        self.online: bool | None = None
         #: This account's own QQ number, once known.
         self.uin = str(getattr(network, "self_id", "") or "")
 
@@ -106,15 +109,34 @@ class Account:
         self._wait_until_connected(wait)
         info = self.network.login_info()
         self.uin = str(info.get("user_id") or self.uin)
+        # 本机昵称和头像：界面顶部要显示真实身份，而不是"本机"两个字。
+        self.directory.set_self(self.uin,
+                                nickname=str(info.get("nickname") or ""))
         self.directory.refresh(self.network.friend_list(), owner=self.uin)
         self.conversations.attach()
         self.conversations.attach_images(self.images)
         # 告诉会话层本机账号，否则未渲染的消息会把自己的语音说成"对方发的"。
         self.conversations.attach_self(self.uin)
         self._load_models()
+        self._refresh_online()
         self._ready = True
         event("client", "account_ready", uin=self.uin, friends=len(self.directory))
         return self
+
+    def _refresh_online(self) -> None:
+        """Ask whether we are online. Failure means "unknown", not "offline".
+
+        ``get_status`` is not implemented by every bridge, and a missing answer
+        must not make the UI claim we are offline -- that would be a lie the
+        user cannot act on.
+        """
+        try:
+            status = self.network.online_status()
+        except Exception as exc:                    # noqa: BLE001 - optional
+            event("client", "status_unavailable", level=logging.DEBUG, error=exc)
+            self.online = None
+            return
+        self.online = bool(status.get("online", True))
 
     def _wait_until_connected(self, wait: float) -> None:
         """Block until OneBot answers, or give up after ``wait`` seconds.

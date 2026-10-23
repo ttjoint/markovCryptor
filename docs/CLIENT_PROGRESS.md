@@ -1297,3 +1297,60 @@ seq 回退，前端 `seq <= lastSeq` 全跳过。
 测试期间向真实 QQ 账号发过"测试发送""API 直测"之类的内容，对方真的会看到。
 以后**不再向真实账号发任何测试消息**：验证走单元测试 + `InProcessOneBot`
 假信道 + Playwright 只读检查。
+
+---
+
+## 头像放大 + 无系统标题栏（2026-10-23）
+
+### 头像尺寸
+
+换成真实头像后反而比原来的首字母圆小了一号：`.avatar` 34px、行内的
+`.avatar.small` 只有 26px。放大一档：40px / 34px，字号跟着提。
+另外查出一处**重复的 `.avatar` 规则**（旧的 accent 底色样式还留在文件后面，
+把新尺寸覆盖了），已合并；自己的头像保留 accent 底以示区分。
+
+### 去掉 Windows 自带窗体头
+
+用户要求：`--app` 模式仍带系统标题栏，顶部第一行应该是我们自己的身份栏，
+窗口控制（最小化/退出）放在它右侧。
+
+两步：
+
+**1. 独立 profile（`browser.py`）**
+
+关键发现：不带 `--user-data-dir` 时，启动的 chrome 进程只是个**启动器**——
+它把 URL 转交给用户已在跑的 Chrome 然后退出。窗口真正属于用户那个长期
+运行的浏览器进程，根本没法和用户自己的标签页区分。
+
+加上私有 profile（`%APPDATA%\markovcryptor\browser-profile`）后，进程真的
+拥有自己的窗口，`Popen.pid` 就是窗口的属主。这一步不做，后面全免谈。
+
+**2. Windows API 去边框（新 `client/window.py`）**
+
+网页没有任何 API 能改自己的 OS 窗口。所以用 ctypes：
+`EnumWindows` 按 pid 找到可见顶层窗口（带超时轮询，Chromium 起窗要几秒），
+`GetWindowLongW(GWL_STYLE)` 清掉 `WS_CAPTION | WS_THICKFRAME | _WS_SYSMENU |
+WS_MIN/MAXIMIZEBOX`（这些按钮我们自己画，留系统的会出现两套），再
+`SetWindowPos(SWP_FRAMECHANGED)` 让样式生效。
+
+放在后台线程跑（`_adopt_window`），不阻塞 uvicorn —— 用户在等窗口。
+显式 `restype`/`argtypes`：默认 `c_long` 在 64 位截断指针，folder picker
+已经踩过一次。
+
+安全规则：
+- 只碰**我们自己起的**进程的窗口（pid 来自那次 Popen）
+- 全程 best-effort，失败就保留标题栏，功能不受影响
+
+**3. 最小化端点**
+
+网页也无法最小化 OS 窗口。`POST /client/window/minimize` 用
+`ShowWindow(hwnd, SW_MINIMIZE)`。只在接管到原生窗口时显示按钮
+（`data.native_window`），Firefox 标签页模式不显示 —— 那里既没有自己的
+窗体头，最小化也没意义。
+
+### 实测
+
+- 启动日志出现「已隐藏系统标题栏」
+- 截图确认顶部无 Windows 蓝条，第一行就是身份栏 + 三个自绘按钮
+- 自己头像 40px、好友行 34px、行高 46px、最小化按钮可见
+- 针对性回归 **121 passed**（app/run/launcher/directory）

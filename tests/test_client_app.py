@@ -79,8 +79,19 @@ class StateTest(_Base):
         self.assertTrue(body["ok"])
         self.assertEqual(body["uin"], ALICE)
         self.assertTrue(body["ready"])
-        self.assertEqual(body["friends"], [{"uin": BOB, "name": "小鲍"}],
-                         "备注优先于昵称")
+        # 好友行现在带昵称和头像 URL；name 仍是"备注优先于昵称"。
+        self.assertEqual(len(body["friends"]), 1)
+        friend = body["friends"][0]
+        self.assertEqual(friend["uin"], BOB)
+        self.assertEqual(friend["name"], "小鲍", "备注优先于昵称")
+        self.assertEqual(friend["nickname"], "鲍勃")
+        self.assertIn("qlogo.cn", friend["avatar"], "要能显示头像")
+
+        # 本机身份：真实昵称 + 头像 + 在线状态
+        self.assertEqual(body["self"]["uin"], ALICE)
+        self.assertTrue(body["self"]["name"])
+        self.assertIn("qlogo.cn", body["self"]["avatar"])
+        self.assertIsNotNone(body["self"]["online"])
 
     def test_state_reports_queue_limits(self):
         body = self.get("/client/state").json()

@@ -150,6 +150,22 @@ def create_client_app(account: Account, *, webui_dir=None,
                                  headers={"Cache-Control": "no-cache",
                                           "X-Accel-Buffering": "no"})
 
+    @app.post("/client/window/minimize")
+    def window_minimize() -> JSONResponse:
+        """最小化窗口。
+
+        网页没有任何办法最小化自己的 OS 窗口 —— 这是浏览器和原生应用的
+        边界。所以由后端找到我们自己起的那个 Chromium 窗口，调 Windows API。
+        """
+        from . import window as window_mod
+
+        hwnd = getattr(app.state, "window_handle", None)
+        if not hwnd:
+            # 还没接管到窗口（非 Chromium、或窗口刚起来）。不是错误：
+            # 用户最多是点了没反应，不该弹报错。
+            return JSONResponse({"ok": False, "reason": "no_window"})
+        return JSONResponse({"ok": window_mod.minimize(hwnd)})
+
     @app.post("/client/quit")
     async def quit_client() -> JSONResponse:
         """用户点了退出。
@@ -187,10 +203,21 @@ def create_client_app(account: Account, *, webui_dir=None,
                        else {"total": 0, "loaded": 0, "folder": "",
                              "names": [], "loading": False}),
             "text_channel": account.text_channel_usable,
+            # 只有接管到原生窗口时最小化才有意义（Firefox 标签页跑不了）。
+            "native_window": bool(getattr(app.state, "window_handle", None)),
             # 队列装得下握手吗？界面靠它在未握手时决定能否点"发起握手"。
             "handshake_capacity": account.covert_capacity(need_handshake=True),
+            # 本机身份：界面顶部要显示真实昵称和头像，而不是"本机"两个字。
+            "self": {
+                "uin": account.uin,
+                "name": account.directory.self_name,
+                "nickname": account.directory.self_nickname,
+                "avatar": account.directory.self_avatar,
+                "online": account.online,
+            },
             "friends": [
-                {"uin": friend.uin, "name": friend.display_name}
+                {"uin": friend.uin, "name": friend.display_name,
+                 "nickname": friend.nickname, "avatar": friend.avatar}
                 for friend in account.directory.ordered()
             ],
             "conversations": [

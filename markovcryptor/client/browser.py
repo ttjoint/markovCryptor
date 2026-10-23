@@ -23,6 +23,13 @@ from ..observability import event
 
 #: Chromium-family flags. ``--app`` needs a *separate* profile directory or the
 #: window joins the user's existing session and inherits its window size/state.
+#:
+#: This is not cosmetic. Without ``--user-data-dir`` the launched process is a
+#: *launcher* that hands the URL to whatever Chrome is already running and then
+#: exits -- so the window's owning pid is the user's long-running browser, and
+#: there is no way to tell our window from their tabs. With a private profile
+#: the process really owns its window, which is what lets us find it and strip
+#: the title bar.
 _APP_FLAGS = ("--app={url}", "--window-size=1280,860")
 
 
@@ -113,23 +120,50 @@ def find_default_browser() -> str | None:
     return None
 
 
-def open_ui(url: str, *, browser: str | None = None) -> str:
-    """Open ``url`` in app mode when possible. Returns what was used.
+def _profile_dir() -> str:
+    """A private Chromium profile for this app.
 
-    The return value is a short label ("chrome --app", "firefox") rather than a
-    path, because the caller logs it and the user does not need a path.
+    Lives next to the rest of our state so it survives between runs (a fresh
+    profile every launch would lose window size) but is ours alone -- the user's
+    own browser session is never touched.
+    """
+    base = os.environ.get("APPDATA") or str(Path.home())
+    path = Path(base) / "markovcryptor" / "browser-profile"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:                          # noqa: BLE001
+        event("browser", "profile_dir_failed", level=logging.WARNING,
+              path=str(path), error=exc)
+    return str(path)
+
+
+def open_ui(url: str, *, browser: str | None = None) -> tuple[str, int | None]:
+    """Open ``url`` in app mode when possible.
+
+    Returns ``(label, pid)``. The label is a short string ("chrome --app") for
+    logging; the pid is the browser process we spawned, or ``None`` when we did
+    not spawn one (a tab handed to the shell).
+
+    The pid matters because the window has no frame of its own accord -- we strip
+    the OS title bar afterwards and need to know *which* window is ours. Only an
+    app-mode window we launched ourselves can be safely touched; a normal tab in
+    the user's existing browser must never be restyled.
     """
     exe = browser or find_default_browser()
     if not exe:
         event("browser", "none_found", level=logging.WARNING, url=url)
-        return "none"
+        return "none", None
 
     if _is_chromium(exe):
+        profile = _profile_dir()
         args = [exe] + [flag.format(url=url) for flag in _APP_FLAGS]
+        args += [f"--user-data-dir={profile}", "--no-first-run",
+                 "--no-default-browser-check"]
         try:
-            subprocess.Popen(args, close_fds=True)
-            event("browser", "opened", mode="app", exe=exe, url=url)
-            return f"{Path(exe).stem} --app"
+            proc = subprocess.Popen(args, close_fds=True)
+            event("browser", "opened", mode="app", exe=exe, url=url,
+                  pid=proc.pid)
+            return f"{Path(exe).stem} --app", proc.pid
         except OSError as exc:
             event("browser", "app_mode_failed", level=logging.WARNING,
                   exe=exe, error=exc)
@@ -143,7 +177,7 @@ def open_ui(url: str, *, browser: str | None = None) -> str:
         else:
             subprocess.Popen(["xdg-open", url], close_fds=True)
         event("browser", "opened", mode="tab", exe=exe, url=url)
-        return f"{Path(exe).stem} (标签页)"
+        return f"{Path(exe).stem} (标签页)", None
     except OSError as exc:
         event("browser", "open_failed", level=logging.ERROR, url=url, error=exc)
-        return "failed"
+        return "failed", None
