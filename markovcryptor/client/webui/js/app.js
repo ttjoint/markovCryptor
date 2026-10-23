@@ -15,6 +15,7 @@ import * as Covert from "./views/covert.js";
 import * as Settings from "./panels/settings.js";
 import * as SendQueue from "./views/sendqueue.js";
 import * as StatusBar from "./views/statusbar.js";
+import * as Capacity from "./views/capacity.js";
 
 // ---------------------------------------------------------------- 状态刷新
 
@@ -164,8 +165,15 @@ export async function sendCovert() {
     toast("密文内容不能为空");
     return;
   }
+  // 装不下就别提交：编码要 0.6-3.3 秒，白等一次再报错是浪费用户时间。
+  const estimate = Capacity.latestEstimate();
+  if (estimate && !estimate.ok) {
+    toast(estimate.reason || "当前内容装不下，请看输入框下方的提示");
+    return;
+  }
   const peer = S.current;
   Composer.clearInput("covertInput");
+  Capacity.clear();
 
   await SendQueue.submit(
     { peer, mode: "covert", text, channel: COVERT.channel },
@@ -252,6 +260,25 @@ $("covertInput").addEventListener("keydown", (e) => {
     e.preventDefault();
     sendCovert();
   }
+});
+
+// 边输入边算容量。300ms 防抖，数字来自后端逐张真实计算。
+$("covertInput").addEventListener("input", () => Capacity.schedule());
+
+// 装不下时禁用发送 —— 让用户当场知道，而不是点了之后白等一次编码。
+// 只在「确实算过、且确实装不下」时禁用；估算失败不禁用（真正的校验在
+// 后端 /client/send 还会做一遍，这里只是提前告知）。
+Capacity.setBlocker((blocked) => {
+  const btn = $("btnSendCovert");
+  if (!btn) return;
+  // 下面两种情况下按钮的 disabled 不归容量条管：
+  //   locked/waiting —— 未握手，covert.updateCovertControls() 统一禁用
+  //   发送中         —— 按钮已经变成"取消"，点了要能取消
+  // 抢着改会让状态互相覆盖（实测：未握手时容量条把按钮解锁了）。
+  if (COVERT.state === "locked" || COVERT.state === "waiting") return;
+  if (btn.classList.contains("cancel")) return;
+  btn.disabled = blocked;
+  btn.title = blocked ? "当前内容装不下，请看下方提示" : "隐藏并发送（Enter）";
 });
 
 

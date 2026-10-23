@@ -126,6 +126,15 @@
                 placeholder="要隐藏的内容，Enter 发送，Shift+Enter 换行"></textarea>
               <button class="send" id="btnSendCovert" title="隐藏并发送（Enter）">密文发送</button>
             </div>
+
+            <!-- 容量条：常驻，边输入边算。
+                 用户不需要点发送才知道"装不下" —— 那条消息会直接失败，
+                 白等一次编码。数字来自后端逐张真实容量，不是平均值。 -->
+            <div class="capacity" id="capacityBar">
+              <span class="cap-main" id="capMain">—</span>
+              <span class="cap-detail sub" id="capDetail"></span>
+              <span class="cap-warn" id="capWarn" hidden></span>
+            </div>
           </div>
 
           <!-- 遮挡层：未握手 / 图片不足时盖住聊天和输入区。 -->
@@ -298,6 +307,7 @@ import * as Overlays from "./js/views/overlays.js";
 import * as Composer from "./js/views/composer.js";
 import * as Covert from "./js/views/covert.js";
 import * as Settings from "./js/panels/settings.js";
+import * as Capacity from "./js/views/capacity.js";
 import { refreshState, applyState, initSplitter } from "./js/app.js";
 
 // 装配：视图之间不互相 import（会形成循环引用，ES module 的循环引用
@@ -308,7 +318,11 @@ Chat.setHooks({
   setState: (state, extra) => Covert.setCovertState(state, extra),
   refreshState: () => refreshState(),
 });
-Covert.setCovertHooks({ refreshState: () => refreshState() });
+Covert.setCovertHooks({
+  refreshState: () => refreshState(),
+  // 切信道要重算容量：图片看"占几张"、文本看"占多少字符"，数字完全不同。
+  onChannelChanged: () => Capacity.refresh(),
+});
 Overlays.install();
 Composer.setRefresh(() => refreshState());
 Settings.installSettings();

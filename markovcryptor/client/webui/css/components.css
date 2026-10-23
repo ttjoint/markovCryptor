@@ -188,3 +188,34 @@
     display: grid; place-items: center;
     pointer-events: none;                 /* 别挡住 drop 事件 */
   }
+
+  /* ---------- 容量条 ----------
+     常驻在输入框下方：用户边打字边看到"将会发送 3/9 张"。
+     以前要点了发送才知道装不下，而那时已经白等一次编码。 */
+  .capacity {
+    display: flex; align-items: baseline; gap: 10px;
+    padding: 4px 12px 2px;
+    font-size: 11px; color: var(--dim);
+    min-height: 20px;                 /* 占位，避免出现时把输入框顶上去 */
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+  }
+
+  .cap-main { color: var(--text); }
+  .cap-main.over { color: var(--err); font-weight: 600; }
+  .cap-main.ready { color: var(--accent); }
+  .cap-detail { flex: 1 1 auto; min-width: 0; overflow: hidden;
+                text-overflow: ellipsis; white-space: nowrap; }
+  .cap-warn { color: var(--warn); }
+
+  /* 逐张明细：展开时的列表 */
+  .cap-items {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 0 12px 4px; font-size: 10px; color: var(--dim);
+  }
+  .cap-item {
+    padding: 1px 6px; border-radius: 8px;
+    background: var(--panel2); white-space: nowrap;
+  }
+  .cap-item.repeat { border: 1px dashed var(--line); }
+  .cap-item.skipped { opacity: .5; text-decoration: line-through; }

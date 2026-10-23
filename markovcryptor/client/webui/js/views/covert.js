@@ -16,6 +16,9 @@ import { S, COVERT } from "../core/store.js";
 // app.js 已经 import 了 covert，那会形成循环引用。
 let hooks = {
   refreshState: async () => {},
+  // 信道切换后要重算容量：图片信道看"占几张"，文本信道看"占多少字符"，
+  // 两个数字完全不同，切过去还显示旧数字就是骗人。
+  onChannelChanged: () => {},
 };
 
 export function setCovertHooks(next) {
@@ -103,6 +106,7 @@ export function setChannel(channel, opts) {
                        && COVERT.state !== "locked"
                        && COVERT.state !== "waiting");
   renderChannelExtras(opts || {});
+  hooks.onChannelChanged(channel);
 }
 
 export function renderChannelExtras(opts) {
