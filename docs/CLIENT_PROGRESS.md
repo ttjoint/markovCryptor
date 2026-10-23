@@ -1713,3 +1713,71 @@ await import('./js/views/composer.js')   // 在页面上下文里逐个试，
 新增 `test_templates_exist`（注入改名验证过能 FAIL）。
 
 15 passed, 26 subtests。
+
+## 重构阶段 D：后端拆分（2026-10-23）
+
+### D-1 services/（无状态逻辑）
+
+| 文件 | 行数 | 内容 |
+| --- | --- | --- |
+| `services/picker.py` | 158 | Win32 文件/文件夹选择器 |
+| `services/history.py` | 86 | 历史合并 + 图片后台下载 |
+| `services/media.py` | 83 | data URL、缩略图、头像地址 |
+
+### D-2 api/（HTTP 层）
+
+`app.py` 里那个 **665 行的 `create_client_app()`** 拆成 5 个 `APIRouter`：
+
+| 文件 | 端点 | 内容 |
+| --- | --- | --- |
+| `api/session.py` | 4 | ping / SSE / 最小化 / 退出 |
+| `api/messages.py` | 6 | state / 会话详情 / 发送 / 历史 |
+| `api/media.py` | 3 | 待发队列 |
+| `api/models.py` | 8 | 模型增删改查训练导入导出 |
+| `api/settings.py` | 4 | 设置读写 + 文件选择 |
+
+`app.py` 从 **1073 行降到 69 行**，只剩 `create_client_app()` 建 app、
+`include_router()` 五次、mount 静态目录。
+
+**关键改造：闭包 → `app.state` + `Depends`**
+
+端点原来闭包捕获 `account` / `watchdog` / `on_quit`，这是"一个函数装下
+整个应用"的根源。改成：
+
+```python
+def get_account(request: Request) -> Account:
+    return request.app.state.account
+
+@router.get("/client/state")
+def state(request: Request, account: Account = Depends(get_account)):
+```
+
+注意参数顺序：**有默认值的 `Depends` 参数必须排在 `request` 之后**，否则是
+`SyntaxError: parameter without a default follows parameter with a default`。
+
+### 迁移踩的坑
+
+1. **相对 import 层级全部要加一层**：文件从 `client/app.py` 搬到
+   `client/services/` 或 `client/api/` 后，`from .conversations` 变成
+   `from ..conversations`，`from ..model` 变成 `from ...model`。
+   最隐蔽的是 `api/models.py` 里 `from .models import ModelLibrary` ——
+   搬完后它指向**自己**而不是 `client/models.py`。
+2. **`_http_error` / `_entry_payload` / `_data_url` 是三组共用辅助**，
+   跟着端点走会重复定义。抽到 `api/common.py`。
+3. **正则给端点签名注入 `Depends` 时误伤了嵌套函数** ——
+   `quit_client` 里的 `def run_quit(account=...)` 也被加了依赖，
+   那不是端点，FastAPI 根本不会处理它。
+
+### 测试辅助
+
+新增 `tests/webui_files.py`：`ui_text()` / `ui_scripts()` / `ui_stylesheets()`。
+
+原因：一批测试在断言"某条 CSS 规则存在""JS 语法正确"，它们原本直接读
+`index.html`。拆成多文件后全部失效。这些测试**不该关心文本在哪个文件里**，
+只该关心"它被发出去了"。`ui_scripts()` 保留文件边界，因为语法检查必须
+逐文件做 —— 拼起来会掩盖单文件错误。
+
+### 全量回归
+
+**698 passed, 70 subtests**（默认跳过 2 个 slow）。端到端确认：标题、
+计数、29 个好友带头像、输入栏 46px、设置面板可开关、页面无滚动、零失败请求。

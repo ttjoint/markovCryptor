@@ -292,7 +292,8 @@ class PackageDataTest(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         ui = root / "markovcryptor" / "client" / "webui" / "index.html"
         self.assertTrue(ui.exists(), "客户端界面文件不见了")
-        body = ui.read_text(encoding="utf-8")
+        from webui_files import ui_text
+        body = ui_text()
         self.assertIn("display: none !important", body,
                       "hidden 必须配 !important，否则自带 display 会压掉它")
 
@@ -306,14 +307,21 @@ class WebuiSyntaxTest(unittest.TestCase):
     一次 JS 来防。
     """
 
+    def _scripts(self) -> dict[str, str]:
+        """界面里所有 JS（含 index.html 里的 module 块）。
+
+        界面拆成多个模块后，"语法正确"必须**逐文件**检查 —— 拼起来检查
+        会掩盖单个文件的错误（一个文件多了个括号，拼进大文件里也许还能
+        解析，但浏览器里它是独立的）。
+        """
+        from webui_files import ui_scripts
+        scripts = ui_scripts()
+        self.assertTrue(scripts, "界面里找不到任何 JS")
+        return scripts
+
     def _script(self) -> str:
-        import re
-        root = Path(__file__).resolve().parent.parent
-        html = (root / "markovcryptor" / "client" / "webui" / "index.html")
-        body = html.read_text(encoding="utf-8")
-        match = re.search(r"<script>(.*?)</script>", body, re.S)
-        self.assertIsNotNone(match, "找不到 <script> 块")
-        return match.group(1)
+        """所有 JS 拼成一份，供"内容包含"类断言使用。"""
+        return "\n".join(self._scripts().values())
 
     def test_no_raw_newline_inside_string_literal(self):
         """字符串字面量里不能出现未转义的换行。"""
@@ -339,15 +347,16 @@ class WebuiSyntaxTest(unittest.TestCase):
         node = shutil.which("node")
         if not node:
             self.skipTest("没有 node，跳过 JS 语法检查")
-        script = self._script()
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "ui.js"
-            path.write_text(script, encoding="utf-8")
-            result = subprocess.run([node, "--check", str(path)],
-                                    capture_output=True, text=True,
-                                    encoding="utf-8", errors="replace")
-        self.assertEqual(result.returncode, 0,
-                         f"JS 语法错误：{result.stderr[-600:]}")
+            for name, script in self._scripts().items():
+                path = Path(tmp) / "ui.js"
+                path.write_text(script, encoding="utf-8")
+                result = subprocess.run([node, "--check", str(path)],
+                                        capture_output=True, text=True,
+                                        encoding="utf-8", errors="replace")
+                with self.subTest(file=name):
+                    self.assertEqual(result.returncode, 0,
+                                     f"{name} 语法错误：{result.stderr[-600:]}")
 
 
 class BundleDependencyTest(unittest.TestCase):
@@ -535,9 +544,12 @@ class SplitterRecoveryTest(unittest.TestCase):
     """
 
     def _html(self) -> str:
-        path = (Path(__file__).resolve().parent.parent
-                / "markovcryptor" / "client" / "webui" / "index.html")
-        return path.read_text(encoding="utf-8")
+        """整个界面（HTML + CSS + JS）。
+
+        样式和脚本已经拆到 css/ 与 js/ 下，只读 index.html 会什么都找不到。
+        """
+        from webui_files import ui_text
+        return ui_text()
 
     def test_splitter_is_never_hidden(self):
         html = self._html()
@@ -572,9 +584,12 @@ class ScrollbarStyleTest(unittest.TestCase):
     """默认滚动条在深色界面里是一块浅灰方条，还占 17px 让布局跳动。"""
 
     def _html(self) -> str:
-        path = (Path(__file__).resolve().parent.parent
-                / "markovcryptor" / "client" / "webui" / "index.html")
-        return path.read_text(encoding="utf-8")
+        """整个界面（HTML + CSS + JS）。
+
+        样式和脚本已经拆到 css/ 与 js/ 下，只读 index.html 会什么都找不到。
+        """
+        from webui_files import ui_text
+        return ui_text()
 
     def test_webkit_scrollbar_is_styled(self):
         html = self._html()
@@ -605,9 +620,12 @@ class TextareaAutosizeTest(unittest.TestCase):
     """
 
     def _html(self) -> str:
-        path = (Path(__file__).resolve().parent.parent
-                / "markovcryptor" / "client" / "webui" / "index.html")
-        return path.read_text(encoding="utf-8")
+        """整个界面（HTML + CSS + JS）。
+
+        样式和脚本已经拆到 css/ 与 js/ 下，只读 index.html 会什么都找不到。
+        """
+        from webui_files import ui_text
+        return ui_text()
 
     def test_no_fixed_height(self):
         html = self._html()

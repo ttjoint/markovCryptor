@@ -133,7 +133,7 @@ class SettingsTest(_Base):
 
 class PickFolderTest(_Base):
     def test_cancelled_picker_reports_cancelled(self):
-        with mock.patch("markovcryptor.client.app._pick_folder",
+        with mock.patch("markovcryptor.client.services.picker.pick_folder",
                         return_value=None):
             body = self.post("/client/settings/pick-folder",
                              json={"title": "x"}).json()
@@ -141,7 +141,7 @@ class PickFolderTest(_Base):
         self.assertTrue(body["cancelled"])
 
     def test_chosen_path_is_returned(self):
-        with mock.patch("markovcryptor.client.app._pick_folder",
+        with mock.patch("markovcryptor.client.services.picker.pick_folder",
                         return_value=r"D:\Pics"):
             body = self.post("/client/settings/pick-folder", json={}).json()
         self.assertTrue(body["ok"])
@@ -150,7 +150,7 @@ class PickFolderTest(_Base):
     def test_missing_tkinter_does_not_break_settings(self):
         """没有图形环境时选择框要优雅降级，不能把设置页整个弄坏。"""
         with mock.patch.dict("sys.modules", {"tkinter": None}):
-            from markovcryptor.client.app import _pick_folder
+            from markovcryptor.client.services.picker import pick_folder as _pick_folder
             self.assertIsNone(_pick_folder("x"))
 
 
@@ -310,13 +310,13 @@ class FolderPickerTest(unittest.TestCase):
         import threading
         import time
 
-        from markovcryptor.client import app as app_mod
+        from markovcryptor.client.services import picker as picker_mod
 
         done = {}
         started = time.monotonic()
 
         def worker():
-            done["value"] = app_mod._pick_folder("测试")
+            done["value"] = picker_mod.pick_folder("测试")
             done["elapsed"] = time.monotonic() - started
 
         thread = threading.Thread(target=worker, daemon=True)
@@ -332,10 +332,10 @@ class FolderPickerTest(unittest.TestCase):
         """tkinter 的对话框依赖主线程，不能用在服务端工作线程里。"""
         import inspect
 
-        from markovcryptor.client import app as app_mod
+        from markovcryptor.client.services import picker as picker_mod
 
-        source = inspect.getsource(app_mod._pick_folder)
-        helper = inspect.getsource(app_mod._pick_folder_win32)
+        source = inspect.getsource(picker_mod.pick_folder)
+        helper = inspect.getsource(picker_mod.pick_folder_win32)
         # 只看代码，不看注释/文档字符串 —— 文档里正好在解释"为什么不用 tkinter"。
         code = chr(10).join(
             line for line in (source + helper).splitlines()
@@ -352,11 +352,11 @@ class FolderPickerTest(unittest.TestCase):
         """拿不到对话框要返回 None，让界面退回手填路径。"""
         from unittest import mock
 
-        from markovcryptor.client import app as app_mod
+        from markovcryptor.client.services import picker as picker_mod
 
-        with mock.patch.object(app_mod, "_pick_folder_win32",
+        with mock.patch.object(picker_mod, "pick_folder_win32",
                                side_effect=OSError("no shell")):
-            self.assertIsNone(app_mod._pick_folder("x"))
+            self.assertIsNone(picker_mod.pick_folder("x"))
 
 
 class ModelUploadTest(_Base):
