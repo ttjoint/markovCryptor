@@ -183,12 +183,18 @@ def strip_frame(hwnd: int) -> bool:
                    | _SWP_NOACTIVATE | _SWP_FRAMECHANGED)
     event("window", "frame_stripped", hwnd=hwnd)
 
-    # 去掉标题栏后，Windows 仍然会在窗口矩形的四周留一圈非客户区，
-    # 实测窗口停在 (+12,+12)、比客户区大 14x7 —— 用户看到的就是
-    # "外面还有一层窗体"。改窗口尺寸消不掉这圈（它是 Chromium 自己算的）。
+    # 去掉 Windows 那层标题栏（DWM 画的圆角/阴影/系统按钮）就够了。
     #
-    # 可靠的做法是**最大化**：最大化后窗口矩形会超出屏幕 7px（那部分是不可见
-    # 的阴影，本来就不该看见），客户区正好铺满屏幕，视觉上就是纯净的无边框。
+    # --app 模式**还有**一条 Chromium 画在客户区内部的标题条（Chrome 图标 +
+    # 窗口按钮，约 28px）。它不是窗口样式，GetWindowLong/SetWindowPos 都碰不到，
+    # 也没有启动参数能关掉：
+    #   --kiosk                               能去掉，但独占全屏、吃 Esc，
+    #                                         且已有 Chrome 实例时直接不开窗
+    #   --disable-features=WebAppWindowControlsOverlay   无效
+    #
+    # 曾用"窗口上移 28px 让那条落在屏幕外"绕过，结果挡到了用户的菜单栏，
+    # 桌面其他程序看不全 —— 这个代价不能接受，已放弃。
+    # 保留这条 Chromium 标题条是当前技术路线（系统浏览器 + --app）的固有代价。
     u.ShowWindow(hwnd, _SW_MAXIMIZE)
     event("window", "maximized", hwnd=hwnd)
     return True
