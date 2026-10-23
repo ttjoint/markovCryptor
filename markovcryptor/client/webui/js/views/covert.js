@@ -12,6 +12,16 @@ import { $, toast } from "../core/dom.js";
 import { api } from "../core/api.js";
 import { S, COVERT } from "../core/store.js";
 
+// 拉全局状态的入口由 app.js 注入。covert 不能直接 import app.js：
+// app.js 已经 import 了 covert，那会形成循环引用。
+let hooks = {
+  refreshState: async () => {},
+};
+
+export function setCovertHooks(next) {
+  hooks = Object.assign(hooks, next);
+}
+
 // 密文区只有三种状态，遮挡层的内容由状态决定：
 //   locked   —— 未握手：只有一个「发起握手」大按钮
 //   waiting  —— 已发起：显示"已发起第 n 次握手，等待回应"，仍可再点
@@ -172,7 +182,7 @@ export async function doHandshake() {
     } else {
       setCovertState("waiting");
     }
-    await refreshState();
+    await hooks.refreshState();
   } catch (e) {
     toast("发起握手失败：" + e.message);
   }

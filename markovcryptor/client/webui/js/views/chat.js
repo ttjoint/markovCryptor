@@ -16,6 +16,10 @@ import { fmtTime, avatarFor, setAvatar } from "../core/format.js";
 let hooks = {
   onOpen: () => {},        // 打开会话前重置密文区
   afterState: () => {},    // 状态刷新后更新密文区
+  // 拉一次全局状态。由 app.js 注入 —— chat 不能直接 import app.js，
+  // 那会形成循环引用（app.js 已经 import 了 chat），而 ES module 的
+  // 循环引用不报错，只在运行时拿到 undefined。
+  refreshState: async () => {},
 };
 
 export function setHooks(next) {
@@ -198,7 +202,7 @@ export async function openConversation(peer) {
     // 首次打开拉一次 QQ 历史；服务端只合并一次，重复点不会重复灌。
     const data = await api(`/client/conversation/${peer}?history=20`);
     renderConversation(data);
-    await refreshState();
+    await hooks.refreshState();
   } catch (e) {
     toast(e.message);
   }

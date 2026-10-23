@@ -290,7 +290,9 @@ List.setOpener(Chat.openConversation);
 Chat.setHooks({
   onOpen: () => { COVERT.attempts = 0; Covert.setCovertState("locked"); },
   setState: (state, extra) => Covert.setCovertState(state, extra),
+  refreshState: () => refreshState(),
 });
+Covert.setCovertHooks({ refreshState: () => refreshState() });
 Overlays.install();
 Composer.setRefresh(() => refreshState());
 Settings.installSettings();

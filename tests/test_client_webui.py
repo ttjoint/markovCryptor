@@ -300,5 +300,143 @@ class ScriptTest(unittest.TestCase):
         self.assertEqual(dupes, {}, f"重复定义的顶层符号: {dupes}")
 
 
+class UndefinedSymbolTest(unittest.TestCase):
+    """每个模块里用到的顶层函数名，必须是它自己定义的或 import 来的。
+
+    实际 bug：视图层改造后 chat.js 和 covert.js 里调了 ``refreshState()``，
+    但没 import —— 点开好友才报 ``refreshState is not defined``。
+    平时不报，因为那条路径只有"点具体好友"才走到。
+
+    ES module 的作用域是隔离的，这类错误**不会**在页面加载时暴露，
+    必须靠静态检查。
+    """
+
+    #: JS 内建 + 浏览器全局。不用穷举 —— 漏了最多误报一次，不会漏报。
+    GLOBALS = {
+        "window", "document", "console", "navigator", "location", "localStorage",
+        "sessionStorage", "setTimeout", "clearTimeout", "setInterval",
+        "clearInterval", "requestAnimationFrame", "cancelAnimationFrame",
+        "fetch", "JSON", "Math", "Date", "Object", "Array", "String", "Number",
+        "Boolean", "Promise", "Error", "TypeError", "Map", "Set", "WeakMap",
+        "Symbol", "RegExp", "URL", "URLSearchParams", "Image", "File",
+        "FileReader", "Blob", "FormData", "AbortController", "Intl",
+        "encodeURIComponent", "decodeURIComponent", "parseInt", "parseFloat",
+        "isNaN", "isFinite", "structuredClone", "crypto", "performance",
+        "history", "screen", "Event", "CustomEvent", "MutationObserver",
+        "ResizeObserver", "TextEncoder", "TextDecoder", "undefined",
+        "globalThis", "Node", "Element", "HTMLElement", "queueMicrotask",
+        "confirm", "alert", "prompt", "Function", "Proxy", "Reflect",
+    }
+
+    #: 关键字后面跟括号的写法，不是函数调用。
+    KEYWORDS = {
+        "if", "for", "while", "switch", "catch", "return", "typeof", "function",
+        "await", "new", "delete", "void", "in", "of", "do", "else", "try",
+        "finally", "throw", "case", "yield", "async", "with",
+        "import",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        from webui_files import ui_scripts
+        cls.sources = ui_scripts()
+
+    def _declared(self, text: str) -> set[str]:
+        """本文件声明的顶层名字。"""
+        names: set[str] = set()
+        names |= set(re.findall(r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)",
+                                text, re.M))
+        names |= set(re.findall(r"^(?:export\s+)?(?:const|let|var)\s+(\w+)",
+                                text, re.M))
+        names |= set(re.findall(r"^(?:export\s+)?class\s+(\w+)", text, re.M))
+        return names
+
+    def _imported(self, text: str) -> set[str]:
+        """import 进来的名字（含 `* as ns` 与解构）。"""
+        names: set[str] = set()
+        for clause in re.findall(r"^import\s+(.+?)\s+from\s+", text, re.M):
+            clause = clause.strip()
+            ns = re.match(r"\*\s+as\s+(\w+)", clause)
+            if ns:
+                names.add(ns.group(1))
+                continue
+            braces = re.search(r"\{([^}]*)\}", clause)
+            if braces:
+                for part in braces.group(1).split(","):
+                    part = part.strip()
+                    if part:
+                        names.add(part.split(" as ")[-1].strip())
+                continue
+            default = re.match(r"(\w+)", clause)
+            if default:
+                names.add(default.group(1))
+        return names
+
+    def _strip_noncode(self, text: str) -> str:
+        """去掉注释与字符串字面量，避免把文字内容当代码。
+
+        **顺序很重要**：先处理正则字面量，再处理 ``//`` 注释。
+        否则 ``/\.json$/i.test(...)`` 里的斜杠会被当成注释开头，
+        把整行前面的 ``const isModelFile = ...`` 一起吞掉，
+        于是报一个假阳性。
+        """
+        # 1) 正则字面量 /.../flags。前面不是标识符/右括号时才算是正则，
+        #    这样除法 a / b 不会被误伤。
+        text = re.sub(r"(?<![\w)$\]])\/(?:[^\/\\\n]|\\.)+\/[gimsuy]*",
+                      "/RE/", text)
+        # 2) 字符串
+        text = re.sub(r'"(?:[^"\\]|\\.)*"', '""', text)
+        text = re.sub(r"'(?:[^'\\]|\\.)*'", "''", text)
+        text = re.sub(r"`(?:[^`\\]|\\.)*`", "``", text)
+        # 3) 注释（放在字符串之后，避免删掉字符串里的 // 之后又露出来）
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        text = re.sub(r"//[^\n]*", "", text)
+        return text
+
+    def _locals(self, text: str) -> set[str]:
+        """函数内定义的名字与声明的参数。
+
+        视图模块里大量出现 ``const esc = (e) => ...``、``function toggle()``、
+        以及 Promise 回调里的 ``(resolve, reject) =>``。这些都不是顶层符号，
+        但对文件来说完全合法。
+        """
+        names: set[str] = set()
+        # 任何位置定义的函数/箭头函数变量
+        names |= set(re.findall(r"\bfunction\s+(\w+)", text))
+        names |= set(re.findall(r"\b(?:const|let|var)\s+(\w+)\s*=", text))
+        names |= set(re.findall(r"\bcatch\s*\(\s*(\w+)", text))
+        # 参数列表：(a, b, {c}, d = 1)
+        for params in re.findall(r"\(([^()]*)\)\s*(?:=>|\{)", text):
+            for raw in params.split(","):
+                raw = raw.split("=")[0].strip()
+                ident = re.match(r"[\w$]+", raw)
+                if ident:
+                    names.add(ident.group(0))
+        # 单个参数箭头函数： e => ...
+        names |= set(re.findall(r"(?<![\w.$])([a-z][A-Za-z0-9_]*)\s*=>", text))
+        return names
+
+    def test_no_call_to_undefined_function(self):
+        """调用的函数名必须有来源：本文件定义、import、或浏览器全局。"""
+        problems = []
+        for name, text in self.sources.items():
+            available = (self._declared(text) | self._imported(text)
+                         | self._locals(text) | self.GLOBALS)
+            code = self._strip_noncode(text)
+            for m in re.finditer(r"(?<![\w.$])([a-z][A-Za-z0-9_]*)\s*\(", code):
+                fn = m.group(1)
+                if fn in available or fn in self.KEYWORDS:
+                    continue
+                # 方法简写定义形如 "  name(" 出现在行首缩进处 —— 那是定义不是调用
+                line_start = code.rfind("\n", 0, m.start()) + 1
+                prefix = code[line_start:m.start()]
+                if not prefix.strip():
+                    continue
+                problems.append(f"{name}: {fn}()")
+        self.assertEqual(sorted(set(problems)), [],
+                         "这些函数被调用但没有定义或 import："
+                         + ", ".join(sorted(set(problems))))
+
+
 if __name__ == "__main__":
     unittest.main()

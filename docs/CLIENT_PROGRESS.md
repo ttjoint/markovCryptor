@@ -1781,3 +1781,60 @@ def state(request: Request, account: Account = Depends(get_account)):
 
 **698 passed, 70 subtests**（默认跳过 2 个 slow）。端到端确认：标题、
 计数、29 个好友带头像、输入栏 46px、设置面板可开关、页面无滚动、零失败请求。
+
+## 修复：点开好友报 refreshState is not defined（2026-10-23）
+
+用户报：「点具体好友提示 refreshState not defined」。
+
+### 根因
+
+视图层改造后，`chat.js` 和 `covert.js` 里调用了 `refreshState()`，但**没有
+import 它** —— 只有 `settings.js` import 了。
+
+为什么页面加载时不报：那条路径只有「点具体好友」才走到
+（`openConversation` 拉完历史要刷新全局状态）。所以它躲过了所有浏览器
+冒烟验证 —— 我之前的验证都只点击到「列表渲染」为止。
+
+### 修法：继续用注入，不 import app.js
+
+`chat.js` / `covert.js` 不能 `import { refreshState } from "../app.js"` ——
+`app.js` 已经 import 了它们，那会形成循环引用。而 **ES module 的循环引用
+不报错**，只在运行时拿到 `undefined`，比现在还难查。
+
+沿用已有的注入机制：
+
+```js
+// chat.js 已有 hooks，加一项
+let hooks = { onOpen, afterState, refreshState: async () => {} };
+
+// covert.js 新增
+export function setCovertHooks(next) { hooks = Object.assign(hooks, next); }
+
+// index.html 装配
+Chat.setHooks({ ..., refreshState: () => refreshState() });
+Covert.setCovertHooks({ refreshState: () => refreshState() });
+```
+
+### 新增静态检查：`UndefinedSymbolTest`
+
+这类 bug **不会**在页面加载时暴露，只能靠静态检查。新测试解析每个模块，
+把「被当作函数调用的标识符」和「本文件声明 ∪ import ∪ 局部定义 ∪
+浏览器全局」比对，找出无来源的调用。
+
+写这个测试时踩了一个坑：`_strip_noncode()` 里先剥 `//` 注释，会把正则
+字面量 `/\.json$/i.test(...)` 的斜杠当成注释开头，**连同同一行的
+`const isModelFile = ...` 一起删掉**，于是那个名字"消失"，报假阳性。
+
+正确顺序：正则字面量 → 字符串 → 注释。判据是「斜杠前面不是标识符或
+右括号」才算正则，这样 `a / b` 除法不会误伤。
+
+另有一坑：heredoc 写 `\b`（词边界）会被 shell 当成退格符写进文件，
+表现为正则永远匹配不到。改用独立脚本文件 + `chr(92)` 拼接解决。
+
+### 验证
+
+注入回原 bug（把 `hooks.refreshState()` 改回 `refreshState()`），测试
+精确报出 `'js/views/chat.js: refreshState()'`。端到端确认：点开好友后零
+JS 错误、零 toast、输入栏正常。
+
+**699 passed, 70 subtests**。
