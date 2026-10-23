@@ -5,20 +5,28 @@ flex/grid 项的默认 min-height:auto 会让内容撑破父级。
 
    拆自原来的内联 <style>，纯搬移。*/
 
-  /* ---------- 顶部身份栏 ---------- */
+  /* ---------- 左侧身份栏（在 aside 顶部） ----------
+     从"整宽横条"改成"左栏里的第一块"：右边的内容区因此可以顶到窗口
+     上沿，两栏贯通。设置按钮紧挨着昵称，右侧不留空白。 */
   .idbar {
+    flex: 0 0 auto;
     display: flex; align-items: center; justify-content: space-between;
-    gap: 10px; padding: 6px 10px;
+    gap: 8px; padding: 8px 8px 8px 10px;
     background: var(--panel); border-bottom: 1px solid var(--line);
     /* 这一条是拖窗把手 */
     -webkit-app-region: drag; user-select: none;
+    /* 左栏只有 280px：昵称再长也不能把设置按钮挤出去 */
+    overflow: hidden;
   }
 
   .idbar .me {
-    display: flex; align-items: center; gap: 9px; min-width: 0;
+    display: flex; align-items: center; gap: 9px;
+    /* min-width:0 是省略号生效的前提：flex 项默认 min-width:auto，
+       会把内容撑开而不是收缩，于是 text-overflow 永远不触发。 */
+    min-width: 0; flex: 1 1 auto; overflow: hidden;
   }
 
-  .idbar .who { min-width: 0; }
+  .idbar .who { min-width: 0; flex: 1 1 auto; overflow: hidden; }
   .idbar #meName {
     font-weight: 600; font-size: 14px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -33,7 +41,11 @@ flex/grid 项的默认 min-height:auto 会让内容撑破父级。
 
   .tabs button[aria-selected="true"] .cnt { color: var(--accent); }
 
-  .winbtns { display: flex; gap: 2px; -webkit-app-region: no-drag; }
+  /* 按钮组不收缩：昵称再长，设置按钮始终占住最后那 40px。 */
+  .winbtns {
+    display: flex; gap: 2px; flex: 0 0 auto;
+    -webkit-app-region: no-drag;
+  }
   /* 只剩设置一个按钮了，放大到能一眼看见、也好点。 */
   /* 与头像同尺寸（40px 圆角方块），视觉上成为身份栏的一部分。 */
   .winbtns .iconbtn {
@@ -46,22 +58,25 @@ flex/grid 项的默认 min-height:auto 会让内容撑破父级。
   .dot.online { background: var(--ok); box-shadow: 0 0 0 2px rgba(87,184,122,.22); }
   .dot.offline { background: var(--dim); }
 
-  /* 工作区：左侧好友列表 + 右侧会话，左右并排。 */
+  /* 两栏：左（身份栏 + 列表）| 右（会话区）。
+     列宽在 body 上定义，这里只负责占满并允许子项收缩。 */
   .workspace {
     display: grid;
-    /* 显式一行 1fr：不给 grid-template-rows 时行高是 auto，
-       内容多高就多高，#chat 会塌成 topbar 那么高。 */
-    grid-template-columns: 280px 1fr;
-    grid-template-rows: 1fr;
-    /* 必须显式 min-height:0 + overflow:hidden：它是 body 的 grid 行（1fr），
-       默认 min-height:auto 会让内容把自己撑破，输入栏被推出屏幕外。 */
+    grid-template-columns: 280px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     min-height: 0; min-width: 0; overflow: hidden;
-    /* 没有这行时 grid 容器会被内容撑到 body 的 100vh，
-       而不是被限制在「body 第二行」的 818px 里。 */
     height: 100%;
   }
 
   .workspace > * { min-height: 0; min-width: 0; }
+
+  /* 左栏：身份栏固定高，标签页固定高，列表吃掉剩余并自己滚动。 */
+  .workspace > aside {
+    display: flex; flex-direction: column;
+    min-height: 0; overflow: hidden;
+    background: var(--panel); border-right: 1px solid var(--line);
+  }
+  .workspace > aside .list { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 
   /* 头像：圆形，未加载时是一个带首字的占位圆。
      尺寸比原来大一档 —— 之前的首字母圆是 34px，换成正圆头像后行内那圈

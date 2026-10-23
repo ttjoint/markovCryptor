@@ -1838,3 +1838,41 @@ Covert.setCovertHooks({ refreshState: () => refreshState() });
 JS 错误、零 toast、输入栏正常。
 
 **699 passed, 70 subtests**。
+
+## 布局改版：身份栏并入左栏（2026-10-23）
+
+用户要求：「界面应当把设置按钮也合并到左侧，放置在已登录 qq 信息的旁边。
+需要控制用户昵称不要显示太长，过长用省略号，右侧留下一个按钮位置。
+控制界面放在左侧，右边是两个贯通的消息界面。」
+
+### 改动
+
+**结构**：`header.idbar` 从 body 的直接子元素移进 `aside` 顶部 ——
+原来它是整宽横条，把右侧内容区从顶部切断；现在身份栏与列表同宽（280px），
+右边两个消息面板从 y=0 贯通到底。
+
+body 的 grid 从 `auto 1fr` 两行变成单行，`.workspace` 自己分两列。
+
+**省略号**：昵称 `.idbar .who` 加 `min-width:0; overflow:hidden`，`.me` 同理。
+关键点是 **flex 项默认 `min-width:auto`** —— 不显式置 0 的话内容会把容器
+撑开而不是收缩，`text-overflow: ellipsis` 永远不触发。`.winbtns` 加
+`flex: 0 0 auto`，昵称再长按钮也占住最后 40px。
+
+**CSS 去重**：列宽 `280px 1fr` 曾在 base.css 和 layout.css 各写一份，
+改版时容易漏改一处。收敛到 `.workspace` 一处。
+
+### 测试更新
+
+`test_body_layout_children`：body 从 3 个布局元素变 2 个（workspace + modal）。
+新增两条守住这次改动的结构约束：
+
+- `test_idbar_lives_inside_aside` —— 身份栏必须是 aside 的直接子元素，
+  放回 body 就会重新变成整宽横条
+- `test_settings_button_is_in_idbar` —— 设置按钮必须在身份栏里
+
+### 实测
+
+- 身份栏 (0,0,279,86)，aside (0,0,280,900)，右侧内容 (280,0,1120,900)
+- 长昵称截断为「这是一个特别特...」，省略号生效，按钮位置不动
+- 页面无滚动（900=900），零 JS 错误
+- 18 passed（webui）+ launcher 全过

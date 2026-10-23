@@ -130,12 +130,11 @@ class StructureTest(unittest.TestCase):
                          "HTML 标签不配对：" + "; ".join(self.imbalance))
 
     def test_body_layout_children(self):
-        """body 是 grid：idbar / workspace / modal 三块。
+        """body 只有两块：workspace + modal（外加不参与布局的 template）。
 
-        多一个"参与布局"的兄弟元素就多一行 grid，布局整体错位。
-        <template> 不算：它不参与渲染（内容不在文档流里），
-        所以单独排除，而不是把期望数字改成 6 —— 那样以后再加模板
-        又得改测试，反而失去意义。
+        身份栏在 aside 里，不再占 body 的一行 —— 右侧内容区因此能顶到
+        窗口上沿，两栏贯通。
+        <template> 不算：它不参与渲染（内容不在文档流里）。
         """
         body = [n for n, t in self.tree.tag_of.items() if t == "body"]
         self.assertEqual(len(body), 1)
@@ -144,8 +143,33 @@ class StructureTest(unittest.TestCase):
         kinds = [f"<{self._tag(k)}"
                  f"{'#' + self.tree.attrs_of[k]['id'] if self.tree.attrs_of[k].get('id') else ''}>"
                  for k in kids]
-        self.assertEqual(len(kids), 3,
-                         f"body 应当只有 3 个布局元素，实际 {len(kids)}: {kinds}")
+        self.assertEqual(len(kids), 2,
+                         f"body 应当只有 2 个布局元素，实际 {len(kids)}: {kinds}")
+
+    def test_idbar_lives_inside_aside(self):
+        """身份栏必须放在左栏里，与列表同宽。
+
+        放回 body 直接子元素会重新变成整宽横条，把右侧内容区从顶部切断。
+        """
+        idbar = self._by_id("meBlock")
+        chain = [self.tree.attrs_of[a].get("class")
+                 for a in self._ancestors(idbar)]
+        self.assertIn("idbar", chain, "#meBlock 应该在 header.idbar 里")
+        self.assertIn("workspace", chain, ".idbar 应该在 .workspace 里")
+        # 且必须是 aside 的直接子元素
+        idbar_node = next(n for n, t in self.tree.tag_of.items()
+                          if t == "header" and "idbar" in self.tree.attrs_of[n].get("class", ""))
+        parent = self.tree.parent[idbar_node]
+        self.assertEqual(self._tag(parent), "aside",
+                         ".idbar 必须是 aside 的直接子元素")
+
+    def test_settings_button_is_in_idbar(self):
+        """设置按钮在身份栏里、昵称旁边（不再挂在右上角）。"""
+        btn = self._by_id("btnSettings")
+        self.assertTrue(self._has_ancestor(btn, "meBlock")
+                        or any(self.tree.attrs_of[a].get("class") == "idbar"
+                               for a in self._ancestors(btn)),
+                        "#btnSettings 应该在 header.idbar 里")
 
     def test_templates_exist(self):
         """JS 用 clone(id) 取模板；少一个就是整块列表空白。"""

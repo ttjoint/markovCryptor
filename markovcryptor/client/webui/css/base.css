@@ -21,12 +21,12 @@ body 是 `auto minmax(0, 1fr)` 两行：身份栏 + 工作区。这四行缺一�
   html, body { height: 100%; }
   body {
     margin: 0;
-    /* 上下两行：顶部身份栏（固定高）+ 工作区（占满剩余）。
-       原来是一行两列、左栏里塞着"本机"，于是整个窗口外面还套着一个
-       "客户端"的框子感觉。现在最顶部直接就是自己。 */
-    /* 必须显式给高度，否则 1fr 会按内容撑（而不是按视口剩余），
-       输入栏被推到屏幕外。 */
-    height: 100vh; display: grid; grid-template-rows: auto minmax(0, 1fr);
+    /* 只剩一行：.workspace 自己分两栏。身份栏搬进左栏后，右边两个
+       消息面板可以占满整个高度，顶部不再横着一条把界面切断。
+       必须显式给高度，否则 1fr 会按内容撑（而不是按视口剩余），
+       输入栏会被推出屏幕外。 */
+    height: 100vh; display: grid;
+    grid-template-rows: minmax(0, 1fr);
     font: 14px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
     background: var(--bg); color: var(--text); overflow: hidden;
     /* 让整个窗口可以拖动（Chromium --app 下没有标题栏） */
