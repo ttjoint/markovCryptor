@@ -75,6 +75,24 @@ SMALLEST_SIDE = 120
 MAX_UPSCALE = 64
 STEP_CHOICES = (8.0, 9.0, 10.0, 11.0, 12.0, 14.0)
 
+#: 放大倍数上限（按**边长**算）。
+#:
+#: 原来按整数倍试探，256×256 需要 364×364 就够，却被放到 768×768 —— 三倍
+#: 边长，图片糊得能一眼看出来。糊图在聊天里反而更可疑，所以宁可拒绝也不
+#: 硬塞。1.5 倍是一个成年人看不出明显失真的上限。
+MAX_UPSCALE_RATIO = 1.5
+
+#: 发送前把超大的封面缩到这个长边以内。
+#:
+#: 缩小是**安全**的：隐写发生在缩放之后，所以丢掉细节不影响解码，视觉上
+#: 还会更锐利，文件也更小。放大则相反 —— 放大后若超过 QQ 的尺寸阈值，
+#: QQ 会再缩一次，那才是真的毁掉隐写。
+SAFE_MAX_SIDE = 1600
+
+#: 低于这个短边长就没法用了：放大到 1.5 倍也装不下握手帧。
+#: （76×76 放大 1.5 倍 → 114×114，196 块，恰好满足握手所需的 184 块。）
+ABSOLUTE_MIN_SIDE = 76
+
 
 # ------------------------------------------------------------------- planning
 
@@ -145,24 +163,41 @@ def channel_bits(payload_bytes: int, profile: LeadProfile | None = None) -> int:
     return (profile.code_bytes + total) * 8
 
 
-def suggest_size(image: Image.Image, payload_bytes: int = PUBLIC_KEY_BYTES) -> tuple[int, int]:
+def suggest_size(image: Image.Image, payload_bytes: int = PUBLIC_KEY_BYTES,
+                 *, max_ratio: float = MAX_UPSCALE_RATIO) -> tuple[int, int]:
     """Smallest proportional enlargement that lets ``image`` carry a payload.
 
     ``payload_bytes`` is the *payload* length; the frame's own lead and CRC are
     added on top, so the returned size is guaranteed to satisfy
     :func:`check_cover` for the same payload.
+
+    **Returns the original size when the needed enlargement exceeds
+    ``max_ratio``** — the caller then reports a capacity error instead of
+    silently shipping a blurry picture. Integer-multiple stepping was the old
+    behaviour and it overshot badly (256→768 when 364 was enough).
     """
     width, height = image.size
     need = blocks_needed(payload_bytes)   # includes lead + CRC + RS overhead
     if blocks_total(width, height) >= need:
         return width, height
-    scale = 1
-    while scale < MAX_UPSCALE:
-        size = (width * scale, height * scale)
-        if blocks_total(*size) >= need:
-            return size
-        scale += 1
-    return width * scale, height * scale
+
+    # 块数按面积增长，所以边长按 sqrt 增长；直接算最小可行边长，
+    # 而不是一倍一倍试。
+    import math
+    ratio = math.sqrt(need / max(1, blocks_total(width, height)))
+    if ratio > max_ratio:
+        return width, height              # 超上限：不放大，让调用方报容量不足
+
+    side_w = max(1, math.ceil(width * ratio))
+    side_h = max(1, math.ceil(height * ratio))
+    # 向下取整到 8 的倍数边界不会更好（块数按 //8 算），所以向上取整。
+    while blocks_total(side_w, side_h) < need and \
+            side_w <= int(width * max_ratio) and side_h <= int(height * max_ratio):
+        side_w += max(1, BLOCK // 2)
+        side_h += max(1, BLOCK // 2)
+    if blocks_total(side_w, side_h) < need:
+        return width, height
+    return side_w, side_h
 
 
 def upscale_cover(image: Image.Image, payload_bytes: int = PUBLIC_KEY_BYTES
@@ -178,6 +213,52 @@ def upscale_cover(image: Image.Image, payload_bytes: int = PUBLIC_KEY_BYTES
     if target == original:
         return image, original, False
     return image.resize(target, Image.LANCZOS), original, True
+
+
+def fit_within(image: Image.Image, *, max_side: int = SAFE_MAX_SIDE
+               ) -> tuple[Image.Image, tuple[int, int], bool]:
+    """Shrink an oversized cover to ``max_side`` (never enlarge).
+
+    Returns ``(image, original_size, resized)``.
+
+    发送前必须做这一步：超大的图上传慢，而且一旦超过 QQ 的尺寸阈值，QQ
+    会自己缩一次 —— 那时隐写已经嵌好了，缩放会**直接毁掉**载荷。在本地
+    先缩好，嵌入的帧就是按最终尺寸算的。
+    """
+    original = image.size
+    longest = max(original)
+    if longest <= max_side:
+        return image, original, False
+    ratio = max_side / longest
+    target = (max(1, round(original[0] * ratio)),
+              max(1, round(original[1] * ratio)))
+    return image.resize(target, Image.LANCZOS), original, True
+
+
+def normalize_cover(image: Image.Image, payload_bytes: int = PUBLIC_KEY_BYTES,
+                    *, max_side: int = SAFE_MAX_SIDE,
+                    max_ratio: float = MAX_UPSCALE_RATIO
+                    ) -> tuple[Image.Image, tuple[int, int], tuple[int, int], str]:
+    """One entry point that clamps a cover before embedding.
+
+    Returns ``(image, original_size, final_size, note)``; ``note`` is a
+    human-readable summary (empty when nothing happened).
+
+    顺序很重要：**先缩后放**。缩小总是安全的，而"放大了再缩"等于白放。
+    """
+    original = image.size
+    image, _, shrunk = fit_within(image, max_side=max_side)
+    stage = image.size
+    image, _, grown = upscale_cover(image, payload_bytes)
+    final = image.size
+
+    bits = []
+    if shrunk:
+        bits.append(f"从 {original[0]}×{original[1]} 缩到 {stage[0]}×{stage[1]}")
+    if grown:
+        ratio = final[0] / stage[0]
+        bits.append(f"放大 {ratio:.2f}× 到 {final[0]}×{final[1]}")
+    return image, original, final, "，".join(bits)
 
 
 def plan(width: int, height: int, payload_bytes: int = PUBLIC_KEY_BYTES,

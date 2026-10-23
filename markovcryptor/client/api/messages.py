@@ -16,6 +16,7 @@ from ...observability import event
 from .. import config
 from ..account import Account
 from ..services import history as history_service
+from ..services import estimate as estimate_service
 from ..services import media as media_service
 from ..services import picker as picker_service
 from ..tasks import TaskManager
@@ -328,3 +329,22 @@ def task_cancel(task_id: str, request: Request) -> JSONResponse:
     event("client", "send_cancelled", level=logging.INFO,
           task=task_id, peer=task.peer)
     return JSONResponse({"ok": True, "task": task.as_dict()})
+
+
+@router.post("/client/estimate")
+def estimate_message(payload: dict, request: Request,
+                     account: Account = Depends(get_account)) -> JSONResponse:
+    """这条消息会占几张图、能装多少字。
+
+    前端在输入时（300ms 防抖）调用，用来显示「将会发送 4/9 张图片」并
+    在装不下时提前禁用发送按钮 —— 而不是让用户点了才收到 413。
+
+    逐张按待选顺序真实计算，不用平均容量：队列里可能混着 256×256 和
+    1600×1600，平均值毫无意义。
+    """
+    text = str(payload.get("text") or "")
+    channel = str(payload.get("channel") or "image")
+    if channel not in ("image", "text"):
+        raise HTTPException(status_code=422, detail=f"未知信道：{channel}")
+    result = estimate_service.estimate(account, text=text, channel=channel)
+    return JSONResponse(result)

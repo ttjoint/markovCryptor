@@ -87,18 +87,64 @@ class CoverConstraintTest(unittest.TestCase):
             self.assertFalse(ok, size)
             self.assertTrue(reason)
 
-    def test_small_covers_are_upscaled(self):
-        # Anything below the working size is enlarged instead of rejected.
+    def test_small_covers_are_upscaled_within_the_ratio_limit(self):
+        """小图会放大，但**最多 1.5 倍**，超了就保持原样。
+
+        原来按整数倍试探：256×256 需要 364 就够，却放到 768 —— 三倍边长，
+        糊得一眼能看出来。糊图在聊天里反而更可疑。
+
+        这里用 120×120 装 120 字节（实测需要放大 1.27×）验证"会放大"，
+        用 24×24 验证"放不进去就不放"。
+        """
+        payload = bytes(range(120))
+        image = Image.fromarray(
+            np.random.default_rng(4).integers(
+                0, 256, (120, 120, 3), dtype=np.uint8), "RGB")
+        scaled, original, resized = S.upscale_cover(image, len(payload))
+        self.assertTrue(resized, "120×120 装 120 字节应当被放大")
+        self.assertEqual(original, (120, 120))
+        self.assertLessEqual(scaled.size[0] / 120, S.MAX_UPSCALE_RATIO + 1e-9,
+                             "放大不能超过 1.5 倍")
+        self.assertGreater(scaled.size[0], 120, "确实变大了")
+        stego, _ = S.embed(scaled, S.build_frame(payload), self.key)
+        out, _ = S.extract(stego, self.key)
+        self.assertEqual(out, payload)
+
+    def test_too_small_cover_is_left_alone(self):
+        """放大 1.5 倍也装不下时保持原样 —— 让调用方报容量不足，
+        而不是硬塞出一张糊图。"""
         for size in ((24, 24), (32, 32), (48, 64), (64, 40)):
             image = Image.fromarray(
-                np.random.default_rng(4).integers(0, 256, (size[1], size[0], 3), dtype=np.uint8), "RGB")
+                np.random.default_rng(4).integers(
+                    0, 256, (size[1], size[0], 3), dtype=np.uint8), "RGB")
             scaled, original, resized = S.upscale_cover(image)
-            self.assertTrue(resized, size)
-            self.assertEqual(original, size)
-            self.assertGreaterEqual(min(scaled.size), S.SMALLEST_SIDE // 2)
-            stego, _ = S.embed(scaled, S.build_frame(bytes(range(32))), self.key)
-            out, _ = S.extract(stego, self.key)
-            self.assertEqual(out, bytes(range(32)), size)
+            self.assertFalse(resized, f"{size} 放大 1.5× 装不下握手，应当保持原样")
+            self.assertEqual(scaled.size, original)
+
+    def test_normalize_shrinks_oversized_cover(self):
+        """超大图先缩到安全上限：缩小是安全的，而"放大了再缩"等于白放。
+
+        更重要的是：一旦超过 QQ 的尺寸阈值，QQ 会自己缩一次 —— 那时隐写
+        已经嵌好了，缩放会直接毁掉载荷。
+        """
+        image = Image.new("RGB", (3000, 2000), "white")
+        out, original, final, note = S.normalize_cover(image)
+        self.assertEqual(original, (3000, 2000))
+        self.assertEqual(max(final), S.SAFE_MAX_SIDE)
+        self.assertIn("缩", note)
+
+    def test_normalize_leaves_fitting_cover_untouched(self):
+        image = Image.new("RGB", (512, 512), "white")
+        out, original, final, note = S.normalize_cover(image, 100)
+        self.assertEqual(original, final)
+        self.assertEqual(note, "")
+
+    def test_normalize_never_upscales_past_the_limit(self):
+        """1.5× 内装不下就不放大 —— 明确报容量不足比发糊图好。"""
+        image = Image.new("RGB", (120, 120), "white")
+        out, original, final, note = S.normalize_cover(image, 4000)
+        self.assertEqual(final, original, "120×120 放 1.5× 装不下 4000 字节")
+        self.assertEqual(note, "")
 
     def test_payload_capacity_grows_with_size(self):
         previous = 0

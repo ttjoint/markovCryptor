@@ -142,12 +142,16 @@ class GifGeometryTest(unittest.TestCase):
         self.assertEqual(G.extract_gif(data, self.key)[0], payload)
 
     def test_tiny_gif_is_refused_not_blown_up(self):
-        # 40x40 would need 3x, i.e. 9x the pixels on *every* frame, which turns
-        # a few KB into a few hundred KB to carry 32 bytes.
+        # 40x40 上放大 1.5 倍也装不下 32 字节。拒绝，而不是把每一帧的像素
+        # 翻九倍、把几 KB 变成几百 KB。
+        #
+        # 报错文案从"太小"变成了具体的"容量不足：最多 0 字节，需要 32 字节"
+        # —— 后者对用户更有用：他知道差多少，而不是只知道"不行"。
         source = self._animated((40, 40), 3)
         with self.assertRaises(G.GifStegoError) as ctx:
             G.embed_gif(source, S.build_frame(bytes(range(32))), self.key)
-        self.assertIn("太小", str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertTrue("容量不足" in message or "太小" in message, message)
 
     def test_low_color_gif_works(self):
         frames = [Image.new("RGB", (256, 256), (30, 60, 90)) for _ in range(2)]

@@ -52,10 +52,35 @@ class QueuedImage:
     raw: bytes
     #: Real capacity in bytes, measured with the same function the terminal uses.
     capacity: int = 0
+    #: Pixel size. 容量估算要按尺寸算每张能装多少 —— 用户看到的是
+    #: "这张 512×512 能装 408 字"，而不是一个抽象字节数。
+    size: tuple[int, int] = (0, 0)
 
     @property
     def can_carry_handshake(self) -> bool:
         return self.capacity >= _MIN_USEFUL_BYTES
+
+
+def _measure(raw: bytes) -> tuple[int, tuple[int, int]]:
+    """Return ``(capacity_bytes, pixel_size)`` for one picture.
+
+    尺寸也要返回：容量估算得按尺寸算每张能装多少，用户看到的是
+    "这张 512×512 能装 408 字"，不是一个抽象字节数。
+    """
+    import io
+
+    from PIL import Image
+
+    from .. import gif_stego, image_stego
+
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            size = tuple(image.size)
+            if getattr(image, "n_frames", 1) > 1 or image.format == "GIF":
+                return gif_stego.capacity(image)["max_payload_bytes"], size
+            return image_stego.max_payload_bytes(*size), size
+    except Exception:                              # noqa: BLE001 - not a picture
+        return 0, (0, 0)
 
 
 def _capacity(raw: bytes) -> int:
@@ -65,6 +90,8 @@ def _capacity(raw: bytes) -> int:
     ``gif_stego`` for animations). Any divergence here would let the queue admit
     a picture that :meth:`Terminal.send_covert_in_images` then rejects.
     """
+    import io
+
     import io
 
     from PIL import Image
@@ -212,13 +239,14 @@ class PictureQueue:
                 event("queue", "read_failed", level=logging.WARNING,
                       path=str(path), error=exc)
                 continue
-            capacity = _capacity(raw)
+            capacity, size = _measure(raw)
             if capacity < _MIN_USEFUL_BYTES:
                 # 装不下握手报文，进队也白占位置。
                 event("queue", "too_small", level=logging.DEBUG,
                       path=str(path), capacity=capacity, need=_MIN_USEFUL_BYTES)
                 continue
-            self.items.append(QueuedImage(path=path, raw=raw, capacity=capacity))
+            self.items.append(QueuedImage(path=path, raw=raw,
+                                          capacity=capacity, size=size))
             added += 1
         return added
 

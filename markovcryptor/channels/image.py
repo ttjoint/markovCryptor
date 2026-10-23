@@ -116,12 +116,24 @@ class ImageChannel:
         image = self._open(cover)
         capacity = image_stego.max_payload_bytes(*image.size)
 
+        # 尺寸钳制在这里统一做：先缩到安全上限（缩小总是安全的），
+        # 再按需要放大（上限 1.5×，超了就不放 —— 宁报容量不足也不发糊图）。
+        # 关掉 upscale 时只做缩小。
         used: Image.Image = image
         upscaled = False
+        resize_note = ""
         if opts.upscale:
-            used, original, upscaled = image_stego.upscale_cover(image, len(payload))
-            if upscaled:
-                capacity = image_stego.max_payload_bytes(*used.size)
+            used, _orig, _final, resize_note = image_stego.normalize_cover(
+                image, len(payload))
+            upscaled = used.size != image.size
+        else:
+            used, _orig, shrunk = image_stego.fit_within(image)
+            upscaled = False
+            if shrunk:
+                resize_note = (f"从 {image.size[0]}×{image.size[1]} "
+                               f"缩到 {used.size[0]}×{used.size[1]}")
+        if used.size != image.size:
+            capacity = image_stego.max_payload_bytes(*used.size)
 
         frame = image_stego.build_frame(payload)
         try:
@@ -145,6 +157,8 @@ class ImageChannel:
             "step_requested": opts.step,
             "upscaled": upscaled,
             "size": f"{stego.size[0]}x{stego.size[1]}",
+            # 给用户看的尺寸变化说明（缩小/放大各是什么倍率）。
+            "resize_note": resize_note,
         }
         alternatives: dict[str, bytes] = {}
         if opts.include_jpeg:
