@@ -147,9 +147,16 @@ class PickFolderTest(_Base):
         self.assertTrue(body["ok"])
         self.assertEqual(body["path"], r"D:\Pics")
 
-    def test_missing_tkinter_does_not_break_settings(self):
-        """没有图形环境时选择框要优雅降级，不能把设置页整个弄坏。"""
-        with mock.patch.dict("sys.modules", {"tkinter": None}):
+    def test_picker_failure_does_not_break_settings(self):
+        """选择框不可用时优雅降级：返回 None，界面让用户手输路径。
+
+        原来这条测试 mock 掉 tkinter 来验证降级，但 picker 早就不用
+        tkinter 了（它必须跑在 uvicorn 工作线程上，tkinter 会永久阻塞）。
+        于是 mock 变成了空操作，测试**真的去弹了个对话框**并一直等到超时。
+        现在改成直接注入故障。
+        """
+        with mock.patch("markovcryptor.client.services.picker.pick_folder_win32",
+                        side_effect=OSError("模拟没有图形环境")):
             from markovcryptor.client.services.picker import pick_folder as _pick_folder
             self.assertIsNone(_pick_folder("x"))
 
@@ -306,7 +313,15 @@ class FolderPickerTest(unittest.TestCase):
     """
 
     def test_picker_returns_instead_of_blocking(self):
-        """在工作线程里调用，必须在几秒内返回（不要求真的弹出对话框）。"""
+        """在工作线程里调用必须能返回，不能把 HTTP 请求永久挂住。
+
+        **真的弹对话框的版本不能进 CI**：修好 pszDisplayName 之后对话框
+        会正常出现并等待用户点击，测试就永久挂在这里了（修复前它"通过"
+        恰恰是因为 bug 让它立刻返回 —— 一个假阳性）。
+
+        所以这里验证的是**线程语义**：包装层在任何线程里都能把控制权交回。
+        对话框本身由 tests/test_client_picker.py 验证结构体定义。
+        """
         import threading
         import time
 
@@ -315,17 +330,21 @@ class FolderPickerTest(unittest.TestCase):
         done = {}
         started = time.monotonic()
 
-        def worker():
-            done["value"] = picker_mod.pick_folder("测试")
-            done["elapsed"] = time.monotonic() - started
+        def fake_win32(title):
+            return None                    # 模拟用户取消
 
-        thread = threading.Thread(target=worker, daemon=True)
-        thread.start()
-        thread.join(timeout=10.0)
+        with mock.patch.object(picker_mod, "pick_folder_win32", fake_win32):
+            def worker():
+                done["value"] = picker_mod.pick_folder("测试")
+                done["elapsed"] = time.monotonic() - started
+
+            thread = threading.Thread(target=worker, daemon=True)
+            thread.start()
+            thread.join(timeout=10.0)
 
         self.assertFalse(thread.is_alive(),
-                         "选择对话框阻塞了 —— 界面会表现为按钮无效")
-        self.assertIn("value", done)
+                         "选择器在工作线程里阻塞了 —— 界面会表现为按钮无效")
+        self.assertIsNone(done["value"])
         self.assertLess(done["elapsed"], 10.0)
 
     def test_picker_does_not_use_tkinter(self):

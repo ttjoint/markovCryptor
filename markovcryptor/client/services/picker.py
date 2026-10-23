@@ -101,23 +101,54 @@ def pick_file(title: str, filter: str = "") -> str | None:
         return None
 
 
+#: ``BROWSEINFOW`` 的模块级定义。
+#:
+#: 提到模块级有两个理由：一是每次调用不必重建类，二是测试要能验证
+#: 字段类型和布局 —— 用户反馈的「点了没反应」正是这里声明错了。
+#:
+#: **pszDisplayName 必须是 ``POINTER(c_wchar)`` 而不是 ``wintypes.LPWSTR``。**
+#: 这个字段是**输出缓冲**（shell 把所选文件夹的显示名写回来），而我们传进去
+#: 的是 ``create_unicode_buffer(260)`` 返回的 ``c_wchar_Array_260``。用
+#: LPWSTR（= ``c_wchar_p``，不可变）赋值会抛
+#: ``TypeError: incompatible types, c_wchar_Array_260 instead of c_wchar_p``，
+#: 而那个异常又被 pick_folder() 的兜底 except 吞成 None —— 界面表现就是
+#: 「点了没反应」，且日志里什么都没有。
+BROWSEINFOW_FIELDS = (
+    ("hwndOwner", "HWND"),
+    ("pidlRoot", "VOIDP"),
+    ("pszDisplayName", "PWCHAR"),
+    ("lpszTitle", "LPCWSTR"),
+    ("ulFlags", "UINT"),
+    ("lpfn", "VOIDP"),
+    ("lParam", "LPARAM"),
+    ("iImage", "INT"),
+)
+
+
+def _browse_info_structure():
+    """Build (or return) the ``BROWSEINFOW`` class. Exposed for tests."""
+    import ctypes
+    from ctypes import wintypes as wt
+
+    kind = {
+        "HWND": wt.HWND, "VOIDP": ctypes.c_void_p,
+        "PWCHAR": ctypes.POINTER(ctypes.c_wchar),
+        "LPCWSTR": wt.LPCWSTR, "UINT": wt.UINT,
+        "LPARAM": wt.LPARAM, "INT": ctypes.c_int,
+    }
+    if getattr(_browse_info_structure, "_cls", None) is None:
+        _browse_info_structure._cls = type(
+            "BROWSEINFOW", (ctypes.Structure,),
+            {"_fields_": [(name, kind[spec]) for name, spec in BROWSEINFOW_FIELDS]})
+    return _browse_info_structure._cls
+
+
 def pick_folder_win32(title: str) -> str | None:
     """``SHBrowseForFolderW`` with a caller-supplied title."""
     import ctypes
     from ctypes import wintypes
 
-    class BROWSEINFOW(ctypes.Structure):
-        _fields_ = [
-            ("hwndOwner", wintypes.HWND),
-            ("pidlRoot", ctypes.c_void_p),
-            ("pszDisplayName", wintypes.LPWSTR),
-            ("lpszTitle", wintypes.LPCWSTR),
-            ("ulFlags", wintypes.UINT),
-            ("lpfn", ctypes.c_void_p),
-            ("lParam", wintypes.LPARAM),
-            ("iImage", ctypes.c_int),
-        ]
-
+    BROWSEINFOW = _browse_info_structure()
     shell32 = ctypes.windll.shell32
     ole32 = ctypes.windll.ole32
 

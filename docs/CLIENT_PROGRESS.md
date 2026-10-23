@@ -2082,3 +2082,55 @@ sendqueue.js 重复定义 → capacity 侧改名 `latestEstimate`。这条防线
 证明了自己的价值。
 
 **全量 732 passed。**
+
+## 修复：设置界面「浏览…」按钮点了没反应（2026-10-23）
+
+用户反馈设置页两个选择文件夹按钮无反应，怀疑是浏览器结构不支持。
+
+**不是浏览器的问题。** 浏览器只是发一个 HTTP 请求，真正弹对话框的是宿主机
+上的 Python —— 这在 `--app` 模式下完全可行。
+
+### 根因：ctypes 结构体字段类型错
+
+`services/picker.py` 里 `BROWSEINFOW.pszDisplayName` 声明成了
+`wintypes.LPWSTR`（= `c_wchar_p`，不可变），而实际传进去的是
+`create_unicode_buffer(260)` 返回的 `c_wchar_Array_260`：
+
+```
+TypeError: incompatible types, c_wchar_Array_260 instance
+           instead of c_wchar_p instance
+```
+
+这个字段是**输出缓冲**（shell 把所选文件夹的显示名写回来），必须是
+`ctypes.POINTER(ctypes.c_wchar)`。
+
+异常又被 `pick_folder()` 的兜底 `except` 吞成 `None`，界面于是表现为
+「点了没反应」，日志里也什么都没有 —— 这类静默失败最难查。
+
+### 修复
+
+- 字段改成 `POINTER(c_wchar)`，结构体提到模块级（`_browse_info_structure()`）
+- 验证：程序化检查窗口句柄，确认 `#32770` 对话框真的出现，标题正确显示中文
+
+### 顺带修掉两个假阳性测试
+
+修好之后跑全量，测试**卡在 45%** —— 因为它们依赖「对话框永远不出现」：
+
+| 测试 | 问题 |
+| --- | --- |
+| `test_missing_tkinter_does_not_break_settings` | mock 掉 `sys.modules["tkinter"]`，但 picker 早就不用 tkinter 了 → mock 是空操作，测试**真的弹了个对话框**并等到超时 |
+| `test_picker_returns_instead_of_blocking` | 真的调 `pick_folder()`，修复前它「通过」恰恰是因为 bug 让它立刻返回 —— 假阳性 |
+
+前者改成注入 `pick_folder_win32` 故障；后者改成 mock 掉真实调用、只验证
+**线程语义**（任何线程都能把控制权交回）。对话框本身的正确性交给
+`tests/test_client_picker.py`。
+
+### 新增 `tests/test_client_picker.py`（5 项）
+
+- `pszDisplayName` 必须能接住 `create_unicode_buffer`（赋值不抛 TypeError）
+- 字段声明类型必须是 `POINTER(c_wchar)`（**注入回 LPWSTR 验证过能 FAIL**）
+- 结构体大小 64 字节（64 位，含尾部对齐）
+- 字段顺序符合 Win32 定义
+- 失败要进日志，不能静默返回 None
+
+**全量 737 passed。**
