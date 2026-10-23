@@ -233,10 +233,15 @@
 <script type="module">
 // 入口。所有代码都在 js/ 下的 ES 模块里 ——
 // type="module" 是浏览器原生能力，不需要打包器。
-import { S } from "./js/core/store.js";
+import { S, COVERT } from "./js/core/store.js";
 import { $, toast } from "./js/core/dom.js";
 import { api } from "./js/core/api.js";
 import { fmtTime, avatarFor, setAvatar } from "./js/core/format.js";
+import * as Idbar from "./js/views/idbar.js";
+import * as List from "./js/views/list.js";
+import * as Overlays from "./js/views/overlays.js";
+import * as Chat from "./js/views/chat.js";
+import * as Composer from "./js/views/composer.js";
 
 // 全局状态。刻意很浅：一个当前账号、一个当前会话、一份列表。
 // 所有真实数据在服务端内存里，这里只是浏览器侧的视图。
@@ -244,274 +249,6 @@ import { fmtTime, avatarFor, setAvatar } from "./js/core/format.js";
 
 
 
-
-// ---------------------------------------------------------------- 左侧列表
-
-function rowFor(item, isConversation) {
-  const row = document.createElement("div");
-  row.className = "row" + (S.current === item.uin_or_peer ? " active" : "");
-  // 好友行也带头像：一眼认人比读名字快。
-  const av = document.createElement("div");
-  av.className = "avatar small";
-  // 最近列表的对端不一定是好友，后端已按号码兜底生成了 avatar。
-  setAvatar(av, item.avatar || avatarFor(item.peer || item.uin),
-            item.name || item.peer || item.uin);
-  row.appendChild(av);
-  const peer = isConversation ? item.peer : item.uin;
-  row.dataset.peer = peer;
-  if (S.current === peer) row.classList.add("active");
-
-  const nm = document.createElement("div");
-  nm.className = "nm";
-  const nameLine = document.createElement("div");
-  nameLine.textContent = item.name || peer;
-  nm.appendChild(nameLine);
-  if (isConversation) {
-    const sub = document.createElement("div");
-    sub.className = "sub";
-    sub.textContent = item.established ? "信道已建立" : item.state_label;
-    nm.appendChild(sub);
-  }
-
-  row.append(nm);
-
-  if (isConversation && item.established) {
-    const mk = document.createElement("span");
-    mk.className = "mark est";
-    mk.textContent = "●";
-    mk.title = "信道已建立";
-    row.appendChild(mk);
-  } else if (isConversation) {
-    const mk = document.createElement("span");
-    mk.className = "mark wait";
-    mk.textContent = "○";
-    mk.title = item.state_label;
-    row.appendChild(mk);
-  }
-
-  if (isConversation && item.unread > 0) {
-    const badge = document.createElement("span");
-    badge.className = "badge";
-    badge.textContent = item.unread;
-    row.appendChild(badge);
-  }
-
-  row.onclick = () => openConversation(peer);
-  return row;
-}
-
-function renderList() {
-  const list = $("list");
-  list.innerHTML = "";
-  if (S.mode === "recent") {
-    if (S.conversations.length === 0) {
-      const p = document.createElement("div");
-      p.className = "sub";
-      p.style.padding = "12px";
-      p.textContent = "还没有会话。收到消息或点开好友就会出现。";
-      list.appendChild(p);
-      return;
-    }
-    for (const c of S.conversations) list.appendChild(rowFor(c, true));
-  } else {
-    for (const f of S.friends) list.appendChild(rowFor(f, false));
-  }
-}
-
-// ---------------------------------------------------------------- 右侧对话
-
-// 时间戳：只显示 时:分。历史消息可能跨天，跨天时补上日期。
-
-function bubbleFor(entry, peerName, showDate) {
-  const wrap = document.createElement("div");
-  wrap.className = "msg " + (entry.mine ? "mine" : "them");
-
-  // 谁说的 + 什么时候，放在气泡上方。位置本身已经区分了方向，
-  // 这行是给"看不清颜色"和"历史消息跨天"的情况兜底。
-  const meta = document.createElement("div");
-  meta.className = "meta";
-  const who = document.createElement("span");
-  who.className = "who";
-  who.textContent = entry.mine ? "我" : (peerName || "对方");
-  meta.appendChild(who);
-  const stamp = fmtTime(entry.at, showDate);
-  if (stamp) {
-    const sep = document.createTextNode(" · ");
-    const t = document.createElement("span");
-    t.textContent = stamp;
-    meta.append(sep, t);
-  }
-  wrap.appendChild(meta);
-  wrap._entry = entry;                 // 右键菜单靠它取原文
-
-  const b = document.createElement("div");
-  b.className = "bubble";
-  if (entry.text) {
-    const t = document.createElement("div");
-    t.textContent = entry.text;
-    b.appendChild(t);
-  }
-  for (const src of entry.images || []) {
-    const img = document.createElement("img");
-    img.src = src;
-    b.appendChild(img);
-  }
-  for (const line of entry.unsupported || []) {
-    const u = document.createElement("div");
-    u.className = "unsupported";
-    u.textContent = line;
-    b.appendChild(u);
-  }
-  for (const line of entry.notes || []) {
-    const n = document.createElement("div");
-    n.className = "note";
-    n.textContent = line;
-    b.appendChild(n);
-  }
-  if (!b.hasChildNodes()) return null;   // 空条目不画，避免空气泡
-  wrap.appendChild(b);
-  return wrap;
-}
-
-// 增量渲染状态。每 2.5 秒重建整棵 DOM 的代价是：用户滚上去看历史会被
-// 强行拉回底部、正在复制的选区丢失、消息越多越卡。所以按 seq 记住渲染到
-// 哪一条，只 append 新的。切会话时才整窗重建。
-// lastSeq 用 null 表示"还没渲染过"，**不能用 -1**。
-// 历史条目的 seq 是负数（见 conversations.prepend_history：负数天然排在
-// 实时消息之前，也不会和 _ARRIVAL 分配的正数冲突），用 -1 当哨兵会把
-// 所有历史当成"已渲染"跳过。
-const R = { peer: null, lastSeq: null, firstSeq: null, count: 0 };
-
-function resetRender(peer) {
-  R.peer = peer;
-  R.lastSeq = null;
-  R.firstSeq = null;
-  R.count = 0;
-  $("plainThread").innerHTML = "";
-  $("covertThread").innerHTML = "";
-}
-
-// 用户是否本来就贴着底部。只有这种情况才自动滚到底 —— 用户往上翻历史时
-// 新消息到达不该把他拽回去。
-function nearBottom(el) {
-  return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-}
-
-function covertBubbleFor(entry, peerName, showDate) {
-  const cw = document.createElement("div");
-  cw.className = "msg " + (entry.mine ? "mine" : "them");
-  const cmeta = document.createElement("div");
-  cmeta.className = "meta";
-  const cwho = document.createElement("span");
-  cwho.className = "who";
-  cwho.textContent = entry.mine ? "我" : (peerName || "对方");
-  cmeta.appendChild(cwho);
-  const cstamp = fmtTime(entry.at, showDate);
-  if (cstamp) {
-    cmeta.append(document.createTextNode(" · "));
-    const t = document.createElement("span");
-    t.textContent = cstamp;
-    cmeta.appendChild(t);
-  }
-  cw.appendChild(cmeta);
-  const cb = document.createElement("div");
-  cb.className = "bubble";
-  cb.textContent = entry.covert.join("\n");
-  cw.appendChild(cb);
-  return cw;
-}
-
-function renderHeader(data) {
-  // 对端头像：优先用好友列表里的头像，未知联系人按号码现拼一个。
-  const friend = (S.friends || []).find((f) => f.uin === data.peer);
-  const name = data.name || data.peer;
-  setAvatar($("peerAvatar"), (friend && friend.avatar) || avatarFor(data.peer), name);
-  $("peerName").textContent = name;
-  const st = $("peerState");
-  st.innerHTML = "";
-  const span = document.createElement("span");
-  span.className = data.established ? "est" : "wait";
-  span.textContent = data.established ? "信道已建立" : data.state_label;
-  st.appendChild(span);
-}
-
-// 把 entries 里还没渲染的部分追加进去。整窗重建只发生在三种情况：
-// 切会话、历史被前插、服务端没给 seq。
-function renderConversation(data) {
-  const peer = data.peer;
-  if (R.peer !== peer) resetRender(peer);
-  renderHeader(data);
-
-  const entries = data.entries || [];
-  const plain = $("plainThread");
-  const covert = $("covertThread");
-
-  const seqs = entries.map((e) => e.seq);
-  const hasSeq = seqs.every((v) => typeof v === "number");
-  const firstSeq = hasSeq && seqs.length ? seqs[0] : null;
-  // 历史前插：最早那条比我们渲染过的还早，说明窗口头部多了内容。
-  const prepended = hasSeq && R.lastSeq !== null && firstSeq !== null &&
-                    firstSeq < R.firstSeq;
-  const shrank = entries.length < R.count;
-  const rebuild = !hasSeq || prepended || shrank;
-
-  const plainAtBottom = nearBottom(plain);
-  const covertAtBottom = nearBottom(covert);
-
-  if (rebuild) {
-    plain.innerHTML = "";
-    covert.innerHTML = "";
-    R.lastSeq = null;
-    R.firstSeq = null;
-    R.count = 0;
-  }
-
-  const showDate = new Set(entries.filter((e) => e.at)
-    .map((e) => new Date(e.at * 1000).toDateString())).size > 1;
-
-  for (const entry of entries) {
-    if (!rebuild && typeof entry.seq === "number"
-        && R.lastSeq !== null && entry.seq <= R.lastSeq) {
-      continue;                       // 已经渲染过
-    }
-    const b = bubbleFor(entry, data.name, showDate);
-    if (b) plain.appendChild(b);
-    if ((entry.covert || []).length) {
-      covert.appendChild(covertBubbleFor(entry, data.name, showDate));
-    }
-    if (typeof entry.seq === "number") {
-      R.lastSeq = (R.lastSeq === null)
-        ? entry.seq
-        : Math.max(R.lastSeq, entry.seq);
-    }
-  }
-  if (hasSeq && seqs.length) {
-    R.firstSeq = R.firstSeq === null ? seqs[0] : Math.min(R.firstSeq, seqs[0]);
-  }
-  R.count = plain.childElementCount;
-
-  // 只在用户本来就贴着底部时才跟随；往上翻历史时不该被拽回去。
-  if (plainAtBottom) plain.scrollTop = plain.scrollHeight;
-  if (covertAtBottom) covert.scrollTop = covert.scrollHeight;
-}
-
-async function openConversation(peer) {
-  // 换会话时重置握手重试计数和遮挡层：每个好友的信道是独立的。
-  COVERT.attempts = 0;
-  setCovertState("locked");
-  S.current = peer;
-  $("empty").hidden = true;
-  $("chat").hidden = false;
-  try {
-    await api(`/client/conversation/${peer}/open`, { method: "POST" });
-    // 首次打开拉一次 QQ 历史；服务端只合并一次，重复点不会重复灌。
-    const data = await api(`/client/conversation/${peer}?history=20`);
-    renderConversation(data);
-    await refreshState();
-  } catch (e) {
-    toast(e.message);
-  }
-}
 
 // ---------------------------------------------------------------- 状态刷新
 
@@ -528,45 +265,15 @@ function applyState(data) {
   S.conversations = data.conversations;
   S.friends = data.friends;
 
-  // 标签页计数。后端给了 counts 就用它（会话数包含尚未渲染的），
-  // 否则退回数组长度。
-  const counts = data.counts || {};
-  const nConv = counts.conversations !== undefined
-    ? counts.conversations : (data.conversations || []).length;
-  const nFriend = counts.friends !== undefined
-    ? counts.friends : (data.friends || []).length;
-  $("cntRecent").textContent = nConv ? `(${nConv})` : "";
-  $("cntFriends").textContent = nFriend ? `(${nFriend})` : "";
+  // 标签页计数：最近 (n) / 好友 (n)。
+  List.renderCounts(data);
 
-  // 顶部显示真实的自己：昵称 + QQ 号 + 头像 + 在线点。
-  // 原来写的是"本机"两个字 —— 那是在描述一个位置，不是在说"我是谁"。
-  const self = data.self || {};
-  const selfName = self.name || self.nickname || data.uin || "";
-  // 窗口标题 = "KC - 昵称（QQ号）"。
-  // --app 模式把 title 画在窗口左上角，这是唯一显示账号信息的地方。
-  // 还没登录完成时只有 "KC"，不要显示"KC - undefined（null）"。
-  document.title = data.uin
-    ? `KC - ${selfName}（${data.uin}）`
-    : "KC";
-
-  $("meName").textContent = selfName || "正在登录…";
-  $("meUin").textContent = data.uin ? ("QQ " + data.uin) : "";
-  setAvatar($("meAvatar"), self.avatar, selfName || data.uin);
-
-  // online: true/false/None —— None 表示桥不提供，用灰点而不是假装离线。
-  const dot = $("meDot");
-  if (dot) {
-    dot.className = "dot" + (self.online === true ? " online"
-                             : self.online === false ? " offline" : "");
-    dot.title = self.online === true ? "在线"
-              : self.online === false ? "离线"
-              : "在线状态未知";
-  }
-  // 上面已经设过昵称/头像/在线点了，这里不要再覆盖。
+  // 身份栏（头像/昵称/QQ号/在线点）+ 窗口标题。
+  Idbar.renderSelf(data);
 
   const q = data.queue;
   $("queueStat").textContent = `队列 ${q.queued}/${q.max}`;
-  renderQueue(q.items);
+  Composer.renderQueue(q.items);
   $("queueHint").textContent = q.folders === 0
     ? "未配置图片文件夹" : `${q.folders} 个文件夹`;
 
@@ -592,7 +299,7 @@ function applyState(data) {
   }
 
   updateOnboard(data);
-  renderList();
+  List.renderRows();
 
   // 图片信道的容量检查。放这里是因为它依赖队列内容，而队列每轮都可能变
   // （用户往文件夹里加了图）。只提示，不禁用 —— 文本信道仍可能可用。
@@ -616,7 +323,7 @@ async function refreshConversation() {
   if (!S.current) return;
   try {
     const detail = await api(`/client/conversation/${S.current}`);
-    renderConversation(detail);
+    Chat.renderConversation(detail);
   } catch (e) {
     // 会话可能已被丢弃；但要让人知道这次刷新没成功，否则新消息静默不出现。
     if (lastStateError !== e.message) {
@@ -648,7 +355,7 @@ async function refreshState() {
 async function sendPlain() {
   if (!S.current) return;
   const text = $("input").value;
-  const images = ATTACH.items.map((item) => item.data);
+  const images = Composer.ATTACH.items.map((item) => item.data);
   if (!text.trim() && !images.length) return;
 
   try {
@@ -659,11 +366,11 @@ async function sendPlain() {
         peer: S.current, mode: "text", text, images,
       }),
     });
-    clearInput("input");              // 清空后要收回去，否则留着一大块空白
-    ATTACH.items = [];
-    renderAttach();
+    Composer.clearInput("input");              // 清空后要收回去，否则留着一大块空白
+    Composer.ATTACH.items = [];
+    Composer.renderAttach();
     const detail = await api(`/client/conversation/${S.current}`);
-    renderConversation(detail);
+    Chat.renderConversation(detail);
     await refreshState();
   } catch (e) {
     toast(e.message);
@@ -687,9 +394,9 @@ async function sendCovert() {
         channel: COVERT.channel,
       }),
     });
-    clearInput("covertInput");
+    Composer.clearInput("covertInput");
     const detail = await api(`/client/conversation/${S.current}`);
-    renderConversation(detail);
+    Chat.renderConversation(detail);
     await refreshState();
   } catch (e) {
     toast(e.message);
@@ -705,7 +412,7 @@ async function handshakeLegacy() {
       body: JSON.stringify({ peer: S.current, mode: "handshake" }),
     });
     const detail = await api(`/client/conversation/${S.current}`);
-    renderConversation(detail);
+    Chat.renderConversation(detail);
     await refreshState();
   } catch (e) {
     toast(e.message);
@@ -724,12 +431,8 @@ async function refill() {
 
 // ---------------------------------------------------------------- 事件绑定
 
-$("tabRecent").onclick = () => { S.mode = "recent";
-  $("tabRecent").setAttribute("aria-selected", "true");
-  $("tabFriends").setAttribute("aria-selected", "false"); renderList(); };
-$("tabFriends").onclick = () => { S.mode = "friends";
-  $("tabFriends").setAttribute("aria-selected", "true");
-  $("tabRecent").setAttribute("aria-selected", "false"); renderList(); };
+$("tabRecent").onclick = () => List.setMode("recent");
+$("tabFriends").onclick = () => List.setMode("friends");
 
 $("btnSendText").onclick = sendPlain;
 $("btnSendCovert").onclick = sendCovert;
@@ -1095,196 +798,6 @@ $("btnImport").onclick = async () => {
 $("btnOnboardSettings").onclick = () => openSheet("general");
 
 
-// ================================================================= 右键菜单
-
-// 屏蔽浏览器默认右键菜单。这是应用窗口（--app 模式），不是网页：
-// "重新加载/检查/另存为/翻译"这些对用户毫无意义，还会让人以为这是个网页。
-// 只提供与上下文相关的几项，其余位置给最必要的一个"复制"。
-let ctxEl = null;
-
-function closeCtx() {
-  if (ctxEl) { ctxEl.remove(); ctxEl = null; }
-}
-
-function showCtx(x, y, items) {
-  closeCtx();
-  const menu = document.createElement("div");
-  menu.className = "ctxmenu";
-  for (const item of items) {
-    if (item === "-") {
-      const sep = document.createElement("div");
-      sep.className = "sep";
-      menu.appendChild(sep);
-      continue;
-    }
-    const btn = document.createElement("button");
-    btn.textContent = item.label;
-    if (item.disabled) btn.disabled = true;
-    btn.onclick = () => { closeCtx(); item.run(); };
-    menu.appendChild(btn);
-  }
-  document.body.appendChild(menu);
-  // 贴边时翻转，别让菜单跑出窗口。
-  const r = menu.getBoundingClientRect();
-  const left = x + r.width > window.innerWidth ? x - r.width : x;
-  const top = y + r.height > window.innerHeight ? y - r.height : y;
-  menu.style.left = Math.max(4, left) + "px";
-  menu.style.top = Math.max(4, top) + "px";
-  ctxEl = menu;
-}
-
-// 取当前选中的文字（气泡里的消息）
-function selectionText() {
-  const sel = window.getSelection();
-  return sel ? String(sel).trim() : "";
-}
-
-// 一条消息的右键菜单：复制全文 + 复制密文（有的话）
-function entryMenu(entry) {
-  const items = [];
-  const plain = (entry.text || "").trim();
-  items.push({
-    label: "复制消息",
-    disabled: !plain,
-    run: () => copyText(plain),
-  });
-  const covert = (entry.covert || []).join("\n").trim();
-  if (covert) {
-    items.push({ label: "复制密文", run: () => copyText(covert) });
-  }
-  const sel = selectionText();
-  if (sel) {
-    items.unshift({ label: "复制选中内容", run: () => copyText(sel) });
-    items.splice(1, 0, "-");
-  }
-  return items;
-}
-
-async function copyText(text) {
-  if (!text) return;
-  try {
-    await navigator.clipboard.writeText(text);
-    toast("已复制");
-  } catch (e) {
-    // 剪贴板 API 需要安全上下文；file:// 或旧浏览器会失败。
-    // 用老办法兜底，别让"复制"按钮什么都不做。
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    try { document.execCommand("copy"); toast("已复制"); }
-    catch (_) { toast("复制失败"); }
-    ta.remove();
-  }
-}
-
-document.addEventListener("contextmenu", (e) => {
-  // 输入框保留系统的复制/粘贴菜单 —— 那里系统菜单比我们做得好。
-  const tag = (e.target.tagName || "").toLowerCase();
-  if (tag === "input" || tag === "textarea") return;
-  e.preventDefault();
-
-  const msgEl = e.target.closest(".msg");
-  if (msgEl && msgEl._entry) {
-    showCtx(e.clientX, e.clientY, entryMenu(msgEl._entry));
-    return;
-  }
-  // 其他位置：只给"复制选中内容"（有选中时）或什么也不给。
-  const sel = selectionText();
-  if (sel) {
-    showCtx(e.clientX, e.clientY,
-            [{ label: "复制选中内容", run: () => copyText(sel) }]);
-  }
-});
-
-document.addEventListener("click", closeCtx);
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeCtx(); });
-window.addEventListener("blur", closeCtx);
-window.addEventListener("resize", closeCtx);
-
-// 应用窗口里 F5 / Ctrl+R 会重载界面，丢掉当前选中的会话和滚动位置，
-// 而用户没有任何理由需要它。挡掉。
-document.addEventListener("keydown", (e) => {
-  const k = e.key.toLowerCase();
-  if (k === "f5" || ((e.ctrlKey || e.metaKey) && k === "r")) {
-    e.preventDefault();
-  }
-});
-
-
-// ================================================================= 待发队列缩略图
-
-// 队列里每张图显示成小缩略图，右上角一个叉可以撤掉。
-// 只有数字（"队列 5/8"）说明不了"下一张到底发的是哪张"。
-function renderQueue(items) {
-  const grid = $("queueGrid");
-  if (!grid) return;
-  // 内容没变就不重建，否则 2.5 秒轮询会让用户刚点到的叉消失。
-  const signature = (items || []).map((i) => i.name).join("|");
-  if (grid.dataset.sig === signature) return;
-  grid.dataset.sig = signature;
-  grid.innerHTML = "";
-  (items || []).forEach((item, index) => {
-    const box = document.createElement("div");
-    box.className = "qthumb";
-    if (item.thumb) {
-      const img = document.createElement("img");
-      img.src = item.thumb;
-      img.alt = item.name || "";
-      img.title = item.name || "";
-      box.appendChild(img);
-    } else {
-      // 缩略图生成失败也要占位，否则用户会以为队列里没东西。
-      const ph = document.createElement("div");
-      ph.style.cssText = "width:100%;height:100%;display:grid;place-items:center;font-size:10px;color:var(--dim)";
-      ph.textContent = "无预览";
-      box.appendChild(ph);
-    }
-    const x = document.createElement("button");
-    x.className = "x";
-    x.textContent = "×";
-    x.title = "从队列移除（不会删你的文件）";
-    x.onclick = async (ev) => {
-      ev.stopPropagation();
-      try {
-        const d = await api("/client/queue/remove", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ index }),
-        });
-        renderQueue(d.items);
-        await refreshState();
-      } catch (e) { toast(e.message); }
-    };
-    box.appendChild(x);
-    grid.appendChild(box);
-  });
-}
-
-// ================================================================= 看大图
-
-function openLightbox(src) {
-  const box = document.createElement("div");
-  box.className = "lightbox";
-  const img = document.createElement("img");
-  img.src = src;
-  box.appendChild(img);
-  box.onclick = () => box.remove();
-  document.addEventListener("keydown", function esc(e) {
-    if (e.key === "Escape") { box.remove(); document.removeEventListener("keydown", esc); }
-  });
-  document.body.appendChild(box);
-}
-
-// 事件委托：气泡里的图片点一下看大图。
-document.addEventListener("click", (e) => {
-  const img = e.target.closest(".bubble img");
-  if (img && img.src) openLightbox(img.src);
-});
-
-
 // ================================================================= 左右分栏
 
 // 拖动分隔条改宽度；双击恢复均分；太窄就整栏收起。
@@ -1384,7 +897,6 @@ function initSplitter() {
 //   waiting  —— 已发起：显示"已发起第 n 次握手，等待回应"，仍可再点
 //   ready    —— 已握手：遮挡消失，露出输入框
 //   noimage  —— 已握手但图片装不下：只盖住图片相关部分，并提示
-const COVERT = { state: "locked", attempts: 0, channel: "image" };
 
 function setCovertState(state, extra) {
   COVERT.state = state;
@@ -1522,134 +1034,6 @@ function initChannelSwitch() {
   sw.addEventListener("click", toggle);
   sw.addEventListener("keydown", (e) => {
     if (e.key === " " || e.key === "Enter") { e.preventDefault(); toggle(); }
-  });
-}
-
-// ================================================================= 明文附件
-
-// 粘贴/拖入的图片先攒在这里，按 Enter 时和文本一起作为**一条**消息发出。
-// QQ 允许只发图，所以文本可以为空。
-const ATTACH = { items: [], max: 9, maxBytes: 8 * 1024 * 1024 };
-
-function renderAttach() {
-  const bar = $("attachBar");
-  bar.innerHTML = "";
-  bar.hidden = ATTACH.items.length === 0;
-  ATTACH.items.forEach((item, index) => {
-    const box = document.createElement("div");
-    box.className = "attach";
-    const img = document.createElement("img");
-    img.src = item.thumb;
-    img.alt = item.name || "";
-    img.title = item.name || "";
-    box.appendChild(img);
-    const x = document.createElement("button");
-    x.className = "x";
-    x.textContent = "×";
-    x.title = "移除这张图";
-    x.onclick = () => { ATTACH.items.splice(index, 1); renderAttach(); };
-    box.appendChild(x);
-    bar.appendChild(box);
-  });
-  updatePlainHint();
-}
-
-function updatePlainHint() {
-  const hint = $("plainHint");
-  if (!hint) return;
-  if (ATTACH.items.length) {
-    hint.className = "hintline";
-    hint.textContent = `将随消息一起发送 ${ATTACH.items.length} 张图片`;
-  } else {
-    hint.className = "hintline";
-    hint.textContent = "";
-  }
-}
-
-// 把 File 读成 data URL，同时生成一个缩略图给界面看。
-// 缩略图在浏览器里做，避免为了预览把整张原图传给服务端再传回来。
-function readImageFile(file) {
-  return new Promise((resolve, reject) => {
-    if (!file.type.startsWith("image/")) {
-      reject(new Error("不是图片"));
-      return;
-    }
-    if (file.size > ATTACH.maxBytes) {
-      reject(new Error("单张图片不能超过 8MB"));
-      return;
-    }
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("读取失败"));
-    reader.onload = () => {
-      const dataUrl = String(reader.result || "");
-      const img = new Image();
-      img.onload = () => {
-        const size = 54;
-        const canvas = document.createElement("canvas");
-        const scale = Math.min(size / img.width, size / img.height, 1);
-        canvas.width = Math.max(1, Math.round(img.width * scale));
-        canvas.height = Math.max(1, Math.round(img.height * scale));
-        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve({
-          name: file.name || "粘贴的图片",
-          data: dataUrl,
-          thumb: canvas.toDataURL("image/jpeg", 0.7),
-        });
-      };
-      img.onerror = () => reject(new Error("图片无法解码"));
-      img.src = dataUrl;
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-async function addFiles(files) {
-  const list = Array.from(files || []);
-  if (!list.length) return;
-  for (const file of list) {
-    if (ATTACH.items.length >= ATTACH.max) {
-      toast(`最多一次发 ${ATTACH.max} 张图片`);
-      break;
-    }
-    try {
-      ATTACH.items.push(await readImageFile(file));
-    } catch (e) {
-      toast(e.message);
-    }
-  }
-  renderAttach();
-}
-
-function initAttach() {
-  const input = $("input");
-  const composer = $("plainComposer");
-
-  input.addEventListener("paste", async (e) => {
-    const files = [];
-    for (const item of (e.clipboardData || {}).items || []) {
-      if (item.kind === "file") {
-        const file = item.getAsFile();
-        if (file) files.push(file);
-      }
-    }
-    if (files.length) {
-      e.preventDefault();          // 别把图片当成路径文本贴进输入框
-      await addFiles(files);
-    }
-  });
-
-  // 拖入：dragover 必须 preventDefault，否则浏览器会直接打开图片。
-  composer.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    composer.classList.add("dragover");
-  });
-  composer.addEventListener("dragleave", () => composer.classList.remove("dragover"));
-  composer.addEventListener("drop", async (e) => {
-    e.preventDefault();
-    composer.classList.remove("dragover");
-    const files = Array.from((e.dataTransfer || {}).files || [])
-      .filter((f) => f.type.startsWith("image/"));
-    if (files.length) await addFiles(files);
   });
 }
 
@@ -1895,58 +1279,30 @@ function initLifecycle() {
   scheduleProbe(0);
 }
 
+// ================================================================= 装配
 
-// ================================================================= 输入框自适应高度
+// 视图之间不互相 import（会形成循环引用，ES module 的循环引用不报错、
+// 只会在运行时拿到 undefined）。需要对方动作的地方都在这里注入。
 
-// 输入框跟着内容长高，到上限再滚。
-//
-// 为什么不用 CSS `field-sizing: content`：那是很新的属性，Chromium 123+
-// 才有，而客户端要跑在 Win10 上（可能配的是较旧的 Chrome/Edge）。
-// 用 scrollHeight 量一次是兼容性最稳的做法。
-const AUTOSIZE_MIN = 46;
-const AUTOSIZE_MAX = 168;
-
-function autosize(el) {
-  if (!el) return;
-  // 先归零再量，否则 scrollHeight 只增不减（元素高度会卡在历史最大值）。
-  el.style.height = AUTOSIZE_MIN + "px";
-  const needed = el.scrollHeight + 2;      // +2 补边框，避免刚好卡出滚动条
-  el.style.height = Math.min(needed, AUTOSIZE_MAX) + "px";
-  // 到上限之后才允许滚，否则内容不足时不该有滚动条
-  el.style.overflowY = needed > AUTOSIZE_MAX ? "auto" : "hidden";
-}
-
-function initAutosize() {
-  for (const id of ["input", "covertInput"]) {
-    const el = $(id);
-    if (!el) continue;
-    el.addEventListener("input", () => autosize(el));
-    // 用键盘删空时 input 会触发，但程序性赋值（测试、发送后清空）不会，
-    // 所以再加一个 change 兜底。真正的清空统一走 clearInput()。
-    el.addEventListener("change", () => autosize(el));
-    autosize(el);
-  }
-}
-
-// 统一"清空并收回"的写法，避免每处都记得调 autosize。
-function clearInput(id) {
-  const el = $(id);
-  if (!el) return;
-  el.value = "";
-  autosize(el);
-}
+List.setOpener(Chat.openConversation);
+Chat.setHooks({
+  onOpen: () => { COVERT.attempts = 0; setCovertState("locked"); },
+  setState: (state, extra) => setCovertState(state, extra),
+});
+Overlays.install();
+Composer.setRefresh(() => refreshState());
 
 // ================================================================= 启动
 
-// 必须放在最后：上面用到 const SPLIT / COVERT / ATTACH，
+// 必须放在最后：上面用到 const SPLIT / COVERT / Composer.ATTACH，
 // 提前调用会撞上 "Cannot access before initialization"（暂时性死区）。
 initSplitter();
 initChannelSwitch();
-initAttach();
+Composer.initAttach();
 initModelDrop();
-initAutosize();
+Composer.initAutosize();
 initLifecycle();
-renderAttach();
+Composer.renderAttach();
 setCovertState("locked");
 setChannel("image", { textUsable: false, quiet: true });
 

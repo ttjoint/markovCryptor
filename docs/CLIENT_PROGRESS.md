@@ -1612,3 +1612,62 @@ index.html，运行时表现为 `REQUEST_TIMEOUT is not defined`，但**页面�
 
 后端现状：`app.py` 1073 行，其中 `create_client_app()` 是 **665 行的单个
 函数**，25 个端点全定义在它的闭包里 —— 这是阶段 D 的主要目标。
+
+## 重构阶段 B：视图层抽取（2026-10-23）
+
+按 `idbar → list → overlays → chat → composer` 顺序搬，每搬一个立刻浏览器验证。
+
+| 模块 | 行数 | 内容 |
+| --- | --- | --- |
+| `views/idbar.js` | 34 | 头像/昵称/QQ号/在线点 + 窗口标题 |
+| `views/list.js` | 113 | 最近/好友列表、标签计数、setMode |
+| `views/overlays.js` | 154 | 右键菜单、看大图、F5 屏蔽、`install()` |
+| `views/chat.js` | 215 | 消息气泡、历史前插、openConversation |
+| `views/composer.js` | 228 | 明文附件、队列缩略图、输入框自适应 |
+
+`index.html` 从 2590 行降到 **1312 行**。
+
+### 关键设计：视图之间不互相 import
+
+`list` 需要「点开一行」的能力，而那个能力属于 `chat`。直接 import 会形成
+循环引用 —— **ES module 的循环引用不报错**，只在运行时拿到 `undefined`，
+非常难查。
+
+所以统一用**注入**：
+
+```js
+List.setOpener(Chat.openConversation);
+Chat.setHooks({ onOpen, setState });
+Composer.setRefresh(() => refreshState());
+```
+
+装配代码集中在 `index.html` 末尾的「装配」段。这条规则应该一直保持。
+
+`COVERT` 状态对象从 covert 视图移到了 `core/store.js` —— chat 也要读它
+（判断能不能发、要不要提示信道未建立），放在视图里会制造反向依赖。
+
+### 踩到的坑（都是"静默失败"）
+
+1. **`api()` 的 `REQUEST_TIMEOUT` 常量没跟着搬**，页面不报错，只是每个请求
+   都失败，界面停在空状态。靠 `.toast` 的文字才定位。
+2. **`ATTACH` 在 composer.js 里被定义两次**（我加的 header + 区块自带），
+   报 `Identifier 'ATTACH' has already been declared`。
+3. **`cut()` 的结束边界用了 `</script>`**，把中间的启动段整段删掉了 ——
+   表现是"没有好友数据"，因为 `refreshState()` 再也不被调用。
+4. **启动段被整段复制进了 composer.js**，导致 `List is not defined` ——
+   composer 引用了它不该知道的符号。
+5. **`idbar.js` 和 `list.js` 都 export 了 `render`**，被新测试
+   `test_no_redeclared_top_level_symbols` 抓到，改名 `renderSelf` / `renderRows`。
+
+第 5 条说明阶段 A 加的测试确实在干活。
+
+### 排查方法
+
+浏览器里 ES module 加载失败**不报细节**。有效的定位手段：
+
+```js
+await import('./js/views/composer.js')   // 在页面上下文里逐个试，
+                                         // 能拿到真正的错误消息
+```
+
+比看 `pageerror` 有用得多 —— 后者只会说"某某 is not defined"。
