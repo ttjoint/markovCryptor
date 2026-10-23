@@ -1,0 +1,82 @@
+/* 基础：reset、body 的 grid 骨架、滚动条、[hidden] 强制隐藏。
+
+body 是 `auto minmax(0, 1fr)` 两行：身份栏 + 工作区。这四行缺一个
+输入栏就会被推出屏幕（踩过，见 CLIENT_PROGRESS）。
+
+   拆自原来的内联 <style>，纯搬移。*/
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: var(--line); border-radius: 4px;
+    /* 用透明边框把滑块"缩"进去，看起来更细，同时保留较大的点击区域。 */
+    border: 2px solid transparent; background-clip: padding-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover { background: var(--dim); background-clip: padding-box; }
+  ::-webkit-scrollbar-corner { background: transparent; }
+
+  /* 输入框不需要滚动条一直占位：内容不超过两行时它不该出现。 */
+  textarea { scrollbar-width: thin; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    /* 上下两行：顶部身份栏（固定高）+ 工作区（占满剩余）。
+       原来是一行两列、左栏里塞着"本机"，于是整个窗口外面还套着一个
+       "客户端"的框子感觉。现在最顶部直接就是自己。 */
+    /* 必须显式给高度，否则 1fr 会按内容撑（而不是按视口剩余），
+       输入栏被推到屏幕外。 */
+    height: 100vh; display: grid; grid-template-rows: auto minmax(0, 1fr);
+    font: 14px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: var(--bg); color: var(--text); overflow: hidden;
+    /* 让整个窗口可以拖动（Chromium --app 下没有标题栏） */
+    -webkit-app-region: drag;
+  }
+
+  /* 任何自带 display 的元素被 hidden 时都必须真的消失 —— UA 的 [hidden]
+     会被 display:grid/flex 盖掉，这是测试端踩过的坑，这里一开始就写死。 */
+  [hidden] { display: none !important; }
+
+  /* ---------- 左侧：好友列表 ---------- */
+  aside {
+    /* 好友列表：不再包含"本机"块，它已经上移到 idbar 了。 */
+    min-height: 0; overflow: hidden;
+    display: flex; flex-direction: column;
+    border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; border-right: 1px solid var(--line);
+    background: var(--panel); min-width: 0; min-height: 0; overflow: hidden;
+  }
+
+  .veil[hidden] { display: none; }
+  .veilbody { max-width: 320px; display: flex; flex-direction: column;
+              align-items: center; gap: 10px; }
+  .veilicon { font-size: 30px; opacity: .85; }
+  .veiltitle { font-size: 15px; font-weight: 600; }
+  .veiltext { font-size: 12px; color: var(--dim); line-height: 1.6; }
+  .veilbtn {
+    margin-top: 4px; background: var(--accent); border: 0; color: #fff;
+    border-radius: 8px; padding: 10px 22px; font: inherit; font-size: 14px;
+    cursor: pointer; font-weight: 600;
+  }
+
+  .composer .entry { display: flex; gap: 8px; }
+  /* 多行输入框。
+     原来是写死 height:46px —— 只够一行半，写两句话就要靠滚动，很难用。
+     现在由 JS 跟着内容长高（autosize），CSS 只给上下限：
+       46px 约 1 行（空的时候不占地方）
+      168px 约 7 行（再多就自己滚，不把整个窗口顶出去） */
+  .composer textarea {
+    min-height: 46px; max-height: 168px; overflow-y: auto;
+    flex: 1; resize: none; background: var(--panel2);
+    border: 1px solid var(--line); border-radius: 8px; color: var(--text);
+    padding: 11px 12px; font: inherit; line-height: 1.55;
+    /* 高度由 autosize 控制，这里只保证没有跳动感 */
+    transition: height .08s ease-out;
+  }
+
+  .dropveil[hidden] { display: none; }
+  .dropbox {
+    border: 2px dashed var(--accent); border-radius: 14px;
+    padding: 28px 44px; font-size: 15px; font-weight: 600;
+    background: rgba(0,0,0,.35);
+  }

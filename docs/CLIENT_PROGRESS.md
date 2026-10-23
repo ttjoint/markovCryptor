@@ -1532,3 +1532,83 @@ state 加 `counts: {conversations, friends}`；标签页渲染成
 四项全过：最近列表头像 1/1、输入栏完整可见（y=822，高 46）、
 `最近 (1) / 好友 (29)`、齿轮 SVG 40×40；页面无滚动（900=900）、无 JS 错误。
 针对性回归 98 passed。
+
+---
+
+## 重构阶段 A：拆分 CSS + core 模块（2026-10-23）
+
+用户判断："打包时间长一点对开发效率的影响，远低于代码堆在一起难以查改"，
+决定做一次彻底重构。规划见本节末尾的完整阶段表。
+
+### 目标架构
+
+前端从 1 个文件拆成「结构 + 5 个 CSS + 12 个 JS 模块」：
+
+```
+webui/
+  index.html        只剩结构，无内联 CSS/JS
+  css/              tokens / base / layout / components / overlays
+  js/core/          dom / api / store / format
+  js/views/         idbar / list / chat / composer / covert      （阶段 B）
+  js/panels/        settings / overlays                          （阶段 C）
+  js/app.js + boot.js                                            （阶段 C）
+```
+
+**不使用打包器**：`<script type="module">` 和 `<link>` 都是浏览器原生能力。
+代价是首屏多几个请求 —— 全是本地回环，实测无感。换来改完刷新即生效、
+无 node_modules、打包只需拷文件。
+
+### A-1：拆 CSS（已完成）
+
+按顶层规则切分成 70 个原子块，按选择器特征归入 5 个文件，**纯搬移不改写**。
+
+验证：5 个样式表全部加载、零 4xx、`idbar` 高 82、输入栏 y=822、
+页面无滚动（900=900）—— 与拆分前逐项一致。
+
+### A-2：抽 core 模块（已完成）
+
+`js/core/` 四个模块都是叶子依赖（不引用任何视图代码），所以最先搬：
+
+| 模块 | 内容 |
+| --- | --- |
+| `store.js` | 唯一状态 `S`（刻意保持很浅，不做 Redux 式数据流） |
+| `dom.js` | `$()` / `toast()` |
+| `api.js` | `api()` + `REQUEST_TIMEOUT` |
+| `format.js` | `fmtTime()` / `avatarFor()` / `setAvatar()` |
+
+搬完立刻发现一处漏搬：`api()` 依赖的 `REQUEST_TIMEOUT` 常量留在了
+index.html，运行时表现为 `REQUEST_TIMEOUT is not defined`，但**页面不报错**
+—— 只是每个请求都失败，界面停在空状态。靠 `.toast` 元素的文字才定位到。
+
+### 测试同步更新（`tests/test_client_webui.py`）
+
+原 `ScriptTest` 只认内联 `<script>`，拆分后失效。改写为两组：
+
+新增 `AssetsTest`：
+- 5 个样式表按固定顺序 link（后面覆盖前面，乱序就是配色错乱）
+- 样式文件确实存在
+- `index.html` 里不许再有内联 `<style>`
+- 脚本必须是 `type="module"`
+
+扩展 `ScriptTest`（跨文件）：
+- core 四个模块存在
+- **相对 import 全部能解析** —— 浏览器里 import 失败是静默的，页面停在
+  半初始化状态，看起来像"数据没加载"
+- `$("...")` 引用的 id 都真实存在
+- **同一顶层符号不在两个文件里各定义一次** —— 拆分的经典错误是搬了新的
+  忘了删旧的，两份实现，改一份不生效，且毫无报错
+
+两条关键测试都注入 bug 验证过能 FAIL（改坏 import 路径 / 把 `S` 定义两次）。
+
+### 后续阶段
+
+| 阶段 | 内容 | 状态 |
+| --- | --- | --- |
+| A | CSS + core 模块 | ✅ |
+| B | views/（idbar→list→overlays→chat→composer→covert） | 待做 |
+| C | panels/ + app.js + boot.js，删除内联 JS | 待做 |
+| D | 后端：抽 services/，app.py 拆 4 个 router | 待做 |
+| E | 结构测试扩展到新布局、全量回归、打包 | 待做 |
+
+后端现状：`app.py` 1073 行，其中 `create_client_app()` 是 **665 行的单个
+函数**，25 个端点全定义在它的闭包里 —— 这是阶段 D 的主要目标。

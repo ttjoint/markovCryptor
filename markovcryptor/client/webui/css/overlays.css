@@ -1,0 +1,139 @@
+/* 浮层：设置面板、右键菜单、看大图、提示条、待发队列。
+
+   拆自原来的内联 <style>，纯搬移。*/
+
+  .bubble img:first-child { margin-top: 0; }
+  /* 点开的大图 */
+  .lightbox {
+    position: fixed; inset: 0; z-index: 300; background: rgba(0,0,0,.85);
+    display: grid; place-items: center; cursor: zoom-out; padding: 24px;
+  }
+
+  .lightbox img {
+    max-width: 100%; max-height: 100%; border-radius: 6px;
+    box-shadow: 0 12px 48px rgba(0,0,0,.6);
+  }
+
+  .bubble img { max-width: 220px; border-radius: 8px; display: block; margin-top: 6px; }
+  .unsupported { color: var(--dim); font-style: italic; font-size: 12px; }
+  .note { color: var(--warn); font-size: 12px; }
+
+  /* 密文窗 */
+  .covert-thread .bubble { background: #2b2333; border: 1px solid #43324f; }
+
+  /* ---------- 底部：输入 + 队列 ---------- */
+  .queuegrid {
+    display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 4px;
+    min-height: 0;
+  }
+
+  .queuegrid:empty { display: none; }
+  .qthumb {
+    position: relative; flex: 0 0 auto; width: 56px; height: 56px;
+    border-radius: 8px; overflow: hidden; border: 1px solid var(--line);
+    background: var(--panel2);
+  }
+
+  .qthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .qthumb .x {
+    position: absolute; top: 2px; right: 2px; width: 18px; height: 18px;
+    border-radius: 50%; border: 0; cursor: pointer; padding: 0;
+    background: rgba(0,0,0,.65); color: #fff; font-size: 12px; line-height: 18px;
+    text-align: center;
+  }
+
+  .qthumb .x:hover { background: var(--err); }
+  .qthumb .n {
+    position: absolute; left: 3px; bottom: 2px; font-size: 10px;
+    color: #fff; text-shadow: 0 1px 2px #000;
+  }
+
+  /* ---------- 遮挡层 ---------- */
+  /* 半透明但不全遮：底下的待发图片列表要能看见（用户要在握手前管理它们）。 */
+  .veil {
+    position: absolute; left: 0; right: 0; top: 0; bottom: 0; z-index: 20;
+    background: rgba(18, 20, 24, .72);
+    backdrop-filter: blur(1.5px);
+    display: grid; place-items: center; padding: 20px;
+    text-align: center;
+  }
+
+  .veilbtn:hover { filter: brightness(1.1); }
+  .veilbtn:disabled { opacity: .5; cursor: not-allowed; filter: none; }
+  .veil.warn { background: rgba(60, 46, 20, .78); }
+
+  /* ---------- 图片/文本 信道开关 ---------- */
+  .channelbar {
+    display: flex; align-items: center; gap: 8px; font-size: 12px;
+    flex-wrap: wrap;
+  }
+
+  .switch[aria-checked="false"] .lab.image { color: #fff; font-weight: 600; }
+  .switch[aria-checked="true"] .lab.text { color: #fff; font-weight: 600; }
+  .switch.disabled { opacity: .45; cursor: not-allowed; }
+  .switch.disabled .knob { background: var(--dim); }
+  .chanwarn { color: var(--warn); font-size: 12px; }
+
+  /* ---------- 待发队列浮层 ----------
+     挂在密文栏底部，z-index 高于遮挡层。握手前它必须可见可操作：
+     用户要确认"下一张发的是哪张"、把不合适的叉掉。 */
+  .queuefloat {
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 30;
+    background: var(--panel);
+    border-top: 1px solid var(--line);
+    padding: 8px 12px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+
+  .queuefloat:has(.queuegrid:not(:empty)) { padding-bottom: 10px; }
+
+  /* ---------- 明文附件（粘贴/拖入的图片） ---------- */
+  .attachbar { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; }
+  .attachbar:empty { display: none; }
+  .attach {
+    position: relative; flex: 0 0 auto; width: 54px; height: 54px;
+    border-radius: 8px; overflow: hidden; border: 1px solid var(--line);
+  }
+
+  .iconbtn:hover { background: var(--panel2); color: var(--text); }
+  .modal {
+    position: fixed; inset: 0; background: rgba(0,0,0,.5);
+    display: grid; place-items: center; z-index: 100; padding: 20px;
+  }
+
+  .sheet {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    width: min(720px, 100%); max-height: 86vh; display: flex;
+    flex-direction: column; overflow: hidden;
+  }
+
+  .sheet header {
+    display: flex; align-items: center; gap: 12px; padding: 14px 18px;
+    border-bottom: 1px solid var(--line);
+  }
+
+
+  /* ---------- 右键菜单 ---------- */
+  /* 这是应用窗口（浏览器 --app 模式），不是网页。默认菜单里的"重新加载"
+     "检查""另存为"对用户没有意义，还会让人以为这是个网页。只给必要的。 */
+  .ctxmenu {
+    position: fixed; z-index: 200; min-width: 150px; padding: 4px;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  }
+
+  .ctxmenu button {
+    display: block; width: 100%; text-align: left; background: none; border: 0;
+    color: var(--text); padding: 7px 12px; border-radius: 6px; cursor: pointer;
+    font: inherit; font-size: 13px;
+  }
+
+  .ctxmenu button:hover { background: var(--panel2); }
+  .ctxmenu button:disabled { color: var(--dim); cursor: default; }
+  .ctxmenu button:disabled:hover { background: none; }
+  .ctxmenu .sep { height: 1px; background: var(--line); margin: 4px 6px; }
+  .toast {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: var(--err); color: #fff; padding: 8px 16px; border-radius: 8px;
+    font-size: 13px; z-index: 50;
+  }

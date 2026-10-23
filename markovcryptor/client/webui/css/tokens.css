@@ -1,0 +1,40 @@
+/* 设计令牌：颜色变量 + 浅色主题覆盖。
+
+改配色只改这一个文件。
+
+   拆自原来的内联 <style>，纯搬移。*/
+
+  /* 单文件、零依赖、无构建：服务器发出去的就是你编辑的这一份。
+     不引框架——好友列表 + 两个窗格 + 图片队列，手写比引框架省事。 */
+  :root {
+    --bg: #16181d; --panel: #1e2128; --panel2: #242832; --line: #2c313a;
+    --text: #d8dde5; --dim: #8b95a5; --accent: #5aa9e6; --ok: #57b87a;
+    --warn: #d9a441; --err: #d95f5f; --dot: #e05353;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f6f8; --panel: #fff; --panel2: #eef1f5; --line: #d9dde4;
+      --text: #232830; --dim: #66707f; --accent: #1b6fb8;
+    }
+
+  * { box-sizing: border-box; }
+
+  /* ---------- 滚动条 ----------
+     默认的 Windows 滚动条在深色界面里是一块浅灰的方条，非常扎眼，而且会
+     占掉 17px 宽度 —— 侧栏本来就窄，一出现滚动条整列会跟着跳。
+
+     这里统一成细滚动条，并且**轨道透明**：滚动条出现时视觉上只是多了一条
+     细线，布局不会明显跳动。
+
+     Chromium（--app 模式走的就是它）用 ::-webkit-scrollbar，Firefox 用
+     scrollbar-width/scrollbar-color。两套都写，因为浏览器探测允许降级到
+     Firefox 普通窗口。 */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+  }
+
+  @media (prefers-color-scheme: light) {
+    .msg.mine .bubble { background: #d6e8f7; border-color: #b9d5ec; }
+  }
