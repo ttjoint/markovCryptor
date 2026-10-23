@@ -5,10 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- 标题留空：--app 模式会把 title 画在窗口左上角，那里已经有我们自己的
      身份栏了，再显示一遍就是多出来的一条横栏。 -->
-  <!-- 标题用零宽空格而不是空串：`--app` 模式把 title 画在窗口左上角，
-       空串时 Chromium 会退回显示 URL（"127.0.0.1:8741"），一样难看。
-       零宽字符既占住位置又不显示任何东西。 -->
-  <title>&#8203;</title>
+  <!-- 登录成功后由 JS 改成 "KC - 昵称（QQ号）"。
+       先给一个占位，避免首帧闪出 URL。 -->
+  <title>KC</title>
 <style>
   /* 单文件、零依赖、无构建：服务器发出去的就是你编辑的这一份。
      不引框架——好友列表 + 两个窗格 + 图片队列，手写比引框架省事。 */
@@ -94,16 +93,13 @@
   }
   .idbar .uin { font-size: 11px; color: var(--dim); }
   .winbtns { display: flex; gap: 2px; -webkit-app-region: no-drag; }
-  /* 窗口按钮做成"系统按钮"的样子：方形、贴边、hover 才有底色。
-     去掉了系统标题栏，这三个就是唯一的窗口控制，得让人一眼认出来。 */
+  /* 只剩设置一个按钮了，放大到能一眼看见、也好点。 */
   .winbtns .iconbtn {
-    width: 32px; height: 28px; border-radius: 6px;
+    width: 40px; height: 34px; border-radius: 8px;
     display: grid; place-items: center;
-    font-size: 14px; line-height: 1; padding: 0;
+    font-size: 20px; line-height: 1; padding: 0;
   }
-  .winbtns .iconbtn:hover { background: var(--panel2); }
-  #btnQuit:hover { background: var(--err); color: #fff; }
-  #btnMin { font-size: 16px; font-weight: 600; }
+  .winbtns .iconbtn:hover { background: var(--panel2); color: var(--accent); }
 
   /* 在线状态点：绿=在线，灰=未知/离线。 */
   .dot {
@@ -550,8 +546,6 @@
     </div>
     <div class="winbtns">
       <button class="iconbtn" id="btnSettings" title="设置" aria-label="设置">⚙</button>
-      <button class="iconbtn" id="btnMin" title="最小化" aria-label="最小化" hidden>—</button>
-      <button class="iconbtn" id="btnQuit" title="退出" aria-label="退出">⏻</button>
     </div>
   </header>
 
@@ -1088,9 +1082,12 @@ function applyState(data) {
   // 原来写的是"本机"两个字 —— 那是在描述一个位置，不是在说"我是谁"。
   const self = data.self || {};
   const selfName = self.name || self.nickname || data.uin || "";
-  // 只有真的接管到原生窗口（Chromium --app）才有最小化可言；
-  // Firefox 标签页里既没有自己的窗体头，最小化也没意义。
-  $("btnMin").hidden = !data.native_window;
+  // 窗口标题 = "KC - 昵称（QQ号）"。
+  // --app 模式把 title 画在窗口左上角，这是唯一显示账号信息的地方。
+  // 还没登录完成时只有 "KC"，不要显示"KC - undefined（null）"。
+  document.title = data.uin
+    ? `KC - ${selfName}（${data.uin}）`
+    : "KC";
 
   $("meName").textContent = selfName || "正在登录…";
   $("meUin").textContent = data.uin ? ("QQ " + data.uin) : "";
@@ -1531,16 +1528,6 @@ function updateOnboard(data) {
 
 // ================================================================= 事件绑定
 
-$("btnQuit").onclick = quitApp;
-$("btnMin").onclick = minimizeWindow;
-
-async function minimizeWindow() {
-  try {
-    await api("/client/window/minimize", { method: "POST" });
-  } catch (e) {
-    // 最小化失败不该弹报错：用户最多是点了没反应，报错反而更吓人。
-  }
-}
 $("btnSettings").onclick = () => openSheet("general");
 $("btnCloseSheet").onclick = closeSheet;
 $("btnCancelSheet").onclick = closeSheet;
