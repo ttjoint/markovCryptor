@@ -23,8 +23,36 @@ function setText(id, text, busy = false, hidden = false) {
  *                        inbound_pending, inbound_dropped}
  * @param {object} data 完整的 /client/state，用于模型名等附注
  */
+//: 轮转模式的短标签。用户看不出 random 和 sequential 的区别，
+//: 但"下一张是什么"完全取决于它。
+const PICK_LABEL = {
+  random: "随机",
+  sequential: "顺序",
+};
+
 export function render(stats, data) {
   if (!stats) return;
+
+  // 图库：文件夹里能用几张、队列里装了几张、这次会话已发几张。
+  // 放在最左，因为它是"我有没有素材"的第一手信息。
+  const q = data && data.queue;
+  if (q) {
+    const pick = PICK_LABEL[q.pick] || q.pick || "?";
+    setText("sbLibrary",
+            `图库 ${q.total || 0} 张 · 队列 ${q.queued || 0}/${q.max || 0}`
+            + ` · ${pick} · 已发 ${q.sent || 0}`,
+            (q.sent || 0) > 0);
+    const el = $("sbLibrary");
+    if (el) {
+      const names = (q.folder_names || []).join("、");
+      el.title = names
+        ? `文件夹：${names}
+可用图片 ${q.total || 0} 张，队列已装 ${q.queued || 0}/${q.max || 0}`
+          + `，模式：${pick}
+本次运行已发送 ${q.sent || 0} 张`
+        : "尚未指定图片文件夹";
+    }
+  }
 
   const handshakes = stats.handshakes || 0;
   setText("sbHandshake", handshakes ? `握手 ${handshakes}` : "握手 0",

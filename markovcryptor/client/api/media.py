@@ -31,7 +31,11 @@ def queue_state(account: Account = Depends(get_account)) -> JSONResponse:
 
     The user needs to see *which* pictures are queued, not just how many:
     "8/8" tells them nothing about whether the right photo is next.
+
+    顺手同步磁盘（用户删了/加了图，界面要跟着变）。同步带 mtime 快检，
+    文件夹没动时几乎零成本，所以放在这里不必担心轮询开销。
     """
+    account.queue.sync_with_disk()
     return JSONResponse({"ok": True, **account.queue.stats(),
                          "items": media_service.queue_items(account)})
 

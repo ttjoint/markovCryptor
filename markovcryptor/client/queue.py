@@ -152,6 +152,13 @@ class PictureQueue:
     #: are still fresh pictures. In memory only, by design.
     _used: set[str] = field(default_factory=set)
     _rng: random.Random = field(default_factory=random.Random)
+    #: 上一次扫描时文件夹的 (mtime, 文件数)。用来快速判断"要不要重新扫"，
+    #: 避免每 2.5 秒轮询都去 scandir 一遍几十张图。
+    _folder_stamp: tuple | None = None
+    #: 累计发送过的图片数。用户在状态栏看"运行中已发 N 张"。
+    sent_total: int = 0
+    #: 图库里能用的图片总数（每次扫描更新）。
+    total_candidates: int = 0
     #: Guards ``items``/``_used``. Two threads draw from this queue: the HTTP
     #: handler (user pressed "send") and the OneBot reader thread (auto-replying
     #: to a handshake with a cover). Without it, ``take()`` on a one-item queue
@@ -192,6 +199,11 @@ class PictureQueue:
         with self._lock:
             return self.items[0] if self.items else None
 
+    def note_sent(self, count: int = 1) -> None:
+        """记一笔已发送。状态栏显示累计量，让用户知道这次会话发过多少图。"""
+        with self._lock:
+            self.sent_total += max(0, int(count))
+
     # ------------------------------------------------------------------ filling
 
     def insert_front(self, raw: bytes, *, name: str = "") -> QueuedImage | None:
@@ -226,19 +238,88 @@ class PictureQueue:
         event("queue", "inserted", source=name, size=size, capacity=capacity)
         return entry
 
-    def _next_candidate(self, candidates: list[Path]) -> Path | None:
-        """Pick the next unseen picture by the configured strategy."""
+    def _folders_stamp(self) -> tuple:
+        """(mtime, 文件数) 的快速指纹。
+
+        比 scandir 全量便宜得多：用户几小时不动文件夹时，这里几乎零成本。
+        删文件、加文件都会改文件夹 mtime，所以这个信号够用。
+
+        注意 mtime 精度：某些文件系统只到秒，两次操作落在同一秒可能漏检。
+        所以还带上文件数做补充 —— 增删都会改变文件数。
+        """
+        stamp = []
+        for folder in self.folders:
+            try:
+                st = folder.stat()
+                count = sum(1 for _ in folder.iterdir())
+                stamp.append((str(folder), st.st_mtime, count))
+            except OSError:
+                stamp.append((str(folder), 0.0, -1))
+        return tuple(stamp)
+
+    def sync_with_disk(self) -> dict:
+        """让队列跟着磁盘走：删掉的图移出队列，新图补进来。
+
+        没有这个，用户删了文件夹里的图、界面上还在，点了发送却失败；
+        而在别处存了新图、界面又看不见，只能手点「补图」。
+
+        返回 ``{"added", "removed", "changed"}``；``changed`` 为 False 时
+        调用方可以跳过刷新界面。
+        """
+        with self._lock:
+            stamp = self._folders_stamp()
+            if stamp == self._folder_stamp:
+                return {"added": 0, "removed": 0, "changed": False}
+            self._folder_stamp = stamp
+
+            candidates = _list_candidates(self.folders)
+            self.total_candidates = len(candidates)
+            live = {str(p) for p in candidates}
+
+            # 1) 移除已经不存在的**图库**图片。临时图（upload）没有磁盘对应，
+            #    必须留着 —— 用户刚拖进来的图不该因为文件夹没变就被清掉。
+            before = len(self.items)
+            self.items = [
+                item for item in self.items
+                if getattr(item, "origin", "folder") != "folder"
+                or str(item.path) in live
+            ]
+            removed = before - len(self.items)
+            if removed:
+                event("queue", "sync_removed", count=removed)
+
+            # 2) 记账也要清：已删除的文件不该继续占着"已用过"，
+            #    否则图库看起来"全用过了"，随机模式会立刻重置一轮。
+            self._used &= live
+
+            # 3) 补新图。
+            added = self._replenish_locked()
+
+            return {"added": added, "removed": removed,
+                    "changed": bool(added or removed)}
+
+    def _next_candidate(self, candidates: list[Path],
+                        skip: set[str] | None = None) -> Path | None:
+        """Pick the next picture by the configured strategy.
+
+        ``skip`` 是队列里已经装着的文件 —— 它们不能再被选一次，否则同一张
+        图会在队列里出现两遍。
+        """
+        skip = skip or set()
+        fresh = [p for p in candidates if str(p) not in skip]
+        if not fresh:
+            return None
         if self.pick == "sequential":
-            for path in candidates:
+            for path in fresh:
                 if str(path) not in self._used:
                     return path
-            # All seen: start over, rather than stall forever.
+            # 全用过了：从头再来（复用是设计好的行为，不是兜底）。
             self._used.clear()
-            return candidates[0] if candidates else None
-        unseen = [p for p in candidates if str(p) not in self._used]
+            return fresh[0]
+        unseen = [p for p in fresh if str(p) not in self._used]
         if not unseen:
             self._used.clear()
-            unseen = list(candidates)
+            unseen = list(fresh)
         return self._rng.choice(unseen) if unseen else None
 
     def replenish(self) -> int:
@@ -256,19 +337,26 @@ class PictureQueue:
         if len(self.items) >= self.max_items:
             return 0
         candidates = _list_candidates(self.folders)
+        self.total_candidates = len(candidates)
         if not candidates:
             event("queue", "no_candidates", level=logging.DEBUG,
                   folders=[str(f) for f in self.folders])
             return 0
 
         added = 0
+        # 队列里已经有的图库图片。补图时必须跳过它们，否则同一张图会被
+        # 重复装进队列（用户会看到两个一样的缩略图，发出去也重复）。
+        held = {str(item.path) for item in self.items
+                if getattr(item, "origin", "folder") == "folder"}
         # 上限是候选数，避免"所有图都装不下"时无限循环。
         for _ in range(len(candidates)):
             if self.full:
                 break
-            path = self._next_candidate(candidates)
+            path = self._next_candidate(candidates, skip=held)
             if path is None:
                 break
+            # 加进 held：同一个文件在一次补图里只能进队列一次。
+            held.add(str(path))
             self._used.add(str(path))
             try:
                 raw = path.read_bytes()
@@ -303,6 +391,8 @@ class PictureQueue:
             # 判空与 pop 必须同一个临界区：中间放开锁时，另一个线程会把唯一
             # 那张取走，这里再 pop(0) 就是 IndexError。
             item = self.items.pop(0)
+            # 唯一的发送出口：在这里记数，状态栏才能显示"已发 N 张"。
+            self.sent_total += 1
             self._replenish_locked()
             return item
 
@@ -337,5 +427,15 @@ class PictureQueue:
     def stats(self) -> dict:
         with self._lock:
             queued = len(self.items)
-        return {"queued": queued, "max": self.max_items,
-                "folders": len(self.folders), "pick": self.pick}
+        with self._lock:
+            return {
+                "queued": len(self.items),
+                "max": self.max_items,
+                "folders": len(self.folders),
+                "folder_names": [Path(f).name or str(f) for f in self.folders],
+                "pick": self.pick,
+                # 图库里能用的图片总数 vs 队列里已装的数量 —— 用户要能看出
+                # "文件夹里还有 40 张没轮上"。
+                "total": self.total_candidates,
+                "sent": self.sent_total,
+            }

@@ -293,6 +293,50 @@ class ScriptTest(unittest.TestCase):
                     missing.append(f"{path.name}: {spec}")
         self.assertEqual(missing, [], f"import 指向不存在的文件: {missing}")
 
+    def test_exported_symbols_really_exist(self):
+        """``X.y(...)`` 里的 y 必须真的由模块 X 导出。
+
+        import 路径对、但符号名改了（比如 ``install`` → ``installDropper``）
+        时，浏览器**不报错**，只在运行时抛 ``TypeError: X.y is not a
+        function``。而那句往往在某个启动路径里，页面看着"打开就是空的"，
+        很难定位到是改名漏了一处。
+
+        这条实际抓到过 ``Dropper.install is not a function``。
+        """
+        # 1) 收集每个模块导出的名字
+        exports: dict[str, set[str]] = {}
+        for path, text in self.sources.items():
+            names = set()
+            names |= set(re.findall(r"export\s+(?:async\s+)?function\s+(\w+)", text))
+            names |= set(re.findall(r"export\s+const\s+(\w+)", text))
+            names |= set(re.findall(r"export\s+let\s+(\w+)", text))
+            names |= set(re.findall(r"export\s+class\s+(\w+)", text))
+            names |= set(re.findall(r"export\s*\{([^}]*)\}", text)
+                           and [] or [])
+            for group in re.findall(r"export\s*\{([^}]*)\}", text):
+                for part in group.split(","):
+                    name = part.split(" as ")[-1].strip()
+                    if name:
+                        names.add(name)
+            exports[path.stem] = names
+
+        # 2) 找出每段 module 脚本里 ``Namespace.symbol`` 的用法
+        used: dict[str, set[str]] = {}
+        pattern = re.compile(
+            r"import\s+\*\s+as\s+(\w+)\s+from\s+[\"']([^\"']+)[\"']")
+        for alias, spec in pattern.findall(self.html):
+            stem = spec.rsplit("/", 1)[-1].removesuffix(".js")
+            used[alias] = set(
+                re.findall(r"\b" + alias + r"\.(\w+)\b", self.html))
+            if stem not in exports:
+                continue                      # 由 test_imports_resolve 管
+            missing = sorted(used[alias] - exports[stem])
+            self.assertEqual(
+                missing, [],
+                f"{alias}（{stem}.js）没有导出 {missing}；"
+                f"该模块导出的是 {sorted(exports[stem])}")
+
+
     def test_no_stray_dom_lookup_for_missing_ids(self):
         """每个 $("...") 里的 id 都必须在 HTML 里存在。
 
