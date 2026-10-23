@@ -25,6 +25,7 @@ from ..core.errors import StegoError
 from ..observability import event
 from . import config
 from .account import Account
+from . import tasks as tasks_mod
 from .services import history as history_service
 from .services import media as media_service
 from .services import picker as picker_service
@@ -49,6 +50,9 @@ def create_client_app(account: Account, *, webui_dir=None,
     app.state.watchdog = watchdog
     app.state.on_quit = on_quit
     app.state.quit_requested = False
+    # 发送任务的调度器：按会话串行、全局池并发、支持取消。
+    # 复用 account 上的那个调度器：接收入闸必须和发送共用一个账本。
+    app.state.tasks = getattr(account, "tasks", None) or tasks_mod.TaskManager()
 
     # 每个资源一个路由器。顺序无关紧要（路径不重叠），
     # 但静态文件必须最后 mount，否则会遮住上面的 API。

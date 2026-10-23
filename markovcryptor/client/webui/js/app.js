@@ -13,6 +13,8 @@ import * as Overlays from "./views/overlays.js";
 import * as Composer from "./views/composer.js";
 import * as Covert from "./views/covert.js";
 import * as Settings from "./panels/settings.js";
+import * as SendQueue from "./views/sendqueue.js";
+import * as StatusBar from "./views/statusbar.js";
 
 // ---------------------------------------------------------------- 状态刷新
 
@@ -34,6 +36,10 @@ export function applyState(data) {
 
   // 身份栏（头像/昵称/QQ号/在线点）+ 窗口标题。
   Idbar.renderSelf(data);
+
+  // 底部状态栏：握手/文本排队/图片排队/接收积压。
+  // 和主状态同频刷新，不额外发请求。
+  StatusBar.render(data.tasks, data);
 
   const q = data.queue;
   $("queueStat").textContent = `队列 ${q.queued}/${q.max}`;
@@ -118,53 +124,59 @@ export async function refreshState() {
 // QQ 允许只发图片，所以文本为空但有附件时也要发。
 export async function sendPlain() {
   if (!S.current) return;
+  // 正在发送时按钮就是"取消"，这一点由 sendqueue 负责改写按钮文案。
+  if (SendQueue.busy()) {
+    await SendQueue.cancelCurrent();
+    return;
+  }
   const text = $("input").value;
   const images = Composer.ATTACH.items.map((item) => item.data);
   if (!text.trim() && !images.length) return;
 
-  try {
-    await api("/client/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        peer: S.current, mode: "text", text, images,
-      }),
-    });
-    Composer.clearInput("input");              // 清空后要收回去，否则留着一大块空白
-    Composer.ATTACH.items = [];
-    Composer.renderAttach();
-    const detail = await api(`/client/conversation/${S.current}`);
-    Chat.renderConversation(detail);
-    await refreshState();
-  } catch (e) {
-    toast(e.message);
-  }
+  // 先清空输入框：内容已经交给后台了。失败也不还原 —— 那样反而让人
+  // 以为"没发出去所以还能改"，而实际上任务可能已经在上传。
+  const peer = S.current;
+  Composer.clearInput("input");
+  Composer.ATTACH.items = [];
+  Composer.renderAttach();
+
+  await SendQueue.submit(
+    { peer, mode: "text", text, images },
+    {
+      onDone: async () => {
+        const detail = await api(`/client/conversation/${peer}`);
+        Chat.renderConversation(detail);
+        await refreshState();
+      },
+    },
+  );
 }
 
 // 密文发送：走当前选中的信道。
 export async function sendCovert() {
   if (!S.current) return;
+  if (SendQueue.busy()) {
+    await SendQueue.cancelCurrent();
+    return;
+  }
   const text = $("covertInput").value;
   if (!text.trim()) {
     toast("密文内容不能为空");
     return;
   }
-  try {
-    await api("/client/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        peer: S.current, mode: "covert", text,
-        channel: COVERT.channel,
-      }),
-    });
-    Composer.clearInput("covertInput");
-    const detail = await api(`/client/conversation/${S.current}`);
-    Chat.renderConversation(detail);
-    await refreshState();
-  } catch (e) {
-    toast(e.message);
-  }
+  const peer = S.current;
+  Composer.clearInput("covertInput");
+
+  await SendQueue.submit(
+    { peer, mode: "covert", text, channel: COVERT.channel },
+    {
+      onDone: async () => {
+        const detail = await api(`/client/conversation/${peer}`);
+        Chat.renderConversation(detail);
+        await refreshState();
+      },
+    },
+  );
 }
 
 export async function handshakeLegacy() {

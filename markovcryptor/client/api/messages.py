@@ -18,10 +18,41 @@ from ..account import Account
 from ..services import history as history_service
 from ..services import media as media_service
 from ..services import picker as picker_service
+from ..tasks import TaskManager
 from .common import data_url, entry_payload, http_error
 from .deps import get_account, get_watchdog, get_window_handle
 
 router = APIRouter()
+
+#: 一条 QQ 消息最多几张图。QQ 客户端通常允许 10 张，这里留一张余量 ——
+#: 宁可少发一张，也不要让整条消息被拒。
+IMAGE_LIMIT = 9
+
+#: 文本信道的单条上限（字符数）。
+#:
+#: 文本隐写会膨胀：实测 800 汉字 → 约 1540 字符（1.92×），短文本更高。
+#: QQ 单条文本有上限，超过会被截断或拒收，而截断会**直接毁掉密文**。
+#: 2000 字符给 800 汉字留了余量，又不至于顶到 QQ 的边界。
+TEXT_CHANNEL_LIMIT = 2000
+
+
+def _check_covert_length(text: str, channel: str) -> None:
+    """文本信道的长度闸门。
+
+    只对文本信道生效：图片信道的容量由「9 张图的实际块数」决定，跟字符数
+    没有直接关系（9 张 512 能装约 3700 汉字）。在这里用字符数卡图片信道
+    反而会误伤。
+    """
+    if channel != "text":
+        return
+    if len(text) > TEXT_CHANNEL_LIMIT:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"文本隐写最多 {TEXT_CHANNEL_LIMIT} 字符，"
+                    f"当前 {len(text)} 字符。"
+                    f"想发更长内容请改用图片信道（一条消息最多 {IMAGE_LIMIT} 张图）。"),
+        )
+
 
 
 @router.get("/client/state")
@@ -68,6 +99,8 @@ def state(request: Request, account: Account = Depends(get_account)) -> JSONResp
             }
             for conversation in account.conversations.ordered()
         ],
+        # 底部状态栏：队列/握手/收发的实时计数。
+        "tasks": request.app.state.tasks.stats(),
         # 两个标签页的总数，界面直接显示"最近 (12) / 好友 (29)"。
         "counts": {
             "conversations": len(account.conversations),
@@ -113,17 +146,29 @@ def close_conversation(peer: str, account: Account = Depends(get_account)) -> JS
 
 
 @router.post("/client/send")
-async def send(payload: dict, account: Account = Depends(get_account)) -> JSONResponse:
+async def send(payload: dict, request: Request,
+               account: Account = Depends(get_account)) -> JSONResponse:
     """Send plain text, pictures, or covert text, depending on the body.
 
     One endpoint with a ``mode`` rather than three endpoints, because the UI
     has one composer and the difference is a toggle, not a separate screen.
+
+    **校验同步做，编码丢后台**：
+
+    Markov 编码 0.6–0.75 秒、1600² 图嵌入 3.3 秒。以前这些都跑在事件循环里，
+    发一张大图就让所有轮询和其他好友的消息停摆。现在：
+
+    * 参数校验、长度检查立即返回（422 立刻能报，不用等 3 秒）
+    * 真正的编码/嵌图提交到 ``TaskManager``，按会话串行、全局池并发
+    * 前端拿 ``task_id`` 轮询进度，期间禁用这一条会话的发送按钮
+
+    同一会话已有在途任务时返回 409 —— 消息顺序不能靠猜。
     """
     peer = str(payload.get("peer") or "").strip()
     if not peer:
         raise HTTPException(status_code=422, detail="缺少对端 QQ 号")
     mode = str(payload.get("mode") or "text")
-    text = str(payload.get("text") or "")
+    text_body = str(payload.get("text") or "")
 
     # 校验先做，放到 try 外面：HTTPException 是 Exception 的子类，
     # 写在 try 里会被下面的兜底 except 抓走，422 变成 502。
@@ -136,44 +181,92 @@ async def send(payload: dict, account: Account = Depends(get_account)) -> JSONRe
     if images:
         if not isinstance(images, list):
             raise HTTPException(status_code=422, detail="images 必须是数组")
+        if len(images) > IMAGE_LIMIT:
+            raise HTTPException(
+                status_code=422,
+                detail=f"一条消息最多 {IMAGE_LIMIT} 张图片，你选了 {len(images)} 张")
         raw_images = tuple(media_service.decode_data_url(str(item)) for item in images)
     channel = str(payload.get("channel") or "image")
     if channel not in ("image", "text"):
         raise HTTPException(status_code=422, detail=f"未知信道：{channel}")
 
-    if mode == "text" and not text.strip() and not raw_images:
+    if mode == "text" and not text_body.strip() and not raw_images:
         raise HTTPException(status_code=422, detail="消息是空的")
+    if mode == "covert":
+        _check_covert_length(text_body, channel)
 
-    try:
-        if mode == "text":
-            if raw_images:
-                account.send_pictures(peer, raw_images, text=text or None)
-            else:
-                account.send_text(peer, text)
-        elif mode == "covert":
-            # 信道由界面上的开关决定，不在服务端猜。
-            if channel == "text":
-                account.send_covert_text(peer, text)
-            else:
-                account.send_covert(peer, text)
-        else:
+    manager: TaskManager = request.app.state.tasks
+    active = manager.active_for(peer)
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"这个会话正在发送（{active.note or active.state}），请稍候",
+        )
+
+    # 握手是轻量控制报文：不值得排进任务队列，直接做。
+    if mode == "handshake":
+        try:
             account.start_handshake(peer)
-    except HTTPException:
-        raise
-    except (StegoError, ValueError) as exc:
-        event("client", "send_rejected", level=logging.INFO,
-              peer=peer, mode=mode, error=exc)
-        raise http_error(exc) from None
-    except Exception as exc:                    # noqa: BLE001
-        event("client", "send_failed", level=logging.ERROR,
-              peer=peer, mode=mode, error=exc)
-        raise http_error(exc, fallback=502) from None
+        except (StegoError, ValueError) as exc:
+            event("client", "send_rejected", level=logging.INFO,
+                  peer=peer, mode=mode, error=exc)
+            raise http_error(exc) from None
+        conversation = account.conversations.ensure(peer)
+        return JSONResponse({
+            "ok": True,
+            "task_id": None,
+            "state_label": conversation.state_label,
+            "entries": [entry_payload(e) for e in conversation.snapshot()[-3:]],
+        })
 
-    conversation = account.conversations.ensure(peer)
+    def work(task) -> dict:
+        """在后台线程里跑。这里可以慢，但不能碰 HTTP 对象。
+
+        异常在这里**不能**直接抛给 FastAPI —— 已经离开请求上下文了。
+        所以把 ``StegoError.http_status`` 抄进 ``task.error_status``，
+        前端和测试才能分清「图太小(413)」「格式不支持(415)」「我们崩了(502)」。
+        """
+        if task.cancelled:
+            return {}
+        task.note = "正在编码…"
+        task.progress = 0.15
+        try:
+            if mode == "text":
+                if raw_images:
+                    account.send_pictures(peer, raw_images, text=text_body or None)
+                else:
+                    account.send_text(peer, text_body)
+            elif channel == "text":
+                account.send_covert_text(peer, text_body)
+            else:
+                account.send_covert(peer, text_body)
+        except (StegoError, ValueError) as exc:
+            task.error_status = http_error(exc).status_code
+            event("client", "send_rejected", level=logging.INFO,
+                  peer=peer, mode=mode, error=exc)
+            raise
+        if task.cancelled:
+            return {}
+        task.progress = 0.9
+        task.note = "正在发送…"
+        conversation = account.conversations.ensure(peer)
+        return {
+            "state_label": conversation.state_label,
+            "entries": [entry_payload(e) for e in conversation.snapshot()[-3:]],
+        }
+
+    # 文本信道走单线程串行队列（Markov 编解码不释放 GIL，多线程没意义）；
+    # 图片信道走线程池（numpy/PIL 会释放 GIL，真并发）。
+    kind = "text" if (mode == "covert" and channel == "text") else "image"
+    task = manager.submit(peer, kind, work)
+    if task is None:                            # 竞态：刚刚另一个请求抢到了
+        raise HTTPException(status_code=409, detail="这个会话正在发送，请稍候")
+
     return JSONResponse({
         "ok": True,
-        "state_label": conversation.state_label,
-        "entries": [entry_payload(e) for e in conversation.snapshot()[-3:]],
+        "task_id": task.id,
+        "peer": peer,
+        "state": task.state,
     })
 
 
@@ -200,3 +293,38 @@ def history(peer: str, count: int = 20, account: Account = Depends(get_account))
             for item in parsed
         ],
     })
+
+
+# --------------------------------------------------------------- 任务
+
+@router.get("/client/task/{task_id}")
+def task_state(task_id: str, request: Request) -> JSONResponse:
+    """轮询一个发送任务的进度。
+
+    没有 SSE 不是偷懒：轮询在这里更简单也更可靠（连接可能被浏览器掐掉，
+    而任务还在后台跑）。
+    """
+    manager: TaskManager = request.app.state.tasks
+    task = manager.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+    payload = task.as_dict()
+    # 顺带把整个队列的统计发回去，省一次请求。
+    payload["stats"] = manager.stats()
+    return JSONResponse(payload)
+
+
+@router.post("/client/task/{task_id}/cancel")
+def task_cancel(task_id: str, request: Request) -> JSONResponse:
+    """请求取消。
+
+    没有抢占式取消：Python 线程无法安全中断。任务会在下一个检查点停下。
+    已编码出来但还没发出去的图**归还队列**，不会白白消耗用户的图库。
+    """
+    manager: TaskManager = request.app.state.tasks
+    task = manager.cancel(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+    event("client", "send_cancelled", level=logging.INFO,
+          task=task_id, peer=task.peer)
+    return JSONResponse({"ok": True, "task": task.as_dict()})

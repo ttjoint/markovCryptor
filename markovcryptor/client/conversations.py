@@ -291,9 +291,13 @@ class Conversations:
     """
 
     def __init__(self, network, directory: Directory, *, psk: str = "pbx1",
-                 text_channel=None, cover_for=None) -> None:
+                 text_channel=None, cover_for=None, tasks=None) -> None:
         self.network = network
         self.directory = directory
+        #: 接收入闸的来源。解码一张 1600² 要 3.3 秒，而 deliver() 跑在读
+        #: 线程上 —— 对方连发十张大图就能把客户端堵死。闸门由 TaskManager
+        #: 提供：它知道当前积压多少，本类只负责问一句。
+        self.tasks = tasks
         self.psk = psk
         self.text_channel = text_channel
         #: ``cover_for(peer) -> bytes | None``. A handshake reply needs one of
@@ -368,6 +372,9 @@ class Conversations:
             terminal.take_cover = (lambda p=key: self._cover_for(p))
         terminal.attach(peer=key)
         terminal.subscribe(lambda inbound, p=key: self._on_inbound(p, inbound))
+        if self.tasks is not None:
+            terminal.admit = self.tasks.inbound_admit
+            terminal.release = self.tasks.inbound_done
 
         conversation = Conversation(key, terminal,
                                     name=self.directory.name_of(key))

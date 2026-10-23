@@ -26,7 +26,8 @@ body 是 `auto minmax(0, 1fr)` 两行：身份栏 + 工作区。这四行缺一�
        必须显式给高度，否则 1fr 会按内容撑（而不是按视口剩余），
        输入栏会被推出屏幕外。 */
     height: 100vh; display: grid;
-    grid-template-rows: minmax(0, 1fr);
+    /* 一行 + 底部状态栏。状态栏贯穿左右，因为它是整机状态。 */
+    grid-template-rows: minmax(0, 1fr) auto;
     font: 14px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
     background: var(--bg); color: var(--text); overflow: hidden;
     /* 让整个窗口可以拖动（Chromium --app 下没有标题栏） */

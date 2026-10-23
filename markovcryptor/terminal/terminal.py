@@ -132,6 +132,15 @@ class Terminal:
         self.peer_id: str | None = None
         #: Optional text carrier (Chinese channel). See :meth:`use_text_channel`.
         self.text_channel = None
+        #: 接收入闸：返回 False 就跳过这张图的解码。
+        #:
+        #: 解码一张 1600×1600 要 3.3 秒，而 deliver() 跑在读线程上 —— 那是
+        #: 维持握手和密文流动的那根线。对方连发十张大图就能把客户端堵死。
+        #: 这里不自己实现限流（terminal 层不该知道队列策略），而是让上层
+        #: 注入一个闸门，本层只负责"问了才解码"。
+        self.admit: Callable[[], bool] | None = None
+        #: 每处理完一张图调一次，用于归还闸门计数。
+        self.release: Callable[[], None] | None = None
         #: How to get a cover for an automatic handshake reply. Injected by the
         #: caller (the web layer takes it from that client's own picture queue).
         #: Returns ``None`` when this side has no usable picture -- then the
@@ -441,6 +450,11 @@ class Terminal:
         want = 0
 
         for index, raw in enumerate(raws):
+            # 闸门：积压太多就直接跳过这张（不解码、不显示），由上层提示用户。
+            if self.admit is not None and not self.admit():
+                event("terminal", "image_dropped", level=logging.WARNING,
+                      id=self.id, index=index + 1, reason="inbound backlog")
+                continue
             try:
                 result, display = self._inspect_image(raw)
             except Exception as exc:            # noqa: BLE001 - never surface carrier bugs
@@ -465,6 +479,8 @@ class Terminal:
                 else:
                     notes.append(
                         f"图片 {index + 1}：无法读取（文件可能已损坏）")
+                if self.release is not None:
+                    self.release()
                 continue
             if display is not None:
                 shown.append(display)
@@ -485,6 +501,9 @@ class Terminal:
                     notes.append(f"图片 {index + 1}：{result.note}")
             if result.handshake:
                 handshake = result.handshake
+            # 无论成败都归还闸门名额，否则一次解码异常就永久占掉一个槽位。
+            if self.release is not None:
+                self.release()
 
         if pieces:
             missing = [i for i in range(want) if i not in pieces]

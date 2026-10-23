@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -69,6 +70,60 @@ class _Base(unittest.TestCase):
 
     def post(self, path, json=None):
         return _run(self.client.post(path, json=json))
+
+    def send(self, payload, *, timeout=10.0):
+        """发一条消息并等它真正结束。
+
+        发送改成后台任务后，``/client/send`` 只返回 task_id —— 真正出错
+        （比如"会话未建立"）发生在任务里。这个辅助把"提交 + 等结果"包成
+        一次调用，测试写起来和以前一样。
+
+        任务失败时返回一个**伪造的 response 对象**，带 ``status_code`` 和
+        能读 ``detail`` 的 ``json()``，这样原有断言（409 / 502 / 文案）
+        不用重写。
+        """
+        resp = self.post("/client/send", json=payload)
+        if resp.status_code != 200:
+            return resp
+        body = resp.json()
+        task_id = body.get("task_id")
+        if not task_id:
+            return resp                          # 握手：同步完成
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            task = _run(self.client.get(f"/client/task/{task_id}")).json()
+            if task["state"] in ("done", "failed", "cancelled"):
+                return _TaskResponse(task)
+            time.sleep(0.01)
+        raise AssertionError(f"发送任务 {task_id} 超时未结束")
+
+    def send_and_pump(self, payload, *, timeout=10.0):
+        """发消息 + 推进虚拟网络。很多用例需要两边都跑一遍。"""
+        result = self.send(payload, timeout=timeout)
+        self.hub.pump()
+        return result
+
+
+class _TaskResponse:
+    """把任务终态伪装成 HTTP 响应，让旧断言能继续用。"""
+
+    def __init__(self, task: dict) -> None:
+        self.task = task
+        if task["state"] == "done":
+            self.status_code = 200
+        else:
+            # 后台任务把 StegoError.http_status 抄进了 error_status，
+            # 所以 413/415/409 这些区分能保留下来。
+            # error_status 为 0 表示 work 没认领这个异常（非 StegoError
+            # / ValueError）—— 那是我们自己的 bug，必须保持 502。
+            self.status_code = task.get("error_status") or 502
+        self.text = str(task)
+
+    def json(self) -> dict:
+        if self.task["state"] == "done":
+            return {"ok": True, **self.task.get("result", {})}
+        return {"ok": False, "detail": self.task.get("error") or self.task.get("note")}
 
 
 class StateTest(_Base):
@@ -141,21 +196,21 @@ class ConversationTest(_Base):
 
 class SendTest(_Base):
     def test_plain_text_send_is_accepted(self):
-        r = self.post("/client/send", json={"peer": BOB, "text": "你好", "mode": "text"})
+        r = self.send({"peer": BOB, "text": "你好", "mode": "text"})
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["ok"])
 
     def test_empty_peer_is_rejected(self):
-        r = self.post("/client/send", json={"text": "hi", "mode": "text"})
+        r = self.send({"text": "hi", "mode": "text"})
         self.assertEqual(r.status_code, 422)
 
     def test_unknown_mode_is_rejected(self):
-        r = self.post("/client/send", json={"peer": BOB, "mode": "teleport"})
+        r = self.send({"peer": BOB, "mode": "teleport"})
         self.assertEqual(r.status_code, 422)
 
     def test_covert_without_session_is_409_not_500(self):
         """没握手就发密文是用户的错，要能读懂，不能报服务器故障。"""
-        r = self.post("/client/send", json={"peer": BOB, "text": "秘密",
+        r = self.send({"peer": BOB, "text": "秘密",
                                             "mode": "covert"})
         self.assertEqual(r.status_code, 409)
         # 文案是"会话未建立，不能发送密文"。断言关键词而非整句，
@@ -165,7 +220,7 @@ class SendTest(_Base):
     def test_handshake_with_empty_queue_is_409_with_a_usable_message(self):
         self.account.queue.clear()
         self.account.queue.folders = []
-        r = self.post("/client/send", json={"peer": BOB, "mode": "handshake"})
+        r = self.send({"peer": BOB, "mode": "handshake"})
         self.assertEqual(r.status_code, 409)
         self.assertIn("图片", r.json()["detail"])
 
@@ -183,7 +238,7 @@ class SendTest(_Base):
         bob = Account(bob_net, queue=PictureQueue(
             folders=[bob_dir], max_items=2)).start()
 
-        r = self.post("/client/send", json={"peer": BOB, "mode": "handshake"})
+        r = self.send({"peer": BOB, "mode": "handshake"})
         self.assertEqual(r.status_code, 200)
         self.hub.pump()
 
@@ -191,7 +246,7 @@ class SendTest(_Base):
         self.assertIsNotNone(bob_conv)
         self.assertTrue(bob_conv.established, "对端应自动回包")
 
-        r = self.post("/client/send", json={"peer": BOB, "text": "藏着的话",
+        r = self.send({"peer": BOB, "text": "藏着的话",
                                             "mode": "covert"})
         self.assertEqual(r.status_code, 200, r.text)
         self.hub.pump()
@@ -280,7 +335,7 @@ class ErrorMappingTest(_Base):
 
         with mock.patch.object(self.account, "send_covert",
                                side_effect=CapacityExceeded("图太小")):
-            r = self.post("/client/send", json={"peer": BOB, "text": "x",
+            r = self.send({"peer": BOB, "text": "x",
                                                 "mode": "covert"})
         self.assertEqual(r.status_code, 413)
 
@@ -289,7 +344,7 @@ class ErrorMappingTest(_Base):
 
         with mock.patch.object(self.account, "send_covert",
                                side_effect=UnsupportedCarrier("格式不支持")):
-            r = self.post("/client/send", json={"peer": BOB, "text": "x",
+            r = self.send({"peer": BOB, "text": "x",
                                                 "mode": "covert"})
         self.assertEqual(r.status_code, 415)
 
@@ -299,7 +354,7 @@ class ErrorMappingTest(_Base):
 
         exc = CapacityExceeded("图太小", hints=("换一张更大的图片",))
         with mock.patch.object(self.account, "send_covert", side_effect=exc):
-            r = self.post("/client/send", json={"peer": BOB, "text": "x",
+            r = self.send({"peer": BOB, "text": "x",
                                                 "mode": "covert"})
         self.assertIn("换一张更大的图片", r.json()["detail"])
 
@@ -307,7 +362,7 @@ class ErrorMappingTest(_Base):
         """真故障不能被伪装成 4xx，否则会盖住 bug。"""
         with mock.patch.object(self.account, "send_text",
                                side_effect=RuntimeError("网络炸了")):
-            r = self.post("/client/send", json={"peer": BOB, "text": "x",
+            r = self.send({"peer": BOB, "text": "x",
                                                 "mode": "text"})
         self.assertEqual(r.status_code, 502)
 
@@ -457,11 +512,11 @@ class ModelsWithLibraryTest(_Base):
         bob = Account(bob_net, queue=PictureQueue(folders=[bob_dir], max_items=2),
                       models=self.models).start()
 
-        self.post("/client/send", json={"peer": BOB, "mode": "handshake"})
+        self.send({"peer": BOB, "mode": "handshake"})
         self.hub.pump()
         self.assertTrue(bob.conversations.get(ALICE).established)
 
-        r = self.post("/client/send", json={"peer": BOB, "text": "藏起来的句子",
+        r = self.send({"peer": BOB, "text": "藏起来的句子",
                                             "mode": "covert"})
         self.assertEqual(r.status_code, 200, r.text)
         self.hub.pump()

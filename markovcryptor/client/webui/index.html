@@ -153,6 +153,20 @@
     </div>
   </main>
 
+  <!-- ───── 3. 状态栏：贯穿底部，实时显示队列与握手 ---------
+       放这里而不是左侧栏：它是整机状态，不属于某一条会话。 -->
+  <footer class="statusbar" id="statusbar">
+    <span class="sb-item" id="sbHandshake" title="正在进行的握手数">握手 0</span>
+    <span class="sb-sep"></span>
+    <span class="sb-item" id="sbText" title="文本信道：排队 / 进行中">文本 0</span>
+    <span class="sb-sep"></span>
+    <span class="sb-item" id="sbImage" title="图片信道：排队 / 进行中">图片 0</span>
+    <span class="sb-sep"></span>
+    <span class="sb-item" id="sbInbound" title="接收队列积压">收 0</span>
+    <span class="sb-grow"></span>
+    <span class="sb-item warn" id="sbDropped" hidden></span>
+    <span class="sb-item dim" id="sbModel"></span>
+  </footer>
 
   <!-- ══════════════════════════════════════════════════════════════
        结构模板。JS 用 cloneNode 填充，而不是一个 div 一个 div 地

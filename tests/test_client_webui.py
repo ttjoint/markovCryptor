@@ -143,8 +143,8 @@ class StructureTest(unittest.TestCase):
         kinds = [f"<{self._tag(k)}"
                  f"{'#' + self.tree.attrs_of[k]['id'] if self.tree.attrs_of[k].get('id') else ''}>"
                  for k in kids]
-        self.assertEqual(len(kids), 2,
-                         f"body 应当只有 2 个布局元素，实际 {len(kids)}: {kinds}")
+        self.assertEqual(len(kids), 3,
+                         f"body 应当只有 3 个布局元素，实际 {len(kids)}: {kinds}")
 
     def test_idbar_lives_inside_aside(self):
         """身份栏必须放在左栏里，与列表同宽。

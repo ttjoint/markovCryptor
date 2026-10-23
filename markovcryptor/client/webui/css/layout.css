@@ -207,3 +207,37 @@ flex/grid 项的默认 min-height:auto 会让内容撑破父级。
     display: flex; gap: 10px; justify-content: flex-end; padding: 12px 18px;
     border-top: 1px solid var(--line);
   }
+
+  /* ---------- 底部状态栏 ----------
+     常驻显示而不是弹 toast：用户需要**持续**看到"对方还在发"或"我的图
+     还在编码"，而不是错过一个两秒就消失的提示。 */
+  .statusbar {
+    grid-column: 1 / -1;
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 10px;
+    background: var(--panel); border-top: 1px solid var(--line);
+    font-size: 11px; color: var(--dim);
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+  }
+
+  .sb-item { white-space: nowrap; }
+  .sb-item.busy { color: var(--accent); }
+  .sb-item.warn { color: var(--warn); }
+  .sb-item.dim { color: var(--dim); opacity: .75; }
+  .sb-sep { width: 1px; height: 10px; background: var(--line); }
+  .sb-grow { flex: 1 1 auto; }
+
+  /* 发送中的转圈。用 SVG 里已有的齿轮不合适 —— 那是设置。 */
+  .spin {
+    width: 14px; height: 14px; flex: 0 0 auto;
+    border: 2px solid currentColor; border-right-color: transparent;
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    .spin { animation-duration: 2s; }
+  }
+
+  .send.cancel { color: var(--err); }

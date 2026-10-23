@@ -67,7 +67,8 @@ class Account:
     def __init__(self, network, *, psk: str = "pbx1", text_channel=None,
                  queue: PictureQueue | None = None,
                  models: ModelLibrary | None = None,
-                 images: ImageCache | None = None) -> None:
+                 images: ImageCache | None = None,
+                 tasks=None) -> None:
         #: A started :class:`~markovcryptor.terminal.onebot.OneBotNetwork`.
         self.network = network
         self.directory = Directory()
@@ -81,10 +82,15 @@ class Account:
         self.images = images if images is not None else ImageCache()
         if text_channel is None and models is not None:
             text_channel = MultiModelTextChannel(models)
+        #: 发送/接收任务的调度器。放在 Account 上（而不是 app 层），因为
+        #: 接收入闸必须由 terminal 在读线程里问 —— 那条线不经 HTTP。
+        from .tasks import TaskManager
+        self.tasks = tasks if tasks is not None else TaskManager()
         self.conversations = Conversations(
             network, self.directory,
             psk=psk, text_channel=text_channel,
             cover_for=self._cover_for,
+            tasks=self.tasks,
         )
         self._ready = False
         #: True/False when the bridge told us, None when it does not support
