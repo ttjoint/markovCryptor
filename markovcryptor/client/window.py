@@ -125,11 +125,22 @@ def find_window_for_pid(pid: int, *, timeout: float = 12.0) -> int | None:
         # Chromium 同时有 Chrome_WidgetWin_0（隐藏的辅助窗口）和
         # Chrome_WidgetWin_1（真正的顶层窗口）。按类名挑，否则可能改到一个
         # 谁也看不见的窗口，然后以为成功了。
+        #
+        # 用前缀而不是精确匹配：Edge/Brave/Vivaldi 都是 Chromium 内核，窗口类
+        # 同样是 Chrome_WidgetWin_*，但未来某个版本可能带后缀（_2 之类）。
         name = _c.create_unicode_buffer(256)
         u.GetClassNameW(hwnd, name, 256)
-        if name.value == "Chrome_WidgetWin_1":
+        cls = name.value
+        if cls == "Chrome_WidgetWin_1" or cls.startswith("Chrome_WidgetWin_"):
+            # _0 是辅助窗口，跳过；其余接受。
+            if cls.endswith("_0"):
+                return True
             found.append(hwnd)
             return False                            # stop enumerating
+        # Edge 某些版本用这个类名
+        if cls.startswith("Edge"):
+            found.append(hwnd)
+            return False
         return True
 
     deadline = time.monotonic() + timeout

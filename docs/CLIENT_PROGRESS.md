@@ -1405,3 +1405,48 @@ Chromium 同时有 `Chrome_WidgetWin_0`（隐藏辅助窗口）和 `Chrome_Widge
 - 启动日志：「已隐藏系统标题栏」
 - 窗口：位置 (-7,-7)、尺寸 2574×1406、`IsZoomed=True`
 - 针对性回归 109 passed
+
+---
+
+## 顶部横栏排查结论（2026-10-23）
+
+用户连续报"左上角还有 markovCryptor 客户端的横栏"。查下来是**我自己的
+排查方法有盲区**，教训比结论值钱。
+
+### 我错在哪
+
+我一直用 `GetWindowLong(GWL_STYLE)` 判断"有没有标题栏"，看到
+`CAPTION=False / POPUP=True / IsZoomed=True` 就说"已经好了"，
+**并用这个结论去否定用户亲眼看到的截图**。
+
+实际上用户看到的横栏有两种可能，我只查了第一种：
+
+| 来源 | 特征 | 能否用 ctypes 去除 |
+| --- | --- | --- |
+| Windows 非客户区标题栏 | `WS_CAPTION` 置位 | 能 |
+| Chromium 在客户区里画的窗口装饰 | 样式查不到 | 不能 |
+
+第二种根本不是窗口样式问题，查 `GetWindowLong` 永远查不出来。
+
+### 真正的结论（已验证）
+
+- **`--app` + ctypes 去边框 + 最大化** 是可用组合：实测窗口
+  `(-7,-7) / 2574x1406 / IsZoomed=True / POPUP=True / CAPTION=False`，
+  顶栏消失
+- **`--kiosk` 不可用**：确实不画任何装饰，但独占全屏、吃掉 Esc，而且实测
+  在已有 Chrome 实例时直接退出、连窗口都不开
+- `--disable-features=WebAppWindowControlsOverlay` **无效**，不能去顶栏
+
+### 误删函数的事故
+
+清理常量时用 `s[start:end]` 删除区间，把 `_is_chromium` /
+`find_default_browser` / `_read_default_browser` 一起删掉了。测试立刻抓到
+（`NameError: name '_is_chromium' is not defined`），从 git 恢复。
+
+**教训：改单个常量不要用"从 X 到 Y 整段替换"**，区间端点很容易跨过别的
+函数。用精确的 old/new 文本替换。
+
+### 流程教训
+
+用户给了截图说"还有"，我不该用"我查的样式是对的"去反驳。
+**用户的观察是事实，我的检测方法才有可能是错的。**

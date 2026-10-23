@@ -3,7 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>markovCryptor 客户端</title>
+<!-- 标题留空：--app 模式会把 title 画在窗口左上角，那里已经有我们自己的
+     身份栏了，再显示一遍就是多出来的一条横栏。 -->
+  <!-- 标题用零宽空格而不是空串：`--app` 模式把 title 画在窗口左上角，
+       空串时 Chromium 会退回显示 URL（"127.0.0.1:8741"），一样难看。
+       零宽字符既占住位置又不显示任何东西。 -->
+  <title>&#8203;</title>
 <style>
   /* 单文件、零依赖、无构建：服务器发出去的就是你编辑的这一份。
      不引框架——好友列表 + 两个窗格 + 图片队列，手写比引框架省事。 */
