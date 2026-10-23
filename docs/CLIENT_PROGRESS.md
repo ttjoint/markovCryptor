@@ -2134,3 +2134,46 @@ TypeError: incompatible types, c_wchar_Array_260 instance
 - 失败要进日志，不能静默返回 None
 
 **全量 737 passed。**
+
+## 图片输入：拖入 / 点选 / 粘贴（第二批，2026-10-23）
+
+按之前确认的取舍实现：**插队首**（用户刚选的就是这次想用的）、
+**点 × 排除**（已有）、**砍掉**拖拽排序和手动重随机。
+
+### 后端
+
+- `PictureQueue.insert_front(raw, name=)` —— 图片插到队首，容量和尺寸当场算好；
+  垃圾数据拒绝不进队；**超出上限时挤掉队尾的图库图片**，而不是刚插进来的
+  这张（反过来的话用户拖三张、前两张立刻被第三张挤掉，像导入失败）
+- `QueuedImage.origin`：`"folder"` / `"upload"`。临时图不写磁盘（零持久化）、
+  **不参与轮转记账**（导入过一张不该让图库某张被跳过）
+- `POST /client/queue/import`：接受 data URL 数组，部分成功时好的留下、
+  坏的报告（不是全部丢弃）
+- `queue_items` 增加 `origin/size/capacity` 三个字段
+
+### 前端
+
+- `views/dropper.js`：三条入口统一走 `/client/queue/import`
+  - **拖放**：dragenter/leave 计数控制提示层（避免子元素触发闪烁）；
+    `dragover` 必须 preventDefault 否则浏览器直接打开文件
+  - **粘贴**：绑在 `document` 上，输入框里 Ctrl+V 截图也接得住
+  - **点选**：「添加」按钮 + 隐藏的 `<input type=file multiple>`
+- 队列缩略图加两个徽标：
+  - **容量**（左下）：「560字」「2503字」，太小的红底「太小」
+    —— 128×128 和 1600×1600 差几十倍，光看缩略图判断不出来
+  - **来源**（右下）：「新」= 用户拖入，蓝色角标
+
+### 测试
+
+`tests/test_client_queue_import.py` 9 项：插队首、带容量尺寸、垃圾拒绝、
+origin 标记、过小拒绝、**溢出先挤图库图**、全临时图也有上限、
+**导入不动轮转记账**、上限可配置。注入「插队尾」验证过能 FAIL。
+`test_client_app.py` 另加 5 项端点测试（含部分成功语义）。
+
+`test_no_redeclared_top_level_symbols` 又抓到两处重复定义
+（`setRefresh`/`install`），改名 `setImportedCallback`/`installDropper`。
+
+**实测**（Playwright 真实拖放事件）：拖入 1024×1024 图 → 队首出现
+「2503字 + 新」，原队首 560 字的图排第二。
+
+**全量 755 passed。**

@@ -253,6 +253,67 @@ class SendTest(_Base):
         self.assertTrue(self.account.conversations.get(BOB).established)
 
 
+class QueueImportTest(_Base):
+    """拖入/粘贴图片的 HTTP 层。
+
+    图片只留在内存（项目坚持零持久化），插到队首（"这次想用"的语义）。
+    """
+
+    def _data_url(self, size=(512, 512)) -> str:
+        import base64
+        import io
+
+        buffer = io.BytesIO()
+        Image.new("RGB", size, "white").save(buffer, "PNG")
+        encoded = base64.b64encode(buffer.getvalue()).decode()
+        return f"data:image/png;base64,{encoded}"
+
+    def test_import_puts_the_picture_at_the_head(self):
+        self.account.queue.clear()
+        self.account.queue.folders = []
+        r = self.post("/client/queue/import",
+                      json={"images": [self._data_url()], "name": "拖入.png"})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["added"], 1)
+        self.assertEqual(body["items"][0]["name"], "拖入.png")
+
+    def test_imported_item_reports_capacity_and_origin(self):
+        """界面要标出"这张能装 N 字"，所以端点必须带容量和尺寸。"""
+        self.account.queue.clear()
+        self.account.queue.folders = []
+        r = self.post("/client/queue/import", json={"images": [self._data_url()]})
+        item = r.json()["items"][0]
+        self.assertGreater(item["capacity"], 0)
+        self.assertEqual(item["size"], [512, 512])
+        self.assertEqual(item["origin"], "upload")
+
+    def test_garbage_is_rejected_with_a_readable_message(self):
+        self.account.queue.clear()
+        self.account.queue.folders = []
+        r = self.post("/client/queue/import",
+                      json={"images": ["data:image/png;base64,bm90YW5pbWFnZQ=="]})
+        self.assertEqual(r.status_code, 422)
+        self.assertTrue(r.json()["detail"], "要说清楚为什么不行")
+
+    def test_empty_list_is_rejected(self):
+        r = self.post("/client/queue/import", json={"images": []})
+        self.assertEqual(r.status_code, 422)
+
+    def test_partial_success_keeps_the_good_ones(self):
+        """一张坏一张好：好的要留下，坏的报告出来，而不是全部丢弃。"""
+        self.account.queue.clear()
+        self.account.queue.folders = []
+        r = self.post("/client/queue/import", json={"images": [
+            "data:image/png;base64,bm90YW5pbWFnZQ==",
+            self._data_url(),
+        ]})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["added"], 1)
+        self.assertEqual(len(body["rejected"]), 1)
+
+
 class QueueEndpointTest(_Base):
     def test_queue_endpoint_reports_state(self):
         body = self.get("/client/queue").json()

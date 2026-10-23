@@ -75,9 +75,15 @@ def queue_items(account: Account) -> list[dict]:
     """Pending pictures as ``{name, thumb}``, oldest first."""
     items = []
     for item in account.queue.preview():
+        size = getattr(item, "size", (0, 0))
         items.append({
             "name": Path(item.path).name if getattr(item, "path", None) else "",
             "thumb": thumbnail(item.raw),
+            # 来源与容量：界面要标出"这张是刚拖进来的"以及"能装 N 字"。
+            # 只有缩略图的话，用户没法判断哪张够用。
+            "origin": getattr(item, "origin", "folder"),
+            "size": [size[0], size[1]],
+            "capacity": getattr(item, "capacity", 0),
         })
     return items
 

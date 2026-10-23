@@ -55,6 +55,11 @@ class QueuedImage:
     #: Pixel size. 容量估算要按尺寸算每张能装多少 —— 用户看到的是
     #: "这张 512×512 能装 408 字"，而不是一个抽象字节数。
     size: tuple[int, int] = (0, 0)
+    #: 来源：``"folder"``（图库）或 ``"upload"``（用户拖入/粘贴的临时图）。
+    #:
+    #: 临时图只在内存里、退出即丢，也不参与轮转记账 —— 它们是"这次就要用
+    #: 的"，不该因为轮转策略又被跳过。
+    origin: str = "folder"
 
     @property
     def can_carry_handshake(self) -> bool:
@@ -188,6 +193,38 @@ class PictureQueue:
             return self.items[0] if self.items else None
 
     # ------------------------------------------------------------------ filling
+
+    def insert_front(self, raw: bytes, *, name: str = "") -> QueuedImage | None:
+        """Put a user-supplied picture at the head of the queue.
+
+        Returns the entry, or ``None`` when the bytes are not a usable picture.
+
+        **插到最前而不是队尾**：用户刚拖进来的图就是"这次想用的"。放到队尾
+        会让人选了半天的图排在第 20 位，实际上永远轮不到 —— 那比不允许
+        导入更让人困惑。
+
+        临时图**不写磁盘**（零持久化），也不加进 ``_used``：轮转记账是给
+        图库用的，不该因为导入过一张就让某张图库图片被跳过。
+        """
+        capacity, size = _measure(raw)
+        if capacity <= 0 or not size[0] or not size[1]:
+            event("queue", "insert_rejected", level=logging.INFO,
+                  source=name, reason="not a usable picture")
+            return None
+        entry = QueuedImage(path=Path(name or "上传的图片"), raw=raw,
+                            capacity=capacity, size=size, origin="upload")
+        with self._lock:
+            self.items.insert(0, entry)
+            # 超出上限时挤掉**队尾的图库图片**，而不是刚插进来的这张。
+            while len(self.items) > self.max_items:
+                for index in range(len(self.items) - 1, -1, -1):
+                    if self.items[index].origin == "folder":
+                        self.items.pop(index)
+                        break
+                else:
+                    self.items.pop()
+        event("queue", "inserted", source=name, size=size, capacity=capacity)
+        return entry
 
     def _next_candidate(self, candidates: list[Path]) -> Path | None:
         """Pick the next unseen picture by the configured strategy."""

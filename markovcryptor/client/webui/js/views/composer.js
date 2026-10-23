@@ -30,6 +30,21 @@ export function renderQueue(items) {
   (items || []).forEach((item, index) => {
     const box = clone("tpl-qthumb");       // 结构见 index.html 的 <template>
     if (!box) return;
+
+    // 容量徽标：一张 128×128 和一张 1600×1600 能装的字数差几十倍，
+    // 光看缩略图判断不出"够不够这条消息用"。
+    const cap = box.querySelector(".cap");
+    if (cap) {
+      const bytes = item.capacity || 0;
+      // 汉字按 UTF-8 3 字节估。留一点余量给握手帧。
+      const chars = Math.max(0, Math.floor((bytes - 38) / 3));
+      cap.textContent = chars > 0 ? `${chars}字` : "太小";
+      cap.classList.toggle("small", chars <= 0);
+      cap.title = `可承载约 ${chars} 个汉字（${bytes} 字节）`;
+    }
+    const up = box.querySelector(".up");
+    if (up && item.origin === "upload") up.hidden = false;
+
     const img = box.querySelector("img");
     if (item.thumb) {
       img.src = item.thumb;
