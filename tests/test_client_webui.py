@@ -124,6 +124,29 @@ class StructureTest(unittest.TestCase):
 
     # -- tests -----------------------------------------------------------
 
+    def test_css_braces_are_balanced(self):
+        """每个样式表的花括号必须配对（按去掉注释后的内容数）。
+
+        **实锤过的事故**：拆分 CSS 时 ``tokens.css`` 少写了一个 ``}``，
+        亮色主题的 ``@media`` 没闭合，把后面整段（box-sizing、滚动条样式）
+        全部吞进了亮色分支 —— 深色模式下完全看不出来（那正是日常用的），
+        亮色模式下这些规则全部静默失效。
+
+        数括号必须**先去掉注释**：注释文字里出现 ``{`` 或 ``}``（比如
+        写"这个规则会被 media 吞掉"）会把账目算错，让人修错地方。
+        """
+        import re
+
+        from webui_files import ui_stylesheets
+
+        broken = []
+        for name, text in ui_stylesheets().items():
+            clean = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+            diff = clean.count("{") - clean.count("}")
+            if diff != 0:
+                broken.append(f"{name}: 花括号差 {diff}")
+        self.assertEqual(broken, [], "CSS 括号不平衡：" + "；".join(broken))
+
     def test_tags_are_balanced(self):
         """少一个 </div> 会把后面整块 DOM 吞进去，CSS 就不再匹配。"""
         self.assertEqual(self.imbalance, [],
@@ -143,8 +166,8 @@ class StructureTest(unittest.TestCase):
         kinds = [f"<{self._tag(k)}"
                  f"{'#' + self.tree.attrs_of[k]['id'] if self.tree.attrs_of[k].get('id') else ''}>"
                  for k in kids]
-        self.assertEqual(len(kids), 3,
-                         f"body 应当只有 3 个布局元素，实际 {len(kids)}: {kinds}")
+        self.assertEqual(len(kids), 4,
+                         f"body 应当只有 4 个布局元素，实际 {len(kids)}: {kinds}")
 
     def test_idbar_lives_inside_aside(self):
         """身份栏必须放在左栏里，与列表同宽。
@@ -461,7 +484,10 @@ class UndefinedSymbolTest(unittest.TestCase):
     def _imported(self, text: str) -> set[str]:
         """import 进来的名字（含 `* as ns` 与解构）。"""
         names: set[str] = set()
-        for clause in re.findall(r"^import\s+(.+?)\s+from\s+", text, re.M):
+        # ``(?s)`` 让 ``.`` 跨行 —— 多行 import 否则整条被漏掉，
+        # 于是"用了却没 import"的检查在跨行写法上失效。
+        # 这不是假设：写多行 import 时这条检查报了个假阳性。
+        for clause in re.findall(r"(?s)^import\s+(.+?)\s+from\s+", text, re.M):
             clause = clause.strip()
             ns = re.match(r"\*\s+as\s+(\w+)", clause)
             if ns:

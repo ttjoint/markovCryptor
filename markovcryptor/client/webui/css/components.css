@@ -2,6 +2,15 @@
 
    拆自原来的内联 <style>，纯搬移。*/
 
+  /* 拆分时这条规则的选择器和开头被弄丢了，只剩一个孤立的 }。
+     症状：整份样式表括号差 -1，且 .winbtns 本身没有布局定义。 */
+  .winbtns { display: flex; gap: 2px; -webkit-app-region: no-drag; }
+
+  .winbtns .iconbtn {
+    width: 40px; height: 40px; border-radius: 10px;
+    display: grid; place-items: center;
+    padding: 0; color: var(--dim);
+    transition: background .12s, color .12s;
   }
 
   .winbtns .iconbtn:hover { background: var(--panel2); color: var(--accent); }

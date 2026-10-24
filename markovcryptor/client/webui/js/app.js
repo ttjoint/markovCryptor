@@ -28,6 +28,8 @@ let lastStateError = null;
 // 这样存活探测和内容刷新能复用同一段渲染逻辑，又不会重复请求。
 export function applyState(data) {
   if (lastStateError) lastStateError = null;
+  // 设置页的「运行信息」要读它（图库张数、发送统计等）。只读引用。
+  window.__kcState = data;
   S.uin = data.uin;
   S.ready = data.ready;
   S.conversations = data.conversations;
@@ -567,3 +569,32 @@ $("btnRekey").onclick = async () => {
     toast(e.message);
   }
 };
+
+// ============================================================ 默认口令提示
+//
+// 可关闭、关一次就不再出现（存进配置）。与设置页里那条不可关闭的警告
+// 分工不同：这里只提醒一次日常打扰会让人养成无视提示的习惯，而设置页
+// 那条是"当前事实"，只要还在用默认口令就一直在。
+$("btnNoticeClose").onclick = async () => {
+  $("pskNotice").hidden = true;
+  try {
+    await api("/client/settings/psk-notice-dismissed", { method: "POST" });
+  } catch (e) {
+    // 记住失败不该打扰用户：这次已经关掉了，下次再出现就再关一次。
+  }
+};
+
+$("btnNoticeFix").onclick = () => {
+  Settings.openSheet("system");
+};
+
+/** 拉一次设置，决定顶部提示条要不要出现。 */
+export async function refreshPskNotice() {
+  try {
+    const d = await api("/client/settings");
+    const show = !!(d.psk_is_default && !d.psk_notice_dismissed);
+    $("pskNotice").hidden = !show;
+  } catch (e) {
+    $("pskNotice").hidden = true;              // 读不到就别吓人
+  }
+}

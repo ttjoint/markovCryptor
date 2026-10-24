@@ -17,6 +17,8 @@
       --bg: #f5f6f8; --panel: #fff; --panel2: #eef1f5; --line: #d9dde4;
       --text: #232830; --dim: #66707f; --accent: #1b6fb8;
     }
+  }  /* 关闭上面的亮色 @media。原来少了这个 }：box-sizing、滚动条
+        等整段规则被吞进亮色分支，亮色模式下全部失效。 */
 
   * { box-sizing: border-box; }
 

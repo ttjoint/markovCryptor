@@ -23,14 +23,25 @@ export function closeSheet() {
   $("modal").hidden = true;
 }
 
+//: 三页各自对应一块面板 + 一个页签按钮。
+//:
+//: 分页不是装饰：系统页管口令和运行状态（与两条信道都无关），
+//: 文本页管模型，图片页管底图。混在一页时用户找不到东西。
+const TABS = {
+  system: ["tabSystem", "paneSystem"],
+  models: ["tabModels", "paneModels"],
+  images: ["tabImages", "paneImages"],
+};
+
 export function switchSheetTab(tab) {
-  const general = tab === "general";
-  $("tabGeneral").setAttribute("aria-selected", general ? "true" : "false");
-  $("tabModels").setAttribute("aria-selected", general ? "false" : "true");
-  $("paneGeneral").hidden = !general;
-  $("paneModels").hidden = general;
-  // 「保存设置」只对常规页有意义；模型页的按钮各管各的。
-  $("btnSaveSettings").hidden = !general;
+  const active = TABS[tab] ? tab : "system";
+  for (const [name, [tabId, paneId]] of Object.entries(TABS)) {
+    $(tabId).setAttribute("aria-selected", name === active ? "true" : "false");
+    $(paneId).hidden = name !== active;
+  }
+  // 「保存设置」管的是口令和图片设置；文本页的按钮各管各的。
+  $("btnSaveSettings").hidden = active === "models";
+  if (active === "system") renderSystemInfo();
 }
 
 export async function loadSettings() {
@@ -42,8 +53,48 @@ export async function loadSettings() {
     $("pickMode").value = d.pick;
     $("modelFolder").value = d.model_folder || "";
     $("configPath").textContent = "配置文件：" + d.path;
+    // 口令输入框不回填真实口令（后端也不返回）——留空表示"不修改"。
+    $("pskInput").value = "";
+    $("pskInput").placeholder = d.psk_is_default
+      ? "当前使用默认口令，请在这里换一个"
+      : "留空表示不修改";
+    // 系统页的警告是常驻的：只要还在用默认口令就一直显示。
+    // 它不可关闭 —— 一条能关掉的警告很快会被关掉然后忘掉。
+    $("pskWarning").hidden = !d.psk_is_default;
+    renderSystemInfo();
   } catch (e) {
     toast("读取设置失败：" + e.message);
+  }
+}
+
+/** 系统页的「运行信息」：版本、路径、本次运行统计。 */
+export function renderSystemInfo() {
+  const box = $("systemInfo");
+  if (!box || !SET.data) return;
+  const d = SET.data;
+  const state = (typeof window !== "undefined" && window.__kcState) || null;
+  const q = (state && state.queue) || {};
+  const tasks = (state && state.tasks) || {};
+
+  const rows = [
+    ["版本", d.version || "—"],
+    ["本机 QQ", (state && state.uin) || "—"],
+    ["配置文件", d.path || "—"],
+    ["图库", `${q.total || 0} 张（队列 ${q.queued || 0}/${q.max || 0}）`],
+    ["本次运行已发送", `${q.sent || 0} 张图片`],
+    ["发送队列", `文本 ${tasks.text_queued || 0} · 图片 ${tasks.image_queued || 0}`],
+    ["接收积压", `${tasks.inbound_pending || 0}`],
+    ["通信口令", d.psk_is_default ? "⚠ 默认（公开）" : "已自定义"],
+  ];
+
+  box.innerHTML = "";
+  for (const [key, value] of rows) {
+    const dt = document.createElement("dt");
+    dt.textContent = key;
+    const dd = document.createElement("dd");
+    dd.textContent = String(value);
+    dd.title = String(value);
+    box.append(dt, dd);
   }
 }
 
@@ -278,8 +329,9 @@ export function installSettings() {
   $("btnSettings").onclick = () => openSheet("general");
   $("btnCloseSheet").onclick = closeSheet;
   $("btnCancelSheet").onclick = closeSheet;
-  $("tabGeneral").onclick = () => switchSheetTab("general");
+  $("tabSystem").onclick = () => switchSheetTab("system");
   $("tabModels").onclick = () => switchSheetTab("models");
+  $("tabImages").onclick = () => switchSheetTab("images");
   $("modal").addEventListener("click", (e) => {
     if (e.target === $("modal")) closeSheet();     // 点遮罩关闭
   });
@@ -288,16 +340,29 @@ export function installSettings() {
   });
 
   $("btnSaveSettings").onclick = async () => {
-    const ok = await saveSettings({
+    const body = {
       max_queue: Number($("maxQueue").value) || 8,
       pick: $("pickMode").value,
       model_folder: $("modelFolder").value.trim(),
-    });
+    };
+    // 口令留空 = 不修改。只有填了东西才提交，避免"打开设置 → 保存"
+    // 这条路把用户的口令悄悄清成空串。
+    const psk = $("pskInput").value.trim();
+    if (psk) body.psk = psk;
+
+    const ok = await saveSettings(body);
     if (ok) {
       toast("设置已保存");
       await loadSettings();
       await loadModelList();
     }
+  };
+
+  $("btnTogglePsk").onclick = () => {
+    const input = $("pskInput");
+    const shown = input.type === "text";
+    input.type = shown ? "password" : "text";
+    $("btnTogglePsk").textContent = shown ? "显示" : "隐藏";
   };
 
   $("btnAddFolder").onclick = async () => {

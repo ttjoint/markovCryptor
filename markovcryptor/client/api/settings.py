@@ -45,7 +45,39 @@ def settings_get(account: Account = Depends(get_account)) -> JSONResponse:
         "model_folder": str(cfg.model_folder) if cfg.model_folder else "",
         "port": cfg.port,
         "open_browser": cfg.open_browser,
+        # 只用布尔值：口令本身永远不回前端。
+        #
+        # 默认口令意味着「任何拿到源码的人都能解出你的握手帧」，所以要点出来。
+        # 但提示只在用户没关过时出现 —— 一条每次启动都弹的警告会被无视，
+        # 比不提示更糟。
+        # 版本号给「系统」页的运行信息用。
+        "version": _version(),
+        "psk_is_default": _is_default_psk(cfg.psk),
+        "psk_notice_dismissed": cfg.psk_notice_dismissed,
     })
+
+
+def _version() -> str:
+    try:
+        from ... import __version__
+        return str(__version__)
+    except Exception:                              # noqa: BLE001 - optional
+        return ""
+
+
+def _is_default_psk(value: str) -> bool:
+    """Is this the shipped default passphrase?"""
+    return str(value or "").strip().lower() in ("", "pbx1")
+
+
+@router.post("/client/settings/psk-notice-dismissed")
+def dismiss_psk_notice(account: Account = Depends(get_account)) -> JSONResponse:
+    """用户关掉了「你在用默认口令」提示 —— 记住，下次别再弹。"""
+    cfg = config.ClientConfig.load()
+    cfg.psk_notice_dismissed = True
+    cfg.save()
+    event("client", "psk_notice_dismissed")
+    return JSONResponse({"ok": True})
 
 
 @router.post("/client/settings")

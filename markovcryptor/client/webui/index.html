@@ -33,6 +33,16 @@
 
 
   <!-- ───── 2. 主体：左列表 + 右会话 ───── -->
+  <div class="notice" id="pskNotice" hidden>
+    <span class="notice-icon">⚠</span>
+    <span class="notice-text">
+      正在使用默认通信口令 —— 任何人拿到源码和聊天记录都能解出握手帧。
+    </span>
+    <button class="notice-btn" id="btnNoticeFix">去设置</button>
+    <button class="notice-x" id="btnNoticeClose" title="不再提示">✕</button>
+  </div>
+
+
   <main class="workspace">
     <!-- 2a. 左侧列表（最近 / 好友 两个标签页共用 #list） -->
     <aside>
@@ -194,6 +204,9 @@
     </div>
   </main>
 
+  <!-- 顶部提示条：可关闭、关一次就不再出现。
+       与设置页那条不可关闭的警告分工不同：日常打扰只会让人养成
+       "无视提示"的习惯，所以这条给一个出口；设置页那条是常驻事实。 -->
   <!-- ───── 3. 状态栏：贯穿底部，实时显示队列与握手 ---------
        放这里而不是左侧栏：它是整机状态，不属于某一条会话。 -->
   <footer class="statusbar" id="statusbar">
@@ -260,13 +273,51 @@
       <header>
         <h3 id="sheetTitle">设置</h3>
         <div class="tabs">
-          <button id="tabGeneral" aria-selected="true">常规</button>
-          <button id="tabModels" aria-selected="false">文本模型</button>
+          <button id="tabSystem" aria-selected="true">系统</button>
+          <button id="tabModels" aria-selected="false">文本</button>
+          <button id="tabImages" aria-selected="false">图片</button>
         </div>
         <button class="iconbtn" id="btnCloseSheet" title="关闭" aria-label="关闭">✕</button>
       </header>
       <div class="body">
-        <div id="paneGeneral">
+        <!-- 系统页：口令、版本、本次运行统计。
+             这些是"整个客户端"的开关与状态，与文本/图片两条信道无关。 -->
+        <div id="paneSystem">
+          <!-- 默认口令警告：**不可关闭**。
+               一条能关掉的警告很快就会被关掉然后忘掉，而这里说的是
+               "任何拿到源码的人都能解出你的握手帧"。
+               可关闭的那条提示在窗口顶部，两者分工不同。 -->
+          <div class="warnbox" id="pskWarning" hidden>
+            <div class="warnbox-title">⚠ 正在使用默认通信口令</div>
+            <div class="warnbox-body">
+              默认口令是公开的（写在源码里）。任何人拿到算法和你的聊天记录，
+              都能解出握手帧。请换一个只有你们两人知道的短语。
+            </div>
+          </div>
+
+          <div class="field">
+            <label>通信口令</label>
+            <div class="row">
+              <input type="password" id="pskInput" placeholder="设一个只有双方知道的短语"
+                     autocomplete="new-password">
+              <button class="btn" id="btnTogglePsk" title="显示/隐藏">显示</button>
+            </div>
+            <div class="hint">
+              双方必须一致。改了口令后双方都要改，否则握手会失败（对方会看到
+              "校验失败"而不是连上一个假的会话）。
+            </div>
+          </div>
+
+          <div class="field">
+            <label>运行信息</label>
+            <dl class="infogrid" id="systemInfo"></dl>
+          </div>
+
+          <div class="hint" id="configPath"></div>
+        </div>
+
+        <!-- 图片页：底图来源、队列、取图方式。 -->
+        <div id="paneImages" hidden>
           <div class="field">
             <label>图片文件夹（握手与图片密文的底图来源）</label>
             <ul class="folderlist" id="folderList"></ul>
@@ -289,6 +340,9 @@
               <option value="sequential">按文件名顺序</option>
             </select>
           </div>
+        </div>
+
+        <div id="paneModels" hidden>
           <div class="field">
             <label>模型目录</label>
             <div class="row">
@@ -297,10 +351,6 @@
             </div>
             <div class="hint">存放 *.json 文本模型的目录。留空则只能用图片密文。</div>
           </div>
-          <div class="hint" id="configPath"></div>
-        </div>
-
-        <div id="paneModels" hidden>
           <ul class="modellist" id="modelList"></ul>
           <div class="hint" id="modelEmpty">还没有模型。可以训练一个新的，或导入已有的 .json。</div>
           <div class="field" style="margin-top:16px">
@@ -349,7 +399,7 @@ import * as Covert from "./js/views/covert.js";
 import * as Settings from "./js/panels/settings.js";
 import * as Capacity from "./js/views/capacity.js";
 import * as Dropper from "./js/views/dropper.js";
-import { refreshState, applyState, initSplitter } from "./js/app.js";
+import { refreshState, applyState, initSplitter, refreshPskNotice } from "./js/app.js";
 import { $ } from "./js/core/dom.js";
 
 // 装配：视图之间不互相 import（会形成循环引用，ES module 的循环引用
@@ -395,6 +445,8 @@ Covert.setCovertState("locked");
 Covert.setChannel("image", { textUsable: false, quiet: true });
 
 refreshState().catch((e) => toast("启动失败：" + e.message));
+// 默认口令提示：只在没关过、且确实还在用默认口令时出现。
+refreshPskNotice();
 </script>
 </body>
 </html>

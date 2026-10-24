@@ -56,6 +56,11 @@ class ClientConfig:
     max_queue: int = 8
     pick: str = "random"
     psk: str = "pbx1"
+    #: 用户关掉了「你在用默认口令」这条提示。
+    #:
+    #: 记住而不是每次启动都弹：提示一旦变成噪音就会被无视，比不提示更糟。
+    #: 只在设置页里重新出现（那里能看到当前口令）。
+    psk_notice_dismissed: bool = False
     #: ``ws://host:port/`` of this machine's OneBot. Usually discovered from
     #: SnowLuma's generated config, so this is only an override.
     onebot_url: str = ""
@@ -126,6 +131,7 @@ class ClientConfig:
             max_queue=max_queue,
             pick=pick,
             psk=str(data.get("psk") or "pbx1"),
+            psk_notice_dismissed=bool(data.get("psk_notice_dismissed")),
             onebot_url=str(onebot.get("url") or ""),
             onebot_token=str(onebot.get("token") or ""),
             port=port,
@@ -153,6 +159,7 @@ class ClientConfig:
                 "pick": self.pick,
             },
             "psk": self.psk,
+            "psk_notice_dismissed": self.psk_notice_dismissed,
             "onebot": {"url": self.onebot_url, "token": self.onebot_token},
             "port": self.port,
             "open_browser": self.open_browser,
