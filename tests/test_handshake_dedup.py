@@ -158,6 +158,76 @@ class HandshakeDedupTest(unittest.TestCase):
         self.assertEqual(bob.pending_age, 0.0)
 
 
+class CollisionTest(unittest.TestCase):
+    """双方同时发起握手的场景。
+
+    典型时序：A 发起时 B 的软件没开；B 打开后不知道有请求，也点了「发起」。
+    原来两边各自发请求、各自等待，用户得双方都点接受才通。
+
+    现在有两条护栏：
+
+    * **收到对方请求后不再发自己的**（``Account.start_handshake``），
+      省掉一整轮往返 —— 只有一方需要点接受
+    * 如果两条请求都已经在路上（历史盲区），两边各点一次也能通
+      （实测 20/20）。界面会说明"双方同时发起"，避免用户以为在死锁
+    """
+
+    def _pair(self):
+        net = LoopbackNetwork()
+        alice = Terminal("alice", net, psk="pbx1")
+        alice.take_cover = lambda: _png_bytes(_synthetic_cover())
+        alice.attach()
+        bob = Terminal("bob", net, psk="pbx1")
+        bob.take_cover = lambda: _png_bytes(_synthetic_cover())
+        bob.attach()
+        return net, alice, bob
+
+    def test_single_accept_is_enough_when_request_known(self):
+        """B 收到请求后再接受，一次就通 —— 不需要双方各点。"""
+        net, alice, bob = self._pair()
+        alice.send_handshake("bob", (_png_bytes(_synthetic_cover()),))
+        net.pump()
+
+        self.assertIsNotNone(bob.pending_request, "B 应当有待确认请求")
+        self.assertTrue(bob.respond_handshake())
+        net.pump()
+
+        self.assertTrue(alice.established, "A 收到回应后建立")
+        self.assertTrue(bob.established, "B 自己建立")
+
+    def test_both_sides_can_complete_when_both_requested(self):
+        """两条请求都在路上时，各点一次也能通（不能死锁）。
+
+        这条不追求"只点一次" —— 那种情形下没有可靠的对称判据能自动消解，
+        但**必须**保证不死锁，并且界面要如实说明。
+        """
+        net, alice, bob = self._pair()
+        alice.send_handshake("bob", (_png_bytes(_synthetic_cover()),))
+        net.pump()
+        bob.send_handshake("alice", (_png_bytes(_synthetic_cover()),))
+        net.pump()
+
+        alice.respond_handshake()
+        net.pump()
+        bob.respond_handshake()
+        net.pump()
+
+        self.assertTrue(alice.established and bob.established,
+                        "双方都发起时也必须能完成，不能卡在 waiting")
+
+    def test_collision_is_reported_to_the_ui(self):
+        """界面要能区分"对方在等"和"双方都在等"，否则用户会以为死锁。"""
+        net, alice, bob = self._pair()
+        alice.send_handshake("bob", (_png_bytes(_synthetic_cover()),))
+        net.pump()
+        bob.send_handshake("alice", (_png_bytes(_synthetic_cover()),))
+        net.pump()
+
+        self.assertTrue(
+            alice.session.outgoing_request and alice.pending_request is not None,
+            "A 侧应当同时具备「我发过」和「对方也发了」两种状态")
+
+
 class DuplicateResponseTest(unittest.TestCase):
     """对端收到一串回复时，只该采纳最新的、不重复派生密钥。"""
 

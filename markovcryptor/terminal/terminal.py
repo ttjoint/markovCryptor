@@ -770,6 +770,10 @@ class Terminal:
                   id=self.id, peer=target, error=exc)
             return False
 
+        # 用户点了接受 = 以对方为主。我们自己可能也发过请求（双方同时
+        # 发起），那个请求作废：它的公钥已经被这次的回复替换，留着只会让
+        # 状态对不上。对方收到我们的旧请求后也会做同样的选择。
+        self.session.outgoing_request = False
         self.pending_request = None
         self.pending_since = 0.0
         event("terminal", "handshake_user_response", id=self.id, peer=target)

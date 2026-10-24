@@ -362,8 +362,19 @@ class Account:
         return conversation
 
     def start_handshake(self, peer):
-        """Begin a key exchange with ``peer``, hiding our key in one picture."""
+        """Begin a key exchange with ``peer``, hiding our key in one picture.
+
+        **如果对方已经发来请求，就不要再发自己的。**
+
+        这是省掉一整轮往返的关键。典型场景：A 发起握手时 B 的软件没开；
+        B 打开后不知道有请求，也点了「发起」—— 原来两边各自发请求、各自
+        等待，用户还得双方都点接受才能通。现在 B 这里直接返回，由 A 的
+        请求胜出，只有 B 需要点一次接受。
+        """
         conversation = self.conversations.ensure(peer)
+        if conversation.terminal.pending_request is not None:
+            event("client", "handshake_already_pending", peer=peer)
+            return conversation
         item = self.queue.take()
         if item is None:
             raise InvalidInput(

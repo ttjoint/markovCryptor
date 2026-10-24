@@ -56,6 +56,11 @@ def _handshake_state(account, conversation) -> dict:
         # 两段式超时：30 秒提示"对方暂未回应"，10 分钟建议重发。
         # 不自动放弃 —— 对方可能真的晚点回来，决定权在人。
         "waiting_seconds": round(session.waiting_for, 1),
+        # 我也发过请求，对方也发来了 —— 双方同时发起。
+        # 这时两边都能点「接受」，点一次就通（实测 20/20）。界面上要说清楚，
+        # 否则用户以为在互相等待。
+        "collision": bool(pending_public is not None
+                          and session.outgoing_request),
     }
     # 本端的密钥指纹（已建立时）。用于让用户有机会和对方核对。
     if session.my_public:

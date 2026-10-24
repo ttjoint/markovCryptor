@@ -72,6 +72,11 @@ class Session:
     key_since: float = 0.0
     #: 发起握手请求的时刻，用于两段式超时提示。
     requested_at: float = 0.0
+    #: 我们**主动发起**过、且还没被解决的握手。
+    #:
+    #: 双方同时发起时要用它判断"我是不是也在等对方" —— 只看
+    #: waiting/peer_public 不够，因为接受方也会填 peer_public。
+    outgoing_request: bool = False
 
     #: --- Rekey staging -------------------------------------------------
     #: The protocol is stateless: the peer may start a new handshake at any
@@ -161,6 +166,7 @@ class Session:
         self.send_key = self.recv_key = self.transcript = b""
         self.state = State.WAITING
         self.requested_at = time.monotonic()
+        self.outgoing_request = True
         return public, Mode.REQUEST
 
     def answer(self) -> tuple[bytes, Mode]:
@@ -276,6 +282,7 @@ class Session:
         self.state = State.ESTABLISHED
         self.generation += 1
         self.key_since = time.monotonic()
+        self.outgoing_request = False
         return True
 
     # ----------------------------------------------------------------- crypto

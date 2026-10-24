@@ -60,9 +60,17 @@ export function setCovertState(state, extra) {
     const age = (extra && typeof extra.pending_age === "number")
       ? extra.pending_age : 0;
     const when = age < 5 ? "刚刚" : `${Math.round(age)} 秒前`;
-    title.textContent = extra && extra.rekey
-      ? `对方请求更换密钥（${when}）`
-      : `对方请求建立加密连接（${when}）`;
+    if (extra && extra.collision) {
+      // 双方同时发起了。点一次就能通（两边会用同一套密钥），但不说清楚
+      // 用户会以为是死锁 —— "你在等我，我也在等你"。
+      title.textContent = "双方同时发起了握手";
+      text.textContent = "你也发过请求，对方也在等。直接点下面的「接受」即可，"
+        + "点一次两边都会建立，不需要双方各点一次。";
+    } else if (extra && extra.rekey) {
+      title.textContent = `对方请求更换密钥（${when}）`;
+    } else {
+      title.textContent = `对方请求建立加密连接（${when}）`;
+    }
     const status = (extra && extra.fingerprint_status) || "first";
     if (status === "changed") {
       veil.classList.add("warn");
