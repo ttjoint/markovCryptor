@@ -121,6 +121,37 @@ def _model_library(cfg: ClientConfig, snowluma_root: Path):
     return None
 
 
+def _bootstrap_onebot(root: Path, owned=None) -> None:
+    """等 QQ 登录的同时，替新账号补一份 OneBot 配置。
+
+    **补完必须重启 SnowLuma。** SnowLuma 在启动时读一遍配置，之后不再
+    重读；我们在它已经跑起来之后才写出 ``onebot_<uin>.json``，它会
+    把这个文件"读进去一半"（日志里有 OneBot 活动），但**不会真的起
+    ws 服务**，于是客户端一直等到超时。实测：配置里写着 3001，netstat
+    里 3001 根本没有监听。
+
+    重启一次它就正常了。这只发生在**全新安装的第一次**，之后配置一直在。
+    """
+    uins = launcher.webui_uins()
+    created_any = False
+    for uin in uins:
+        created = launcher.ensure_onebot_config(root, uin)
+        if created is not None:
+            _log(f"已为 QQ {uin} 创建 OneBot 配置：{created.name}")
+            created_any = True
+
+    if not created_any or owned is None:
+        return
+
+    # 让 SnowLuma 重新读配置。只重启**我们自己起的**那一份。
+    _log("重新启动 SnowLuma 以加载新配置…")
+    try:
+        launcher.restart_snowluma(root, owned)
+    except Exception as exc:                       # noqa: BLE001
+        event("launcher", "restart_after_bootstrap_failed",
+              level=logging.WARNING, error=exc)
+
+
 def run(*, snowluma: Path | None = None, config_path: Path | None = None,
         wait: float = launcher.DEFAULT_LOGIN_WAIT,
         open_browser: bool | None = None,
@@ -161,8 +192,16 @@ def run(*, snowluma: Path | None = None, config_path: Path | None = None,
             # 用户手动开的 SnowLuma 不能因为关这个客户端就被杀掉。
             owned.add("SnowLuma", launcher.start_snowluma(root))
             # 启动之后重新读配置：端口几乎肯定变了。
+            #
+            # **全新安装时那个配置根本不会出现**：`onebot_<uin>.json` 的
+            # 文件名就是 QQ 号，交付包不能预置（里面带着构建机的真实令牌），
+            # 而 SnowLuma 只在 OneBot 网络配好之后才写它。于是死等，
+            # 界面一直停在"正在启动…"，用户以为程序没识别到已登录的 QQ。
+            #
+            # 所以边等边补：问一下 SnowLuma 现在登录的是谁，替它把配置写出来。
             endpoint = launcher.wait_for_endpoint(
                 root, timeout=wait,
+                on_tick=lambda: _bootstrap_onebot(root, owned),
                 on_wait=lambda: _log("  仍在等待：请打开 QQ 并登录"))
 
         if not launcher.wait_for_onebot(endpoint.url):

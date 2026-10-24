@@ -100,8 +100,122 @@ def discover_endpoint(snowluma: Path) -> Endpoint | None:
     return None
 
 
+#: SnowLuma 的 WebUI 端口。它写死在 SnowLuma 里，不是我们决定的。
+SNOWLUMA_WEBUI_PORT = 5099
+
+#: 启动 SnowLuma 时喂给它的 WebUI 口令（见 ``start_snowluma``）。
+SNOWLUMA_BOOTSTRAP_PASSWORD = "mkx-webui-1"
+
+
+def webui_uins(port: int = SNOWLUMA_WEBUI_PORT, *,
+               password: str = SNOWLUMA_BOOTSTRAP_PASSWORD,
+               timeout: float = 2.0) -> tuple[str, ...]:
+    """已登录的 QQ 号，从 SnowLuma 自己的 WebUI 读。
+
+    **为什么需要这个**：``onebot_<uin>.json`` 的文件名就是账号，可交付包
+    不能预置它（那里面带着构建机的真实令牌）。而 SnowLuma 只在 OneBot
+    网络已经配好之后才写这个文件 —— 全新安装时它永远不出现，客户端于是
+    死等在 ``wait_for_endpoint``，界面停在"正在启动…"。
+
+    用户看到的现象是"识别不到我已登录的 QQ"，实际是缺一个配置文件，
+    而这个配置只能由"当前登录的是谁"推出来。
+
+    WebUI 用 Bearer 令牌：先 POST /api/login 换 token，再查 /api/qq-list。
+    登录口令就是我们启动它时通过环境变量喂进去的那个。
+    返回空元组表示"读不到"（还没登录 / 端口没开 / 口令不对），不抛异常 ——
+    调用方会继续正常等待流程。
+    """
+    import urllib.error
+    import urllib.request
+
+    base = f"http://127.0.0.1:{int(port)}"
+
+    def _post(path: str, payload: dict) -> dict | None:
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            base + path, data=body, method="POST",
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except (OSError, ValueError, urllib.error.URLError):
+            return None
+
+    def _get(path: str, token: str) -> dict | None:
+        request = urllib.request.Request(
+            base + path, headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except (OSError, ValueError, urllib.error.URLError):
+            return None
+
+    login = _post("/api/login", {"password": password})
+    token = (login or {}).get("token")
+    if not token:
+        return ()
+
+    listed = _get("/api/qq-list", str(token)) or {}
+    uins = []
+    for item in listed.get("list") or ():
+        uin = str((item or {}).get("uin") or "").strip()
+        if uin.isdigit():
+            uins.append(uin)
+    return tuple(uins)
+
+
+def ensure_onebot_config(snowluma: Path, uin: str, *,
+                         port: int = SNOWLUMA_WEBUI_PORT
+                         ) -> Path | None:
+    """给还没配过 OneBot 的账号补一份配置。
+
+    已存在就**不动**：SnowLuma 可能往里补过字段，重写只会丢用户的改动。
+    """
+    snowluma = Path(snowluma)
+    # SnowLuma 只认 ``onebot_<digits>.json``，别的名字它直接忽略 ——
+    # 写一个它不认的文件等于没写。
+    if not str(uin).isdigit():
+        return None
+    target = snowluma / "config" / f"onebot_{uin}.json"
+    if target.exists():
+        return None
+    if not (snowluma / "config").is_dir():
+        return None
+
+    from ..onebot_config import OneBotSettings, write_config
+
+    settings = OneBotSettings(uin=uin)
+    # 端口递增：同一台机器挂多个号时不能撞（撞了第二个 EADDRINUSE 起不来）。
+    used = set()
+    for existing in (snowluma / "config").glob("onebot_*.json"):
+        try:
+            data = json.loads(existing.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for server in ((data.get("networks") or {}).get("wsServers") or []):
+            try:
+                used.add(int((server or {}).get("port")))
+            except (TypeError, ValueError):
+                continue
+    offset = 0
+    while settings.ws_port + offset * 10 in used:
+        offset += 1
+    if offset:
+        # OneBotSettings 是 frozen 的 —— 只能换一个新实例，不能就地改。
+        from dataclasses import replace
+        settings = replace(settings,
+                           ws_port=settings.ws_port + offset * 10,
+                           http_port=settings.http_port + offset * 10)
+
+    path, written = write_config(snowluma, settings)
+    if written:
+        event("launcher", "onebot_config_created", path=str(path), uin=uin)
+        return path
+    return None
+
+
 def wait_for_endpoint(snowluma: Path, *, timeout: float = DEFAULT_LOGIN_WAIT,
-                      on_wait=None) -> Endpoint:
+                      on_wait=None, on_tick=None) -> Endpoint:
     """Poll until SnowLuma has written a config, i.e. until QQ is logged in.
 
     Raises :class:`LauncherError` with a message that says what to *do*, because
@@ -116,6 +230,18 @@ def wait_for_endpoint(snowluma: Path, *, timeout: float = DEFAULT_LOGIN_WAIT,
         if not announced and on_wait is not None:
             on_wait()
             announced = True
+        # 每轮给调用方一次机会做别的事（比如替新账号补 OneBot 配置）。
+        # 放在 discover 之后：先看配置在不在，再决定要不要补。
+        if on_tick is not None:
+            try:
+                on_tick()
+            except Exception as exc:               # noqa: BLE001 - 不能让补配置拖死等待
+                event("launcher", "bootstrap_tick_failed", level=logging.DEBUG,
+                      error=exc)
+            # 补完立刻再看一眼，不必多等一秒。
+            endpoint = discover_endpoint(snowluma)
+            if endpoint is not None:
+                return endpoint
         time.sleep(1.0)
     raise LauncherError(
         f"等了 {timeout:.0f} 秒，没有检测到已登录的 QQ。",
@@ -193,6 +319,47 @@ def start_snowluma(snowluma: Path, *, log_dir: Path | None = None) -> subprocess
 
     event("launcher", "snowluma_started", pid=process.pid, log=str(log_path))
     return process
+
+
+def restart_snowluma(snowluma: Path, owned) -> None:
+    """重启**我们自己起的**那一份 SnowLuma，让它重新读配置。
+
+    为什么必须重启：SnowLuma 只在启动时读一遍 ``config/``。新装用户的
+    ``onebot_<uin>.json`` 是我们**在它已经跑起来之后**才写出来的，它会
+    把这个文件读一半（日志里有 OneBot 活动）却不起 ws 服务 —— 实测配置
+    写着 3001，``netstat`` 里 3001 根本没监听，客户端一直等到超时。
+
+    只动 ``owned`` 里登记过的进程：用户自己开的 SnowLuma 不在里面，
+    重启它会打断用户正在用的东西。
+    """
+    snowluma = Path(snowluma)
+
+    # 先把我们那一条从 owned 里摘掉，避免所有权混乱。
+    with owned._lock:                              # noqa: SLF001 - 同包内部协作
+        kept = [(label, proc) for label, proc in owned._items
+                if label != "SnowLuma"]
+        ours = [proc for label, proc in owned._items if label == "SnowLuma"]
+        owned._items = kept                        # noqa: SLF001
+
+    for process in ours:
+        try:
+            process.terminate()
+            process.wait(timeout=8.0)
+        except Exception:                          # noqa: BLE001 - 尽力而为
+            try:
+                process.kill()
+            except Exception:                      # noqa: BLE001
+                pass
+
+    # 等端口真正释放。刚 terminate 完立刻重开常常撞 EADDRINUSE。
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline:
+        if not _port_open("127.0.0.1", SNOWLUMA_WEBUI_PORT):
+            break
+        time.sleep(0.3)
+
+    owned.add("SnowLuma", start_snowluma(snowluma))
+    event("launcher", "snowluma_restarted")
 
 
 def _find_node(snowluma: Path) -> str | None:

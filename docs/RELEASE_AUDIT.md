@@ -257,3 +257,77 @@ dist/qqclient-0.3.1-20261024-2350/   216 MB
 - 全包搜旧 token / 真实 QQ 号：0 命中
 
 **817 passed。**
+
+---
+
+## 九、全新安装卡在"正在启动…"（2026-10-24 用户反馈）
+
+现象：
+
+```
+界面：正在启动…（第一次会等 QQ 登录）      一直停着
+luma：WebUI listening http://127.0.0.1:5099  只有 WebUI，没有 OneBot
+用户：未能识别我已登录的 QQ
+```
+
+### 根因：鸡生蛋
+
+`onebot_<uin>.json` 的**文件名就是 QQ 号**：
+
+* 交付包**不能**预置它 —— 里面带着构建机的真实 accessToken（见第二节）
+* SnowLuma 只在 OneBot 网络**已经配好之后**才写它
+
+于是全新安装时这个文件永远不出现，`wait_for_endpoint` 死等。用户看到
+"识别不到已登录的 QQ"，实际是缺一个只能由"当前登录的是谁"推出来的配置
+文件。
+
+### 修法：问 SnowLuma 现在登录的是谁
+
+SnowLuma 的 WebUI 有两个我们能用的接口：
+
+```
+POST /api/login     {"password": "..."} -> {"token": "..."}
+GET  /api/qq-list   Bearer token        -> {"list":[{"uin":"...","nickname":"..."}]}
+```
+
+口令就是启动时通过 `SNOWLUMA_WEBUI_BOOTSTRAP_PASSWORD` 喂进去的那个。
+
+`launcher.webui_uins()` 读出来后，`ensure_onebot_config()` 替它写配置
+（已存在就不动，多个号端口递增避免 `EADDRINUSE`）。
+
+### 第二个坑：写完必须重启 SnowLuma
+
+补出配置后仍然失败，`netstat` 显示配置写着 3001、3001 却没监听。
+
+原因：**SnowLuma 只在启动时读一遍配置**。我们是在它已经跑起来之后才写的
+文件，它把这个文件读了一半（日志里能看到 OneBot.MessageMigration、
+groups loaded 等活动），但**不会真的起 ws 服务**。
+
+所以补完配置要重启一次 SnowLuma（只重启我们自己起的那个，
+`owned` 里登记过的；用户自己开的不动）。
+
+### 端到端验证（真实 SnowLuma + 真实登录的 QQ）
+
+删掉 `config/` 模拟全新安装，然后启动：
+
+```
+正在等待 QQ 登录…（SnowLuma 只能挂到已登录的 QQ 上）
+本机 QQ 1741473279，29 个好友，图片队列上限 9
+客户端已启动：http://127.0.0.1:8741/
+
+netstat: 127.0.0.1:3001 LISTENING   ← OneBot 起来了
+```
+
+### 测试
+
+`tests/test_launcher_bootstrap.py`（11 项）：创建配置 / 补出的配置能被
+`discover_endpoint` 认出来 / 已存在不动 / 两个号端口不撞 / 没有 config 目录
+时不硬造 / 拒绝非数字 UIN / 等待期间 on_tick 会被调用 / 补完立刻返回 /
+on_tick 抛异常不拖死等待。
+
+`webui_uins` 的过滤规则用**假的 HTTP 响应跑真实代码**验证，不是重写一遍
+规则（那样测的是测试自己）。
+
+注入"不写配置"验证过 4 项会 FAIL。
+
+**828 passed。**
