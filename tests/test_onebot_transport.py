@@ -391,6 +391,9 @@ class TwoSidesOverOneBotTest(unittest.TestCase):
 
         alice.send_handshake("10002", (_png((11, 21, 31)),))
         hub.pump()
+        # 收方不自动回包 —— 模拟用户点「接受」。
+        bob.respond_handshake()
+        hub.pump()
 
         self.assertTrue(alice.established, "发起方应在收到回包后建立会话")
         self.assertTrue(bob.established, "应答方派生密钥后即为建立")
@@ -405,6 +408,9 @@ class TwoSidesOverOneBotTest(unittest.TestCase):
         bob, _ = sides["bob"]
         alice.send_handshake("10002", (_png((11, 21, 31)),))
         hub.pump()
+        # 收方不自动回包 —— 模拟用户点「接受」。
+        bob.respond_handshake()
+        hub.pump()
 
         secret = "今晚八点，老地方。"
         alice.send_covert_in_images("10002", secret,
@@ -418,6 +424,9 @@ class TwoSidesOverOneBotTest(unittest.TestCase):
         alice, _ = sides["alice"]
         bob, _ = sides["bob"]
         alice.send_handshake("10002", (_png((11, 21, 31)),))
+        hub.pump()
+        # 收方不自动回包 —— 模拟用户点「接受」。
+        bob.respond_handshake()
         hub.pump()
 
         alice.send_covert_in_images("10002", "去吗？", (_png(),))
@@ -438,6 +447,9 @@ class TwoSidesOverOneBotTest(unittest.TestCase):
         alice, _ = sides["alice"]
         bob, _ = sides["bob"]
         alice.send_handshake("10002", (_png((11, 21, 31)),))
+        hub.pump()
+        # 收方不自动回包 —— 模拟用户点「接受」。
+        bob.respond_handshake()
         hub.pump()
         bob.inbox.clear()
 
@@ -460,6 +472,9 @@ class TwoSidesOverOneBotTest(unittest.TestCase):
         alice, net_a = sides["alice"]
         bob, _ = sides["bob"]
         alice.send_handshake("10002", (_png((11, 21, 31)),))
+        hub.pump()
+        # 收方不自动回包 —— 模拟用户点「接受」。
+        bob.respond_handshake()
         hub.pump()
         bob.inbox.clear()
 

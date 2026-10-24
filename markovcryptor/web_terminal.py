@@ -134,13 +134,22 @@ class TerminalHub:
         return pool[cursor % len(pool)]
 
     def set_covers(self, name: str, images: list[bytes]) -> bool:
-        """Replace what this side has on hand, then answer any held handshake.
+        """Replace what this side has on hand. **Does not answer handshakes.**
 
-        Called when the user queues pictures. Returning whether a held
-        handshake was answered lets the UI say "sent the reply just now".
+        Queuing pictures used to also release a held handshake reply. That is
+        exactly the automation the client no longer does: a reply must follow a
+        user clicking "accept", not the incidental act of adding pictures.
+        Use :meth:`accept_handshake` for that.
         """
         self.cover_queue[name] = list(images)
-        released = self.terminals[name].retry_pending()
+        return False
+
+    def accept_handshake(self, name: str) -> bool:
+        """User clicked "accept": answer that peer's held handshake request."""
+        terminal = self.terminals.get(name)
+        if terminal is None or terminal.pending_request is None:
+            return False
+        released = terminal.respond_handshake()
         if released:
             self.pump()
         return released
@@ -363,24 +372,41 @@ def wire_terminal_routes(app, hub: TerminalHub, *, max_upload_bytes: int) -> Non
     async def set_covers(name: str, files: FileList = File(default=[])):
         """Tell the server which pictures this side has on hand.
 
-        The queue lives in the browser, but an automatic handshake reply has to
-        be sent by the server -- so the front end pushes the queued pictures up
-        here. If a handshake request is held waiting for a picture, this is what
-        releases it.
+        The queue lives in the browser, but a handshake reply has to be sent by
+        the server -- so the front end pushes the queued pictures up here.
+
+        **Adding pictures no longer answers a held handshake.** A reply must
+        follow the user clicking "accept" (see ``/terminal/{name}/accept``).
+        Automatically replying the instant a picture arrives is the bot-like
+        behaviour this client deliberately dropped.
         """
         terminal = _terminal(hub, name)
         raws, _names = await _images(files)
-        released = hub.set_covers(name, raws)
-        delivery = 0
-        if released:
-            delivery = 1
-            METRICS.incr("terminal_handshake_released", sender=name)
+        hub.set_covers(name, raws)
         return JSONResponse({
             "ok": True,
             "covers": len(hub.cover_queue[name]),
-            # 用户加图顺手把压着的握手回包发出去了，前端要说一声。
-            "released": released,
-            "delivered": delivery,
+            "released": False,
+            "delivered": 0,
+            "state": terminal.state.value,
+            "state_label": terminal.state.label,
+        })
+
+    @app.post("/terminal/{name}/accept")
+    def accept_handshake(name: str):
+        """The user clicked "accept": answer that peer's held handshake.
+
+        回复必须由人的动作触发。``awaiting_cover=False`` 表示请求已经送出；
+        False 且 ``pending`` 仍为 True 说明手头没有能装下握手帧的图。
+        """
+        terminal = _terminal(hub, name)
+        sent = hub.accept_handshake(name)
+        if sent:
+            METRICS.incr("terminal_handshake_accepted", sender=name)
+        return JSONResponse({
+            "ok": True,
+            "sent": sent,
+            "pending": terminal.pending_request is not None,
             "state": terminal.state.value,
             "state_label": terminal.state.label,
         })

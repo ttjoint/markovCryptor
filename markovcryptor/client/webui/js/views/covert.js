@@ -40,10 +40,47 @@ export function setCovertState(state, extra) {
   const action = $("veilAction");
   const composer = $("covertComposer");
 
+  const ignore = $("veilIgnore");
+  const fp = $("veilFp");
+
   veil.classList.remove("warn");
   action.hidden = false;
+  if (ignore) ignore.hidden = true;
+  if (fp) { fp.hidden = true; fp.className = "veilfp"; fp.textContent = ""; }
 
-  if (state === "locked") {
+  if (state === "pending") {
+    // 对方发来握手请求，等用户决定。
+    //
+    // **不自动回复**：自动回复在 QQ 侧看就是机器行为，用户也失去核对指纹的
+    // 机会，而且客户端挂着时任何人都能自动把连接建立起来。
+    veil.hidden = false;
+    icon.textContent = "🤝";
+    title.textContent = "对方请求建立加密连接";
+    const status = (extra && extra.fingerprint_status) || "first";
+    if (status === "changed") {
+      veil.classList.add("warn");
+      text.textContent = "⚠ 对方的密钥和上次不同。可能是重装了客户端，"
+        + "也可能是有人在中间。请在别的渠道核对指纹后再接受。";
+      if (fp) {
+        fp.hidden = false;
+        fp.className = "veilfp changed";
+        fp.textContent = `上次 ${extra.previous_fingerprint}
+现在 ${extra.fingerprint}`;
+      }
+    } else {
+      text.textContent = status === "first"
+        ? "首次与该联系人建立连接。确认对方身份后点接受。"
+        : "密钥与上次一致。";
+      if (fp && extra && extra.fingerprint) {
+        fp.hidden = false;
+        fp.textContent = `指纹 ${extra.fingerprint}`;
+      }
+    }
+    action.textContent = "接受并回复";
+    action.disabled = false;
+    if (ignore) ignore.hidden = false;
+    composer.classList.add("muted");
+  } else if (state === "locked") {
     veil.hidden = false;
     icon.textContent = "🔒";
     title.textContent = "尚未握手";
@@ -80,7 +117,8 @@ export function setCovertState(state, extra) {
 // 遮挡显示时，下面的输入框不能操作 —— 但**待发图片列表要能看见并操作**，
 // 用户需要在握手前管理它们。所以只禁用输入区，不禁用队列。
 export function updateCovertControls() {
-  const locked = COVERT.state === "locked" || COVERT.state === "waiting";
+  const locked = COVERT.state === "locked" || COVERT.state === "waiting"
+    || COVERT.state === "pending";
   const input = $("covertInput");
   const btn = $("btnSendCovert");
   const sw = $("channelSwitch");

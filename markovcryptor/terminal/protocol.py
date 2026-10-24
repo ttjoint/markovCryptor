@@ -38,6 +38,8 @@ MAGIC = b"PBX1"
 #: ``MAGIC | kind(1)`` -- the smallest possible envelope, so tiny covers still fit.
 HEADER_BYTES = len(MAGIC) + 1
 PUBLIC_KEY_BYTES = 32
+#: 握手帧里 MAC 的长度。
+HANDSHAKE_MAC_BYTES = 16
 NONCE_BYTES = 12
 
 
@@ -86,23 +88,43 @@ class Mode(str, Enum):
 # ------------------------------------------------------------------ handshake
 
 
-def build_handshake(public_key: bytes, mode: Mode) -> bytes:
-    """``MAGIC | 'H' | pub | mode`` -- 38 bytes, fits a 120x120 cover."""
+def build_handshake(public_key: bytes, mode: Mode, *, mac: bytes = b"") -> bytes:
+    """``MAGIC | 'H' | pub | mac | mode``.
+
+    带 MAC 是 54 字节，仍能装进最小的可用封面（120×120）。
+
+    MAC 的作用是**身份绑定**：它覆盖公钥和发送方角色，用共享口令派生。
+    X25519 本身没有身份认证，任何能改写消息流的人都能分别和两端握手、全程
+    解密再转发 —— 这不是理论风险，是这个协议原本就有的洞。
+    """
     if len(public_key) != PUBLIC_KEY_BYTES:
         raise InvalidInput(
             f"X25519 公钥必须是 {PUBLIC_KEY_BYTES} 字节，收到 {len(public_key)}"
         )
-    return MAGIC + Kind.HANDSHAKE.value.encode() + public_key + mode.value.encode()
+    if mac and len(mac) != HANDSHAKE_MAC_BYTES:
+        raise InvalidInput(
+            f"握手 MAC 必须是 {HANDSHAKE_MAC_BYTES} 字节，收到 {len(mac)}")
+    return (MAGIC + Kind.HANDSHAKE.value.encode() + public_key + mac
+            + mode.value.encode())
 
 
-def parse_handshake(payload: bytes) -> tuple[bytes, Mode]:
-    """Return ``(peer_public, mode)``; raises if this is not a handshake."""
+def parse_handshake(payload: bytes) -> tuple[bytes, bytes, Mode]:
+    """Return ``(peer_public, mac, mode)``; raises if this is not a handshake.
+
+    ``mac`` is empty for old-style 38-byte frames.  Callers that care about
+    authentication must treat an empty MAC as untrusted -- see
+    ``Terminal._on_handshake``.
+    """
     body = _body(payload, Kind.HANDSHAKE)
-    if len(body) != PUBLIC_KEY_BYTES + 1:
-        raise NoHiddenFrame(
-            f"握手报文长度异常：{len(body)} 字节，应为 {PUBLIC_KEY_BYTES + 1}"
-        )
-    return body[:PUBLIC_KEY_BYTES], Mode.of(body[PUBLIC_KEY_BYTES:])
+    if len(body) == PUBLIC_KEY_BYTES + 1:
+        return body[:PUBLIC_KEY_BYTES], b"", Mode.of(body[PUBLIC_KEY_BYTES:])
+    if len(body) == PUBLIC_KEY_BYTES + HANDSHAKE_MAC_BYTES + 1:
+        end = PUBLIC_KEY_BYTES + HANDSHAKE_MAC_BYTES
+        return body[:PUBLIC_KEY_BYTES], body[PUBLIC_KEY_BYTES:end], Mode.of(body[end:])
+    raise NoHiddenFrame(
+        f"握手报文长度异常：{len(body)} 字节，"
+        f"应为 {PUBLIC_KEY_BYTES + 1} 或 {PUBLIC_KEY_BYTES + HANDSHAKE_MAC_BYTES + 1}"
+    )
 
 
 # ----------------------------------------------------------------------- body

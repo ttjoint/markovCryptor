@@ -62,10 +62,17 @@ export function applyState(data) {
     const conv = (data.conversations || []).find((c) => c.peer === S.current);
     const established = !!(conv && conv.established);
     S.established = established;
-    if (!established) {
-      Covert.setCovertState(COVERT.state === "waiting" ? "waiting" : "locked");
-    } else {
+
+    if (conv && conv.pending && !established) {
+      // 对方在请求建立连接，等用户决定。指纹等 refreshConversation 拿回来
+      // 再填 —— 这里先用已知信息把遮挡层换掉，避免闪一下"尚未握手"。
+      Covert.setCovertState("pending", S.handshakeInfo || {});
+    } else if (established) {
       Covert.setCovertState("ready");
+      S.handshakeInfo = null;
+    } else {
+      Covert.setCovertState(COVERT.state === "waiting" ? "waiting" : "locked");
+      S.handshakeInfo = null;
     }
   }
 
@@ -95,6 +102,13 @@ export async function refreshConversation() {
   try {
     const detail = await api(`/client/conversation/${S.current}`);
     Chat.renderConversation(detail);
+    // 待确认的握手要显示对方指纹 —— 那正是让用户判断"这是不是本人"的东西。
+    // 指纹只在会话详情里，所以拿到后补画一次遮挡层。
+    const hs = detail.handshake || {};
+    S.handshakeInfo = hs;
+    if (hs.pending && COVERT.state === "pending") {
+      Covert.setCovertState("pending", hs);
+    }
   } catch (e) {
     // 会话可能已被丢弃；但要让人知道这次刷新没成功，否则新消息静默不出现。
     if (lastStateError !== e.message) {
@@ -526,3 +540,11 @@ export function initLifecycle() {
   });
   scheduleProbe(0);
 }
+
+
+    toast("已忽略对方的连接请求");
+    await refreshState();
+  } catch (e) {
+    toast(e.message);
+  }
+};

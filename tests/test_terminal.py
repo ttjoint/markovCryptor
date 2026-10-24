@@ -78,15 +78,36 @@ def _give_queue(terminal, count=1):
 
 
 def _handshake(net, alice, bob):
+    """Complete a handshake the way two real users would.
+
+    收方**不会自动回复** —— 它只挂起请求，等用户点「接受」。所以这里要模拟
+    那个点击（``respond_handshake``），否则会话永远建不起来。
+
+    这条行为变更是有意的：自动回复意味着"从收到到发出图只要 0.2 秒"，
+    在 QQ 侧看就是机器行为，而且客户端挂着时任何人都能自动建立连接。
+    """
     alice.send_handshake("bob", (_cover(),))
     net.pump()
+    if bob.pending_request is not None:
+        bob.respond_handshake()
+        net.pump()
 
 
 class EnvelopeTest(unittest.TestCase):
     def test_handshake_round_trip(self):
         payload = build_handshake(b"\x01" * 32, Mode.REQUEST)
-        public, mode = parse_handshake(payload)
+        public, mac, mode = parse_handshake(payload)
         self.assertEqual(public, b"\x01" * 32)
+        self.assertEqual(mac, b"", "不带 MAC 的帧仍可解析（兼容路径）")
+        self.assertIs(mode, Mode.REQUEST)
+
+    def test_handshake_carries_a_mac(self):
+        """握手帧必须能带身份校验码 —— X25519 本身没有身份认证。"""
+        mac = b"\xab" * 16
+        payload = build_handshake(b"\x01" * 32, Mode.REQUEST, mac=mac)
+        public, got_mac, mode = parse_handshake(payload)
+        self.assertEqual(public, b"\x01" * 32)
+        self.assertEqual(got_mac, mac)
         self.assertIs(mode, Mode.REQUEST)
 
     def test_handshake_fits_the_smallest_capable_cover(self):
@@ -222,15 +243,34 @@ class TerminalFlowTest(unittest.TestCase):
         self.assertTrue(bob.established)
         self.assertEqual(alice.session.send_key, bob.session.recv_key)
 
-    def test_auto_response_needs_no_user_action(self):
+    def test_response_waits_for_the_user(self):
+        """收到握手请求**不能**自动回复，必须等用户确认。
+
+        理由三条，都不是洁癖：
+
+        * 自动回复从收到到发出图可能只要 0.2 秒，QQ 侧看就是机器行为，
+          而这是个靠"看起来像正常聊天"活着的工具
+        * 用户失去核对指纹的机会，TOFU 就白做了
+        * **客户端挂着时，任何知道口令的人都能自动把连接建立起来**
+
+        这条测试原来是 ``test_auto_response_needs_no_user_action``，断言
+        相反的行为 —— 那是旧设计，已废弃。
+        """
         net, alice, bob = _pair()
-        _handshake(net, alice, bob)
-        # One click on alice's side produced three packets: request, auto
-        # response, and nothing else. The response must have been emitted by bob
-        # without any explicit call.
+        alice.send_handshake("bob", (_cover(),))
+        net.pump()
+
         senders = [sender for sender, _target, _pkt in net.history]
-        self.assertEqual(senders.count("bob"), 1)
-        self.assertIn("自动回发", bob.inbox[-1].handshake + alice.inbox[-1].handshake)
+        self.assertEqual(senders.count("bob"), 0,
+                         "bob 不该在用户确认前发出任何东西")
+        self.assertIsNotNone(bob.pending_request, "请求应当被挂起")
+        self.assertIn("等待你确认", bob.inbox[-1].handshake)
+
+        # 用户点了「接受」
+        self.assertTrue(bob.respond_handshake())
+        net.pump()
+        self.assertIsNone(bob.pending_request)
+        self.assertTrue(alice.established and bob.established)
 
     def test_covert_text_arrives_in_covert_window_only(self):
         net, alice, bob = _pair()
@@ -265,7 +305,7 @@ class TerminalFlowTest(unittest.TestCase):
 
     def test_text_channel_unavailable_is_explained(self):
         net, alice, _bob = _pair()
-        _handshake(net, alice, alice)
+        _handshake(net, alice, _bob)
         with self.assertRaises(InvalidInput) as caught:
             alice.send_covert_text("bob", "hi")
         self.assertIn("中文信道模型", str(caught.exception))
@@ -286,6 +326,76 @@ class TerminalFlowTest(unittest.TestCase):
         with self.assertRaises(InvalidInput) as caught:
             alice.send_handshake("bob", (_cover(), _cover()))
         self.assertIn("只用一张图片", str(caught.exception))
+
+
+class HandshakeAuthenticationTest(unittest.TestCase):
+    """握手帧必须通过身份校验才允许进入会话状态。
+
+    X25519 是**无认证**的 DH：能改写消息流的人可以分别和两端握手，全程
+    解密再转发。这里的 MAC 用共享口令派生，挡住"不知道口令的人伪造帧"。
+    知道口令的人冒充要靠 TOFU 指纹发现（见 tests/test_identity.py）。
+    """
+
+    def _pair(self, *, bob_psk="pbx1"):
+        net = LoopbackNetwork()
+        alice = Terminal("alice", net, psk="pbx1")
+        alice.take_cover = lambda: _cover()
+        alice.attach()
+        bob = Terminal("bob", net, psk=bob_psk)
+        bob.take_cover = lambda: _cover()
+        bob.attach()
+        return net, alice, bob
+
+    def test_matching_passphrases_handshake(self):
+        net, alice, bob = self._pair()
+        _handshake(net, alice, bob)
+        self.assertTrue(alice.established)
+        self.assertTrue(bob.established)
+
+    def test_mismatched_passphrase_is_rejected(self):
+        """口令不同 → 连隐写载荷都提取不出来，更谈不上握手。
+
+        注意这落在"图片里没有我们的帧"这个分支，而不是 MAC 失败分支 ——
+        因为**不同口令连 QIM 系数都解不出来**。这是更强的拒绝：攻击者连
+        "这里有个握手帧"都发现不了。
+
+        界面上的表现是"这张图没有隐藏内容"，与普通表情包一致。这是有意的：
+        把每张解不开的图都报成错误，等于告诉旁观者"这个客户端在找东西"。
+        """
+        net, alice, bob = self._pair(bob_psk="different-secret")
+        alice.send_handshake("bob", (_cover(),))
+        net.pump()
+
+        self.assertFalse(bob.established, "口令不同不该建立会话")
+        self.assertIsNone(bob.pending_request, "被拒的请求不能挂起等确认")
+
+    def test_tampered_frame_is_rejected(self):
+        """公钥与 MAC 对不上 → 拒绝。"""
+        from markovcryptor.terminal.protocol import build_handshake
+        net, alice, bob = self._pair()
+        wrong_key = bytes([17]) * 32
+        bad = build_handshake(wrong_key, Mode.REQUEST, mac=bytes(16))
+        # 走真实路径：把伪造帧嵌进图片再发送，和攻击者能做到的一致。
+        stego, _ = image_stego.embed(_synthetic_cover(), image_stego.build_frame(bad),
+                                     image_stego.normalise_key("pbx1"))
+        stego = _png_bytes(stego)
+        net.send("alice", "bob", _encode_packet(Packet(images=(stego,))))
+        net.pump()
+        self.assertFalse(bob.established)
+        self.assertIsNone(bob.pending_request)
+
+    def test_missing_mac_is_rejected(self):
+        """不带 MAC 的旧格式帧一律拒绝 —— 那是可以随便伪造的。"""
+        from markovcryptor.terminal.protocol import build_handshake
+        net, alice, bob = self._pair()
+        legacy = build_handshake(bytes([34]) * 32, Mode.REQUEST)   # 无 MAC
+        stego, _ = image_stego.embed(_synthetic_cover(), image_stego.build_frame(legacy),
+                                     image_stego.normalise_key("pbx1"))
+        stego = _png_bytes(stego)
+        net.send("alice", "bob", _encode_packet(Packet(images=(stego,))))
+        net.pump()
+        self.assertFalse(bob.established)
+        self.assertIsNone(bob.pending_request)
 
 
 class HostileInputTest(unittest.TestCase):
@@ -462,6 +572,11 @@ class SendRulesTest(unittest.TestCase):
         bob.take_cover = lambda: ours
         alice.send_handshake("bob", (theirs,))
         net.pump()
+        # 回复要用户点「接受」才发 —— 同时这也正是这条测试要验证的东西：
+        # 回复里用的是**我们自己**的图，不是对方那张。
+        self.assertIsNotNone(bob.pending_request)
+        self.assertTrue(bob.respond_handshake())
+        net.pump()
 
         bob_packets = [pkt for sender, _target, pkt in net.history if sender == "bob"]
         self.assertEqual(len(bob_packets), 1)
@@ -512,8 +627,13 @@ class SendRulesTest(unittest.TestCase):
         self.assertFalse(alice.established)
         self.assertIsNotNone(bob.pending_request)
 
+        # 用户点「接受」，但队列里只有一张装不下握手帧的图 → 拒绝并保持挂起
+        self.assertFalse(bob.respond_handshake(),
+                         "图太小就不该发，而且请求要留着")
+        self.assertIsNotNone(bob.pending_request, "失败的回复不能丢掉请求")
+
         queue.append(_cover())
-        self.assertTrue(bob.retry_pending())
+        self.assertTrue(bob.retry_pending(), "补上能用的图之后应当能回复")
         net.pump()
         self.assertTrue(alice.established)
 
@@ -576,11 +696,18 @@ class RekeyTest(unittest.TestCase):
         bob.attach()
         return net, alice, bob
 
+    def _confirm(self, net, responder):
+        """模拟用户点「接受」—— 收方不再自动回复。"""
+        if responder.pending_request is not None:
+            responder.respond_handshake()
+            net.pump()
+
     def test_peer_rekey_keeps_session_usable(self):
         """重握手期间旧会话必须继续能收发密文。"""
         net, alice, bob = self._pair()
         alice.send_handshake("bob", (_cover(),))
         net.pump()
+        self._confirm(net, bob)
         self.assertTrue(alice.session.established)
         self.assertTrue(bob.session.established)
 
@@ -604,6 +731,7 @@ class RekeyTest(unittest.TestCase):
         net, alice, bob = self._pair()
         alice.send_handshake("bob", (_cover(),))
         net.pump()
+        self._confirm(net, bob)
         first_gen = alice.session.generation
 
         alice.take_cover = lambda: None
@@ -634,6 +762,7 @@ class RekeyTest(unittest.TestCase):
         net, alice, bob = self._pair()
         alice.send_handshake("bob", (_cover(),))
         net.pump()
+        self._confirm(net, bob)
 
         for round_index in range(3):
             bob.send_handshake("alice", (_cover(),))
@@ -652,6 +781,7 @@ class RekeyTest(unittest.TestCase):
         net, alice, bob = self._pair()
         alice.send_handshake("bob", (_cover(),))
         net.pump()
+        self._confirm(net, bob)
         gen_before = alice.session.generation
 
         # 先让 alice 手上只有一张装不下 38 字节握手的小图，再让 bob 重握手 ——

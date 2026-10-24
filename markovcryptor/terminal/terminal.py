@@ -41,6 +41,7 @@ from ..core.errors import (
 )
 from ..observability import event
 from .protocol import (
+    HANDSHAKE_MAC_BYTES,
     HEADER_BYTES,
     Kind,
     Mode,
@@ -49,6 +50,7 @@ from .protocol import (
     parse_handshake,
     parse_slice,
     peek_kind,
+    PUBLIC_KEY_BYTES,
     wrap,
 )
 from .session import Session, State
@@ -229,7 +231,7 @@ class Terminal:
         else:
             public, mode = self.session.begin()
 
-        envelope = build_handshake(public, mode)
+        envelope = build_handshake(public, mode, mac=self._handshake_mac(public))
         stego = self._embed_into_all((envelope,), images, what="密钥交换报文")
         self.peer_id = target
         event("terminal", "handshake_out", id=self.id, peer=target,
@@ -619,8 +621,35 @@ class Terminal:
                 return envelope
         return _unhex_or_none(text)
 
+    def _handshake_mac(self, public: bytes) -> bytes:
+        """Our own MAC over ``public``, bound to this psk and this role."""
+        from ..core.identity import build_handshake_payload
+        payload = build_handshake_payload(public, public, self.psk)
+        return payload[PUBLIC_KEY_BYTES:]
+
+    def _verify_handshake_mac(self, public: bytes, mac: bytes) -> None:
+        """Raise ``ValueError`` when the frame is not from someone with our psk."""
+        if not mac:
+            raise ValueError("握手帧未携带校验码（对端版本过旧）")
+        from ..core.identity import build_handshake_payload
+        expected = build_handshake_payload(public, public, self.psk)[PUBLIC_KEY_BYTES:]
+        import hmac as _hmac
+        if not _hmac.compare_digest(mac, expected):
+            raise ValueError("握手帧校验失败：对方口令与你不同，或帧被篡改")
+
     def _on_handshake(self, payload: bytes) -> _Inspected:
-        peer_public, mode = parse_handshake(payload)
+        peer_public, mac, mode = parse_handshake(payload)
+        # **先验 MAC，再碰会话状态。** 未通过验证的公钥绝不能进 absorb()——
+        # 那等于让任何知道协议格式的人往会话里塞一个密钥。
+        try:
+            self._verify_handshake_mac(peer_public, mac)
+        except ValueError as exc:
+            event("terminal", "handshake_mac_rejected", level=logging.WARNING,
+                  id=self.id, reason=str(exc), has_mac=bool(mac))
+            return _Inspected(
+                note=f"握手被拒：{exc}",
+                handshake="握手校验失败（口令不一致或被篡改）",
+            )
         was = self.session.state
         completed = self.session.absorb(peer_public, mode)
         summary = f"握手 {mode.name}（{was.label} → {self.session.state.label}）"
@@ -628,72 +657,61 @@ class Terminal:
               state=self.session.state.value)
 
         if mode is Mode.REQUEST:
-            # Answer automatically -- but only with a picture this side owns.
-            # If there is none yet, the request is held and the state stays
-            # WAITING; the UI says so and retries when the user queues a picture.
+            # **不自动回复。** 只挂起，等用户在界面上点「接受」。
             #
-            # On an established session this is a *rekey*: the old keys stay
-            # usable, so "等待本端上传图片" does not mean the channel is down.
+            # 自动回复的代价：从收到到发出图可能只有 0.2 秒，QQ 侧看就是
+            # 机器行为；用户没机会核对指纹；客户端挂着时任何人都能自动把
+            # 连接建立起来。这三条都不能接受。
+            #
+            # 已建立的会话收到 REQUEST 是**重握手**：旧密钥继续可用，
+            # 所以"等待用户接受"不意味着通道断了。
             was_established = was is State.ESTABLISHED
-            self._auto_respond(peer_public)
-            if self.pending_request is None:
-                return _Inspected(handshake=summary + "，已自动回发")
-            if was_established:
-                return _Inspected(
-                    handshake=summary + "，等待本端上传图片后自动回复"
-                              "（旧密钥仍可用）"
-                )
-            return _Inspected(
-                handshake=summary + "，等待本端上传图片后自动回复"
-            )
+            self.pending_request = peer_public
+            event("terminal", "handshake_awaiting_user", id=self.id,
+                  established=was_established)
+            suffix = "，等待你确认" + ("（旧密钥仍可用）" if was_established else "")
+            return _Inspected(handshake=summary + suffix)
         if completed:
             return _Inspected(handshake=summary + "，会话可用")
         return _Inspected(handshake=summary)
 
-    def _auto_respond(self, peer_public: bytes) -> None:
-        """Reply with our own key, hidden in **our own** picture.
+    def respond_handshake(self) -> bool:
+        """Answer a held request **because the user asked to**.
 
-        The reply must travel in an image this side supplies -- the first one in
-        its own queue. Reusing the picture the request arrived in would mean the
-        reply is built on *their* cover, and both sides would then show the same
-        picture twice; more importantly, a client should only ever send pictures
-        it chose itself.
-
-        With no picture available the reply cannot be sent yet. Rather than
-        inventing a cover or failing silently, remember the request and let the
-        caller retry once the user has queued a picture
-        (:meth:`retry_pending`). Until then this side stays ``WAITING``, which
-        is the truth: the peer has our key but we have not answered.
+        Returns True when a reply went out. False means it is still held
+        (no cover picture, or it would not fit) -- the caller shows that to
+        the user instead of silently pretending something happened.
         """
+        peer_public = self.pending_request
+        if peer_public is None:
+            return False
         target = self.peer_id
         if target is None:
-            event("terminal", "handshake_no_peer", level=logging.WARNING, id=self.id)
-            return
+            return False
+
         cover = self.take_cover() if self.take_cover is not None else None
         if cover is None:
-            self.pending_request = peer_public
             event("terminal", "handshake_held", level=logging.INFO,
                   id=self.id, peer=target, reason="no cover picture queued")
-            return
+            return False
+
         public, mode = self.session.answer()
-        envelope = build_handshake(public, mode)
+        envelope = build_handshake(public, mode, mac=self._handshake_mac(public))
         try:
             stego = self._embed_bytes(envelope, cover)
         except StegoError as exc:
-            # Our own picture is too small for a 38-byte handshake. Keep the
-            # request pending so a bigger one can be used later, and throw away
-            # the prepared response -- committing it now would install keys for
-            # a reply that never left the machine.
+            # 自己的图太小装不下握手帧。留着请求，让用户换张大图重试；
+            # 现在提交就等于为一个没发出去的回复安装密钥。
             self.session.discard_answer()
-            self.pending_request = peer_public
             event("terminal", "handshake_cover_failed", level=logging.WARNING,
                   id=self.id, peer=target, error=exc)
-            return
+            return False
+
         self.pending_request = None
-        event("terminal", "handshake_auto_response", id=self.id, peer=target)
+        event("terminal", "handshake_user_response", id=self.id, peer=target)
         self.network.send(self.id, target, _encode_packet(Packet(images=(stego,))))
-        # The packet is out; now the new keys become the live ones.
         self.session.commit_answer()
+        return True
 
     def retry_pending(self) -> bool:
         """Answer a held handshake request now that a cover may be available.
@@ -703,10 +721,8 @@ class Terminal:
         """
         if self.pending_request is None:
             return False
-        public = self.pending_request
         before = self.session.state
-        self._auto_respond(public)
-        sent = self.pending_request is None
+        sent = self.respond_handshake()
         if sent:
             event("terminal", "handshake_held_released", id=self.id,
                   state_before=before.value, state_after=self.session.state.value)

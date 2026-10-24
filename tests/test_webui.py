@@ -284,10 +284,14 @@ class TerminalContractTest(unittest.TestCase):
                                          files=files))
         self.assertEqual(response.status_code, 200)
 
-        # 握手也要图：alice 从队列里拿一张，bob 用自己那张回包。
+        # 握手也要图：alice 从队列里拿一张，bob 用自己那张回复。
+        # 注意：回复是 bob 的用户点「接受」之后才发的，所以 alice 的状态
+        # 要在那之后重新读一次 —— send 的返回值是"发出请求"那一刻的快照。
         response = self._establish()
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["state_label"].startswith("已建立"))
+        state = _run(self.client.get("/terminal/state")).json()["terminals"]
+        self.assertTrue(state["alice"]["established"],
+                        f"alice 应当已建立，实际 {state['alice']}")
 
         response = _run(self.client.post("/terminal/alice/send",
                                          data={"text": "机密", "mode": "covert-image"},
@@ -345,9 +349,13 @@ class TerminalContractTest(unittest.TestCase):
         if bob_covers:
             _run(self.client.post("/terminal/bob/covers", files=[
                 ("files", ("bob.png", _noise_png(256, seed=5), "image/png"))]))
-        return _run(self.client.post(
+        response = _run(self.client.post(
             "/terminal/alice/send", data={"mode": "handshake"},
             files=[("files", ("c.png", _noise_png(256), "image/png"))]))
+        # 收方**不会自动回包**：必须模拟用户点「接受」。
+        if bob_covers:
+            _run(self.client.post("/terminal/bob/accept"))
+        return response
 
     def test_covert_image_uses_only_as_many_covers_as_needed(self):
         """短密文只消耗够用的张数，剩下的留在队列里。
@@ -419,10 +427,14 @@ class TerminalContractTest(unittest.TestCase):
         self.assertIsNone(sent[-1]["chat_text"])
 
     def test_reply_waits_for_this_side_to_upload_a_picture(self):
-        """本端没图就等着，状态明说在等，用户补图后自动回包。
+        """本端没图就等着；补图**不会**自动回包，仍要用户点「接受」。
 
-        之前是拿对端发来的图回写响应：等于替对端发了他自己的图，聊天里会
-        出现两条一样的图。现在改为用本端队列的头一张，没有就等。
+        两件事一起验证：
+
+        * 回复必须用**本端**的图（拿对端发来的图回写，聊天里会出现两条
+          一模一样的图）
+        * 补图本身不发任何东西 —— 自动回包是刻意去掉的行为，因为"图一到
+          就立刻回"在 QQ 侧看就是机器行为
         """
         _run(self.client.post("/terminal/alice/send", data={"mode": "handshake"},
                               files=[("files", ("c.png", _noise_png(256),
@@ -434,10 +446,15 @@ class TerminalContractTest(unittest.TestCase):
         self.assertTrue(bob["awaiting_cover"])
         self.assertEqual(bob["state"], "waiting")
 
-        # 用户给 bob 补了一张图：回包出去，两端同时可用。
+        # 用户补了一张图 —— 这只是"手里有图了"，不该替他发出去。
         response = _run(self.client.post("/terminal/bob/covers", files=[
             ("files", ("bob.png", _noise_png(256, seed=5), "image/png"))]))
-        self.assertTrue(response.json()["released"])
+        self.assertFalse(response.json()["released"],
+                         "补图不能自动回包")
+
+        # 用户点「接受」才发。
+        accepted = _run(self.client.post("/terminal/bob/accept")).json()
+        self.assertTrue(accepted["sent"])
         for name in ("alice", "bob"):
             info = _run(self.client.get("/terminal/state")).json()["terminals"][name]
             self.assertTrue(info["established"], f"{name} 还没建立")

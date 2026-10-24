@@ -2242,3 +2242,103 @@ mtime 精度在某些文件系统只到秒，所以指纹里还带文件数做�
 模块的 export 列表比对。注入回原 bug 验证过能 FAIL。
 
 **全量 761 passed。**
+
+## 安全加固：握手身份绑定 + TOFU + 手动确认（2026-10-23）
+
+用户问：「拿到算法原文和完整聊天记录，能否据握手包解开双方信息？」
+审计结果分三层。
+
+### 审计结论
+
+**密码学原语是可靠的**：X25519 临时密钥、HKDF-SHA256、AES-256-GCM（每条
+随机 nonce）、PBKDF2-SHA256 310k 轮。**私钥从不离开本地**，所以光有源码和
+聊天记录算不出共享密钥。
+
+**但握手没有身份认证。** `handshake.py` 的 docstring 自己写着 "textbook
+unauthenticated DH"，提到 "may append a MAC"——**但代码里从来没实现**。
+
+实测的 MITM 攻击（`HandshakeParty` 三方模拟）：
+
+```
+Alice 与 Mallory 建立会话成功: True   ← 因为没有身份认证，Alice 毫无察觉
+Alice 发的消息，Mallory 能解密: b'secret message'
+```
+
+而**默认 PSK 是硬编码的 `"pbx1"`**，攻击者连猜都不用猜。
+
+### 三层修复
+
+**1. 帧内 MAC（`core/identity.py` + `terminal/protocol.py`）**
+
+握手帧从 `pub(32) | mode` 变成 `pub(32) | mac(16) | mode`，54 字节。
+MAC = `HMAC-SHA256(mac_key, DOMAIN || public || role)` 取前 16 字节，
+`mac_key = derive(psk, "handshake-mac")` 做域分离。
+
+`_on_handshake` **先验 MAC 再碰会话状态**——未通过验证的公钥绝不进
+`absorb()`，否则任何知道协议格式的人都能往会话里塞密钥。
+
+无 MAC 的旧格式帧一律拒绝（它是可以随便伪造的）。
+
+**2. TOFU 指纹（`core/identity.py` 的 `KnownPeers`）**
+
+首次见到某人的公钥就记住指纹（SHA-256 前 8 字节 = 16 个十六进制字符），
+之后每次比对。变了就 `changed` 警告。
+
+存在 `%APPDATA%\markovcryptor\peers.json`——**这是除用户配置外唯一持久化的
+东西**。理由：TOFU 的全部价值就在"记住上次见到的是谁"，内存里存等于每次
+重启都重新信任，中间人只需等你重启。
+
+存的是**指纹**不是密钥，也不含任何消息内容（有测试守着这一条）。
+
+写盘用临时文件 + `os.replace`：中途断电不能把指纹册写成半截 JSON，
+那会让所有对端都变成"首次见面"，静默丢掉全部验证历史。
+
+**3. 不自动回复握手（用户明确要求）**
+
+原行为是收到请求立刻取图、嵌入、发出——从收到到回复可能只有 0.2 秒。
+用户指出三条代价，全部成立：
+
+- QQ 侧看就是机器行为，而这是个靠"看起来像正常聊天"活着的工具
+- 用户失去核对指纹的机会，TOFU 就白做了
+- **客户端挂着时，任何知道口令的人都能自动把连接建立起来**
+
+改为：收到请求只挂起（`pending_request`），界面显示「接受并回复 / 忽略」，
+用户点了才发。`_auto_respond` 整个方法删除。
+
+### 已验证的端到端行为
+
+`/d/_Temp/verify_manual_handshake.py`（双账号 + 真握手）：
+
+```
+Bob 端 待确认: True           Bob 端 已建立: False
+Bob 已发出的包数: 0           ← 不自动回复
+--- 模拟 Bob 的用户点接受 ---
+回复已发出: True
+接受后 Bob 已建立: True       接受后 Alice 已建立: True
+已记录指纹: 93d3ebe15f17fcfb
+```
+
+### 前端
+
+新增 `pending` 遮挡层状态：`🤝 对方请求建立加密连接`，显示对方指纹
+（首次 / 一致 / **变了** 三种文案），两个按钮「接受并回复」「忽略」。
+
+指纹变了时用红色大字 + 明确警告「可能是重装了客户端，也可能是有人在中间
+……请在别的渠道核对指纹」。
+
+新增端点：`POST /client/handshake/{peer}/accept`、`.../ignore`。
+`GET /client/conversation/{peer}` 增加 `handshake` 字段。
+`GET /client/state` 的会话项增加 `pending`。
+
+### 测试
+
+`tests/test_identity.py`（新增 18 项）：MAC 往返、错口令拒绝、篡改公钥、
+篡改 MAC、帧绑定发送方、长度异常；指纹稳定性/长度/无碰撞；TOFU 首次/
+一致/**变更**/重启后仍记得/信任新键/忘记/损坏文件不阻塞启动/只存指纹。
+
+`test_terminal.py` 新增 `HandshakeAuthenticationTest`（4 项）。
+
+**改写 5 个模块里依赖"自动回复"的测试**（共约 30 处）：`_handshake()`
+辅助函数里加 `respond_handshake()`，模拟用户点击。
+
+**全量 784 passed。**

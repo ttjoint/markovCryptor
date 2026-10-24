@@ -143,7 +143,13 @@
               <div class="veilicon" id="veilIcon">🔒</div>
               <div class="veiltitle" id="veilTitle">尚未握手</div>
               <div class="veiltext" id="veilText">先与对方建立密钥，才能收发隐藏内容。</div>
-              <button class="veilbtn" id="veilAction">发起握手</button>
+              <!-- 对方指纹：TOFU 的全部价值在于"能不能比对"。首次见面显示是
+                   为了让用户有机会通过别的渠道核对；变了则大字警告。 -->
+              <div class="veilfp" id="veilFp" hidden></div>
+              <div class="veilbtns">
+                <button class="veilbtn" id="veilAction">发起握手</button>
+                <button class="veilbtn ghost" id="veilIgnore" hidden>忽略</button>
+              </div>
             </div>
           </div>
 
@@ -316,7 +322,8 @@
 // 顺序有讲究：某些初始化依赖 const 声明完成（暂时性死区），
 // 所以整段必须放在最后。
 import { toast } from "./js/core/dom.js";
-import { COVERT } from "./js/core/store.js";
+import { S, COVERT } from "./js/core/store.js";
+import { api } from "./js/core/api.js";
 import * as List from "./js/views/list.js";
 import * as Chat from "./js/views/chat.js";
 import * as Overlays from "./js/views/overlays.js";
@@ -341,6 +348,18 @@ Covert.setCovertHooks({
   // 切信道要重算容量：图片看"占几张"、文本看"占多少字符"，数字完全不同。
   onChannelChanged: () => Capacity.refresh(),
 });
+
+// 「忽略」：丢掉对方的连接请求，不建立会话，也不记录指纹。
+$("veilIgnore").onclick = async () => {
+  if (!S.current) return;
+  try {
+    await api(`/client/handshake/${S.current}/ignore`, { method: "POST" });
+    toast("已忽略对方的连接请求");
+    await refreshState();
+  } catch (e) {
+    toast(e.message);
+  }
+};
 Overlays.install();
 Composer.setRefresh(() => refreshState());
 Dropper.setImportedCallback(() => refreshState());

@@ -86,16 +86,27 @@ class HandshakeTest(unittest.TestCase):
         for d in self._tmps:
             shutil.rmtree(d, ignore_errors=True)
 
-    def test_handshake_establishes_on_both_sides(self):
-        """发起方从队列取图，接收方自动回包也从队列取图。"""
+    def test_handshake_requires_the_receiver_to_accept(self):
+        """收到握手**不会自动回复**，必须用户点「接受」。
+
+        这不是洁癖：自动回复从收到到发出图可能只要 0.2 秒，QQ 侧看就是
+        机器行为；用户也没机会核对指纹；客户端挂着时任何人都能自动把连接
+        建立起来。
+        """
         self.alice.start_handshake(BOB)
         self.hub.pump()
 
         bob_conv = self.bob.conversations.get(ALICE)
         self.assertIsNotNone(bob_conv, "对端要收到握手并建会话")
-        self.assertTrue(bob_conv.terminal.established,
-                        "对端应自动回包并建立会话")
+        self.assertFalse(bob_conv.terminal.established,
+                         "用户确认前不该建立会话")
+        self.assertIsNotNone(self.bob.pending_handshake(ALICE), "请求应被挂起")
 
+        # 用户点「接受」
+        self.assertTrue(self.bob.accept_handshake(ALICE))
+        self.hub.pump()
+
+        self.assertTrue(bob_conv.terminal.established, "接受后对端建立")
         alice_conv = self.alice.conversations.get(BOB)
         self.assertTrue(alice_conv.terminal.established, "发起方也应建立")
 
@@ -134,7 +145,7 @@ class HandshakeTest(unittest.TestCase):
         # 补一张图再重试
         self.bob.queue.folders = [self.bob_dir]
         self.bob.queue.replenish()
-        self.bob.retry_handshakes()
+        self.assertTrue(self.bob.accept_handshake(ALICE), "补图后应当能回复")
         self.hub.pump()
         self.assertTrue(bob_conv.terminal.established, "补图后应完成")
 
@@ -153,6 +164,9 @@ class CovertTest(unittest.TestCase):
         self.alice = Account(self.alice_net, queue=_queue_for(self.alice_dir)).start()
         self.bob = Account(self.bob_net, queue=_queue_for(self.bob_dir)).start()
         self.alice.start_handshake(BOB)
+        self.hub.pump()
+        # 收方不自动回复 —— 模拟用户点「接受」。
+        self.bob.accept_handshake(ALICE)
         self.hub.pump()
 
     def _tmp(self) -> Path:

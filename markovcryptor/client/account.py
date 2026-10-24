@@ -68,7 +68,8 @@ class Account:
                  queue: PictureQueue | None = None,
                  models: ModelLibrary | None = None,
                  images: ImageCache | None = None,
-                 tasks=None) -> None:
+                 tasks=None,
+                 peers_path: Path | None = None) -> None:
         #: A started :class:`~markovcryptor.terminal.onebot.OneBotNetwork`.
         self.network = network
         self.directory = Directory()
@@ -86,6 +87,13 @@ class Account:
         #: 接收入闸必须由 terminal 在读线程里问 —— 那条线不经 HTTP。
         from .tasks import TaskManager
         self.tasks = tasks if tasks is not None else TaskManager()
+        #: TOFU 指纹册。**这是除用户配置外唯一持久化的东西** ——
+        #: TOFU 的全部价值就在"记住上次见到的是谁"，内存里存等于每次重启
+        #: 都重新信任，中间人只需等你重启。
+        #:
+        #: 存的是公钥指纹（公开信息），不含任何消息内容。
+        from ..core.identity import KnownPeers
+        self.peers = KnownPeers(peers_path)
         self.conversations = Conversations(
             network, self.directory,
             psk=psk, text_channel=text_channel,
@@ -269,6 +277,37 @@ class Account:
                   peer=peer, reason="图片队列为空，握手回复被压后")
             return None
         return item.raw
+
+    def accept_handshake(self, peer: str) -> bool:
+        """用户点了「接受」：回应对方挂起的握手请求。
+
+        收方**不会自动回复** —— 自动回复在 QQ 侧看就是机器行为，用户也失去
+        核对指纹的机会，而且客户端挂着时任何人都能自动建立连接。
+
+        Returns True when the reply actually went out. False means it is still
+        held (no usable picture, or none big enough) -- the caller tells the
+        user instead of pretending it worked.
+        """
+        conversation = self.conversations.get(peer)
+        if conversation is None:
+            return False
+        pending_public = conversation.terminal.pending_request
+        sent = conversation.terminal.respond_handshake()
+        if sent:
+            # 用户点了「接受」才记录指纹 —— 忽略的人不该被当成"已经信任过"。
+            if pending_public is not None and self.peers is not None:
+                status, shown = self.peers.check(peer, pending_public)
+                event("security", "handshake_accepted", peer=peer,
+                      fingerprint=shown, first_time=(status == "first"))
+            conversation.record_outbound(text="（已回应密钥交换）")
+        return sent
+
+    def pending_handshake(self, peer: str) -> bytes | None:
+        """对方挂起的请求（对端公钥），没有则 None。"""
+        conversation = self.conversations.get(peer)
+        if conversation is None:
+            return None
+        return conversation.terminal.pending_request
 
     def retry_handshakes(self) -> int:
         """Retry any handshake left pending for lack of a cover.

@@ -244,7 +244,10 @@ class SendTest(_Base):
 
         bob_conv = bob.conversations.get(ALICE)
         self.assertIsNotNone(bob_conv)
-        self.assertTrue(bob_conv.established, "对端应自动回包")
+        # 收方不自动回包 —— 模拟 bob 的用户点「接受」。
+        self.assertTrue(bob.accept_handshake(ALICE))
+        self.hub.pump()
+        self.assertTrue(bob_conv.established, "接受后才建立会话")
 
         r = self.send({"peer": BOB, "text": "藏着的话",
                                             "mode": "covert"})
@@ -574,6 +577,9 @@ class ModelsWithLibraryTest(_Base):
                       models=self.models).start()
 
         self.send({"peer": BOB, "mode": "handshake"})
+        self.hub.pump()
+        # 收方不自动回包 —— 模拟 bob 的用户点「接受」。
+        self.assertTrue(bob.accept_handshake(ALICE))
         self.hub.pump()
         self.assertTrue(bob.conversations.get(ALICE).established)
 

@@ -137,3 +137,24 @@
     background: var(--err); color: #fff; padding: 8px 16px; border-radius: 8px;
     font-size: 13px; z-index: 50;
   }
+
+  /* ---------- 握手确认：指纹与两个按钮 ----------
+     收方不再自动回复，所以这里必须让人有机会看清"是谁在请求"。
+     指纹是公钥的短哈希，公开信息，用来肉眼比对。 */
+  .veilfp {
+    font-size: 11px; color: var(--dim);
+    font-family: ui-monospace, Consolas, monospace;
+    margin: 2px 0 6px;
+    word-break: break-all;
+  }
+  .veilfp.changed {
+    color: var(--err); font-weight: 600; font-size: 12px;
+  }
+
+  .veilbtns { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+
+  .veilbtn.ghost {
+    background: transparent; color: var(--dim);
+    border: 1px solid var(--line);
+  }
+  .veilbtn.ghost:hover { color: var(--text); border-color: var(--dim); }

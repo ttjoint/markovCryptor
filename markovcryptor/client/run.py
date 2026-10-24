@@ -209,7 +209,11 @@ def _serve(endpoint, cfg, *, config_path: Path | None, root: Path,
 
     queue = PictureQueue(folders=folders, max_items=cfg.max_queue, pick=cfg.pick)
     models = _model_library(cfg, root)
-    account = Account(network, psk=cfg.psk, queue=queue, models=models)
+    # 指纹册放在配置文件旁边（%APPDATA%\markovcryptor\peers.json）。
+    # 这是除配置之外唯一落盘的东西，存的是公钥指纹，不是密钥。
+    peers_path = cfg.path.parent / "peers.json" if getattr(cfg, "path", None) else None
+    account = Account(network, psk=cfg.psk, queue=queue, models=models,
+                      peers_path=peers_path)
 
     try:
         account.start(wait=launcher.DEFAULT_CONNECT_WAIT)

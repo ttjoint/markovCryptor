@@ -23,6 +23,37 @@ from ..tasks import TaskManager
 from .common import data_url, entry_payload, http_error
 from .deps import get_account, get_watchdog, get_window_handle
 
+def _handshake_state(account, conversation) -> dict:
+    """What the UI needs to render the handshake gate.
+
+    ``pending`` 是**对方发来、等用户确认**的请求。收方不再自动回复，所以
+    这个字段决定了界面上要不要显示「接受 / 忽略」按钮。
+
+    ``fingerprint`` / ``fingerprint_status`` 是 TOFU 的结果：
+    ``first``（首次见面）、``same``（一致）、``changed``（**变过，要警告**）。
+    首次见面没有可比对的旧值，所以不需要用户核对；变了才有意义。
+    """
+    terminal = conversation.terminal
+    pending_public = terminal.pending_request
+    state = {
+        "pending": pending_public is not None,
+        "fingerprint": "",
+        "previous_fingerprint": "",
+        "fingerprint_status": "",
+    }
+    if pending_public is not None:
+        from ...core.identity import fingerprint as _fp
+        state["fingerprint"] = _fp(pending_public)
+        known = account.peers.known(conversation.peer) if account.peers else None
+        if known:
+            state["previous_fingerprint"] = known
+            state["fingerprint_status"] = (
+                "same" if known == state["fingerprint"] else "changed")
+        else:
+            state["fingerprint_status"] = "first"
+    return state
+
+
 router = APIRouter()
 
 #: 一条 QQ 消息最多几张图。QQ 客户端通常允许 10 张，这里留一张余量 ——
@@ -93,6 +124,9 @@ def state(request: Request, account: Account = Depends(get_account)) -> JSONResp
                 "unread": conversation.unread,
                 "established": conversation.established,
                 "state_label": conversation.state_label,
+                # 对方发来、等用户确认的握手请求。界面靠它显示「接受/忽略」，
+                # 并在最近列表上打一个点。
+                "pending": conversation.terminal.pending_request is not None,
                 "last_at": conversation.last_at,
                 # 最近列表也要头像。好友列表里有，但会话的对端不一定是
                 # 好友（陌生人也能发消息），所以这里按号码现拼一个兜底。
@@ -126,6 +160,7 @@ def conversation_detail(peer: str, history: int = 0, account: Account = Depends(
         "name": account.directory.name_of(peer),
         "established": conversation.established,
         "state_label": conversation.state_label,
+        "handshake": _handshake_state(account, conversation),
         "entries": [entry_payload(e) for e in conversation.snapshot()],
     })
 
@@ -348,3 +383,46 @@ def estimate_message(payload: dict, request: Request,
         raise HTTPException(status_code=422, detail=f"未知信道：{channel}")
     result = estimate_service.estimate(account, text=text, channel=channel)
     return JSONResponse(result)
+
+
+@router.post("/client/handshake/{peer}/accept")
+def handshake_accept(peer: str, account: Account = Depends(get_account)
+                     ) -> JSONResponse:
+    """用户点了「接受」：回复对方挂起的握手请求。
+
+    收方**不会自动回复** —— 自动回复在 QQ 侧看就是机器行为，用户也失去
+    核对指纹的机会，而且客户端挂着时任何人都能自动把连接建立起来。
+    """
+    conversation = account.conversations.get(peer)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="没有这个会话")
+    if conversation.terminal.pending_request is None:
+        raise HTTPException(status_code=409, detail="没有待确认的握手请求")
+
+    sent = account.accept_handshake(peer)
+    if not sent:
+        raise HTTPException(
+            status_code=409,
+            detail=("队列里没有能装下握手的图片。"
+                    "换一张大一点的图，或先在设置里指定图片文件夹。"),
+        )
+    return JSONResponse({
+        "ok": True,
+        "state_label": conversation.state_label,
+        "entries": [entry_payload(e) for e in conversation.snapshot()[-3:]],
+    })
+
+
+@router.post("/client/handshake/{peer}/ignore")
+def handshake_ignore(peer: str, account: Account = Depends(get_account)
+                     ) -> JSONResponse:
+    """用户点了「忽略」：丢掉这个请求，不建立会话。
+
+    不记录指纹 —— 忽略的人不该被当成"已经信任过"。
+    """
+    conversation = account.conversations.get(peer)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="没有这个会话")
+    conversation.terminal.pending_request = None
+    event("client", "handshake_ignored", level=logging.INFO, peer=peer)
+    return JSONResponse({"ok": True, "state_label": conversation.state_label})
