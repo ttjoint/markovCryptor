@@ -244,6 +244,18 @@ class Session:
             self.peer_public = peer_public
             self._clear_staging()
             return self._derive()
+
+        # **同一个回复重复到达时必须忽略。**
+        #
+        # 场景：我们发出请求，对方（网络重传、或用户点了多次）回了几个
+        # 相同/相近的包。原来每次都 `_derive()`，密钥被反复重建
+        # （实测 generation 从 1 涨到 3），刚建立好的会话被瞬间换掉，
+        # 已经用它加密的消息就解不开了。
+        #
+        # 公钥相同 = 同一个回复，直接当已完成处理，不再派生。
+        if self.established and self.peer_public == peer_public:
+            return False
+
         self._store_peer(peer_public)
         return self._derive()
 

@@ -52,6 +52,10 @@ class Kind(str, Enum):
     #: sits in the sequence; the receiver joins them by index and only then
     #: authenticates, because the AEAD tag covers the reassembled whole.
     BODY_SLICE = "S"
+    #: 带填充的分片：载荷里有"有效长度(2) + 内容 + 随机填充"。
+    #: 独立一个 kind 而不是靠猜：正文首字节完全可能像长度，
+    #: 那就是一个偶发且极难复现的解码错误。
+    BODY_SLICE_PADDED = "P"
 
     @classmethod
     def of(cls, raw: bytes | str) -> "Kind":
@@ -138,7 +142,7 @@ def _aad(kind: Kind) -> bytes:
 
 def seal_body(kind: Kind, key: bytes, plaintext: bytes) -> bytes:
     """Encrypt ``plaintext`` into a body envelope for ``kind``."""
-    if kind in (Kind.HANDSHAKE, Kind.BODY_SLICE):
+    if kind in (Kind.HANDSHAKE, Kind.BODY_SLICE, Kind.BODY_SLICE_PADDED):
         raise InvalidInput(f"{kind.name} 不是密文类型；切片请用 build_slice")
     nonce, ciphertext = crypto.seal(key, plaintext, _aad(kind))
     return MAGIC + kind.value.encode() + nonce + ciphertext
@@ -170,24 +174,53 @@ def open_body(payload: bytes, kind: Kind, key: bytes) -> bytes:
 SLICE_HEADER_BYTES = 2      # index(1) | count(1)
 
 
-def build_slice(index: int, count: int, chunk: bytes) -> bytes:
-    """Wrap one piece of a split body."""
+def build_slice(index: int, count: int, chunk: bytes,
+                real_length: int | None = None) -> bytes:
+    """Wrap one piece of a split body.
+
+    ``real_length`` 是 ``chunk`` 里**真正有用的字节数**，允许后面跟填充。
+
+    为什么要填充：不补的话，每张图的载荷长度和它承载的明文份额成正比 ——
+    一张只装 12 字节的图，和一张装 400 字节的图，从"能装多少、实际用了
+    多少"就看得出来。补满之后每张图都是满载，观察者只能知道"发了几张
+    图"（图片数量本来就泄露了信息量），单张长度不再泄露第二份。
+    """
     if not 0 <= index < count <= 255:
         raise InvalidInput(f"分片序号越界：{index}/{count}")
     if not chunk:
         raise InvalidInput("分片不能为空：没有载荷的图片会被一眼挑出")
-    return MAGIC + Kind.BODY_SLICE.value.encode() + bytes((index, count)) + chunk
+    length = len(chunk) if real_length is None else int(real_length)
+    if not 0 < length <= len(chunk):
+        raise InvalidInput(f"分片有效长度非法：{length}/{len(chunk)}")
+    head = MAGIC + Kind.BODY_SLICE.value.encode() + bytes((index, count))
+    # **被填充过就换一个 kind**，不靠猜测区分。
+    #
+    # 试过"看前 2 字节像不像长度"，但正文首字节完全可能落在合法范围，
+    # 那就是一个会偶发、极难复现的解码错误。显式标记没有这个风险。
+    if length == len(chunk):
+        return head + chunk
+    head = MAGIC + Kind.BODY_SLICE_PADDED.value.encode() + bytes((index, count))
+    return head + length.to_bytes(2, "big") + chunk
 
 
 def parse_slice(payload: bytes) -> tuple[int, int, bytes]:
     """Return ``(index, count, chunk)``. Raises if it is not a slice envelope."""
-    body = _body(payload, Kind.BODY_SLICE)
+    padded = payload[len(MAGIC):len(MAGIC) + 1] == Kind.BODY_SLICE_PADDED.value.encode()
+    body = _body(payload, Kind.BODY_SLICE_PADDED if padded else Kind.BODY_SLICE)
     if len(body) < SLICE_HEADER_BYTES:
         raise NoHiddenFrame(f"分片报文过短：{len(body)} 字节，装不下序号")
     index, count = body[0], body[1]
     if index >= count or count == 0:
         raise NoHiddenFrame(f"分片序号非法：{index}/{count}")
-    return index, count, body[SLICE_HEADER_BYTES:]
+    rest = body[SLICE_HEADER_BYTES:]
+    if padded:
+        if len(rest) < 2:
+            raise NoHiddenFrame("分片有效长度缺失")
+        declared = int.from_bytes(rest[:2], "big")
+        if not 0 < declared <= len(rest) - 2:
+            raise NoHiddenFrame(f"分片有效长度非法：{declared}/{len(rest) - 2}")
+        return index, count, rest[2:2 + declared]
+    return index, count, rest
 
 
 # -------------------------------------------------------------------- helpers

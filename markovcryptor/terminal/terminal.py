@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import io
 import logging
+import os
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -42,6 +44,7 @@ from ..core.errors import (
 from ..observability import event
 from .protocol import (
     HANDSHAKE_MAC_BYTES,
+    MAGIC,
     HEADER_BYTES,
     Kind,
     Mode,
@@ -150,6 +153,16 @@ class Terminal:
         self.take_cover: Callable[[], bytes | None] | None = None
         #: A REQUEST that arrived while this side had no picture to answer with.
         self.pending_request: bytes | None = None
+        #: 这个挂起请求是什么时候收到的（``time.monotonic()``）。
+        #: 界面要显示"N 秒前的请求" —— 对方反复发时，用户需要知道
+        #: 自己点的是最新那个还是半小时前的。
+        self.pending_since: float = 0.0
+        #: 最近见过的对端公钥（环形，只留几十个）。
+        #:
+        #: **重放防护**：X25519 公钥每次握手都是随机的，所以同一个公钥
+        #: 再次出现几乎只可能是重放。攻击者把一张合法的握手图反复丢过来，
+        #: 用户会被"一堆相同的请求"淹没，很容易误点其中一个。
+        self._seen_requests: list[bytes] = []
 
     # ------------------------------------------------------------------ config
 
@@ -358,13 +371,31 @@ class Terminal:
                 hints=("在待发送预览栏里准备图片", "或改用文本混淆发送（不消耗图片）"),
             )
         envelope = self.session.seal(Kind.BODY_IMAGE, text.encode("utf-8"))
-        pieces = (envelope,) if len(images) == 1 else split_payload(envelope, len(images))
+        pieces = (envelope,) if len(images) == 1 else split_payload(
+            envelope, len(images),
+            capacities=[self._cover_capacity(raw) for raw in images])
         stego = self._embed_into_all(pieces, images, what="正文密文")
         event("terminal", "covert_out", id=self.id, peer=target,
               images=len(stego), bytes=len(envelope))
         self.send_packet(target, Packet(text=chat_text, images=stego))
 
     # --------------------------------------------------------------- embedding
+
+    def _cover_capacity(self, raw: bytes) -> int:
+        """How many payload bytes one cover can carry (after clamping).
+
+        Returns 0 when the bytes are not a picture we can read -- the caller
+        then leaves that slice unpadded rather than guessing a size.
+        """
+        try:
+            image = _try_open(raw)
+            if image is None:
+                return 0
+            if getattr(image, "n_frames", 1) > 1 or image.format == "GIF":
+                return int(gif_stego.capacity(image)["max_payload_bytes"])
+            return image_stego.max_payload_bytes(*image.size)
+        except Exception:                          # noqa: BLE001 - optional
+            return 0
 
     def _embed_into_all(self, envelopes: tuple[bytes | None, ...],
                         images: tuple[bytes, ...],
@@ -583,7 +614,7 @@ class Terminal:
             # A text body inside an image means the sender's carrier choice was
             # inconsistent. Not fatal, but worth saying rather than guessing.
             return _Inspected(note="信封类型与载体不符：文本正文出现在图片里"), display
-        if kind is Kind.BODY_SLICE:
+        if kind in (Kind.BODY_SLICE, Kind.BODY_SLICE_PADDED):
             index, count, chunk = parse_slice(payload)
             return _Inspected(piece=(index, count), slice_bytes=chunk), display
         # A body image holds the whole message in one picture; decrypt it now.
@@ -666,7 +697,26 @@ class Terminal:
             # 已建立的会话收到 REQUEST 是**重握手**：旧密钥继续可用，
             # 所以"等待用户接受"不意味着通道断了。
             was_established = was is State.ESTABLISHED
+
+            # **同一个公钥只认一次。** 对方在用户还没回应时反复发请求，
+            # 或者有人重放旧图，都会走到这里。X25519 公钥是随机的，重复
+            # 出现几乎只可能是重放 —— 直接忽略，不刷新待确认状态。
+            if peer_public in self._seen_requests:
+                event("terminal", "handshake_replay_ignored", level=logging.INFO,
+                      id=self.id)
+                return _Inspected(
+                    note="重复的握手请求（已忽略）",
+                    handshake=summary + "，重复请求已忽略",
+                )
+            self._remember_request(peer_public)
+
+            # 只保留**最新**一个请求：旧的被覆盖。
+            # 不排队等着一一回复 —— 一次性建立一堆连接没有任何必要，
+            # 而且用户点"接受"时根本分不清在回哪个。
+            if self.pending_request is not None                     and self.pending_request != peer_public:
+                event("terminal", "handshake_superseded", id=self.id)
             self.pending_request = peer_public
+            self.pending_since = time.monotonic()
             event("terminal", "handshake_awaiting_user", id=self.id,
                   established=was_established)
             suffix = "，等待你确认" + ("（旧密钥仍可用）" if was_established else "")
@@ -674,6 +724,19 @@ class Terminal:
         if completed:
             return _Inspected(handshake=summary + "，会话可用")
         return _Inspected(handshake=summary)
+
+    def _remember_request(self, public: bytes) -> None:
+        """Remember a seen request's public key, keeping the list small."""
+        self._seen_requests.append(public)
+        if len(self._seen_requests) > 64:
+            del self._seen_requests[:-64]
+
+    @property
+    def pending_age(self) -> float:
+        """How many seconds ago the held request arrived (0 when none)."""
+        if self.pending_request is None or not self.pending_since:
+            return 0.0
+        return max(0.0, time.monotonic() - self.pending_since)
 
     def respond_handshake(self) -> bool:
         """Answer a held request **because the user asked to**.
@@ -708,6 +771,7 @@ class Terminal:
             return False
 
         self.pending_request = None
+        self.pending_since = 0.0
         event("terminal", "handshake_user_response", id=self.id, peer=target)
         self.network.send(self.id, target, _encode_packet(Packet(images=(stego,))))
         self.session.commit_answer()
@@ -785,7 +849,9 @@ def _unhex_or_none(text: str) -> bytes | None:
     return raw if raw[:4] == b"PBX1" else None
 
 
-def split_payload(envelope: bytes, parts: int) -> tuple[bytes, ...]:
+def split_payload(envelope: bytes, parts: int,
+                  capacities: list[int] | None = None
+                  ) -> tuple[bytes, ...]:
     """Cut ``envelope`` into ``parts`` consecutive slices, each a PBX1 envelope.
 
     Consecutive (not interleaved) because the receiver must be able to put them
@@ -815,8 +881,29 @@ def split_payload(envelope: bytes, parts: int) -> tuple[bytes, ...]:
     start = 0
     for index in range(parts):
         end = start + size + (1 if index < extra else 0)
-        slices.append(build_slice(index, parts, envelope[start:end]))
+        chunk = envelope[start:end]
         start = end
+        # **补满到这张图的实际容量。**
+        #
+        # 不补的话，每张图的载荷长度和它的明文份额成正比：一张只装了
+        # 12 字节的图，和一张装了 400 字节的图，从"能装多少、实际用了
+        # 多少"就看得出来。补满之后每张图都是满载，观察者只能知道
+        # "发了几张图"——那正是用户要的：图片数量已经泄露了信息量，
+        # 单张长度不该再泄露一份。
+        #
+        # 填充用随机字节：可压缩的数据（全零）会让图片体积异常变小，
+        # 反而成了新的特征。
+        real = len(chunk)
+        room = 0
+        if capacities and index < len(capacities):
+            # 片信封头：MAGIC(4) + kind(1) + index+count(2) + 有效长度(2)
+            overhead = len(MAGIC) + 1 + 2 + 2
+            room = max(0, int(capacities[index]) - overhead)
+        if room > real:
+            # 填充用随机字节：可压缩的数据（全零）会让图片体积异常变小，
+            # 反而成了新特征。
+            chunk = chunk + os.urandom(room - real)
+        slices.append(build_slice(index, parts, chunk, real_length=real))
     return tuple(slices)
 
 

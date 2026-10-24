@@ -55,7 +55,14 @@ export function setCovertState(state, extra) {
     // 机会，而且客户端挂着时任何人都能自动把连接建立起来。
     veil.hidden = false;
     icon.textContent = "🤝";
-    title.textContent = "对方请求建立加密连接";
+    // 说清楚是"几秒前"的请求：对方反复发时，用户得知道自己点的是
+    // 最新那个还是半小时前的。只回最新一个 —— 一次建立一堆连接没有意义。
+    const age = (extra && typeof extra.pending_age === "number")
+      ? extra.pending_age : 0;
+    const when = age < 5 ? "刚刚" : `${Math.round(age)} 秒前`;
+    title.textContent = extra && extra.rekey
+      ? `对方请求更换密钥（${when}）`
+      : `对方请求建立加密连接（${when}）`;
     const status = (extra && extra.fingerprint_status) || "first";
     if (status === "changed") {
       veil.classList.add("warn");

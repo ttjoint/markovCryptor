@@ -38,6 +38,9 @@ def _handshake_state(account, conversation) -> dict:
     pending_public = terminal.pending_request
     state = {
         "pending": pending_public is not None,
+        # 这个请求是几秒前收到的。对方反复发时，用户需要知道自己点的是
+        # 最新那个还是半小时前的。
+        "pending_age": round(terminal.pending_age, 1),
         "fingerprint": "",
         "previous_fingerprint": "",
         "fingerprint_status": "",
