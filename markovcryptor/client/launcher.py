@@ -410,6 +410,23 @@ def start_snowluma(snowluma: Path, *, log_dir: Path | None = None) -> subprocess
     env.setdefault("SNOWLUMA_DEV_MODE", "1")
     env.setdefault("SNOWLUMA_DEV_PASSWORD", DEV_PASSWORD)
 
+    # **必须自动 hook 已登录的 QQ。**
+    #
+    # SnowLuma 的 ``runtime.json`` 里默认 ``hookAutoLoad: false``——它不会
+    # 自动挂到已经开着的 QQ 上，得去 WebUI 里手点。而交付包的 ``config/``
+    # 是空的（不能带构建机的账号），于是全新安装时它生成一份
+    # ``hookAutoLoad: false`` 的默认配置，然后**永远不 hook**：
+    #
+    #     [WebUI] listening http://127.0.0.1:5099
+    #     （到此为止，没有 [Hook] login detected）
+    #
+    # OneBot 端口于是永不打开，客户端等满 30 秒报"OneBot 端口没起来"。
+    # 用户看到的日志就是这样，而且清掉 node 也没用——根本不是残留进程的事。
+    #
+    # 环境变量优先级高于配置文件（``resolveAutoLoad`` 先看 env），所以
+    # 这一行就能兜住，不管 config 里写的是什么。
+    env.setdefault("SNOWLUMA_HOOK_AUTOLOAD", "1")
+
     creationflags = 0
     if hasattr(subprocess, "CREATE_NO_WINDOW"):
         creationflags = subprocess.CREATE_NO_WINDOW
@@ -430,6 +447,123 @@ def start_snowluma(snowluma: Path, *, log_dir: Path | None = None) -> subprocess
 
     event("launcher", "snowluma_started", pid=process.pid, log=str(log_path))
     return process
+
+
+def _active_onebot_ports(snowluma: Path) -> list[int]:
+    """本包配置里的 OneBot 端口，哪些正在听。
+
+    有任何一个在听，就说明有一份 SnowLuma 正在为某个客户端服务。
+    """
+    live: list[int] = []
+    config_dir = Path(snowluma) / "config"
+    if not config_dir.is_dir():
+        return live
+    for path in config_dir.glob("onebot_*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        networks = data.get("networks") or {}
+        for key in ("wsServers", "httpServers"):
+            for server in networks.get(key) or ():
+                try:
+                    port = int((server or {}).get("port"))
+                except (TypeError, ValueError):
+                    continue
+                if _port_open("127.0.0.1", port, timeout=0.2):
+                    live.append(port)
+    return live
+
+
+def kill_stray_snowluma(snowluma: Path) -> list[int]:
+    """Kill every node.exe that is running **this** SnowLuma, whatever its pid.
+
+    pid 记账不可靠：``atexit`` 在 pythonw 被任务管理器杀掉时不执行，
+    记录文件也可能没写成功。留下的 node 会**死死占着 QQ 的 hook 管道** ——
+    新实例的 SnowLuma 起得来、WebUI 也在听，但 ``[Hook] login detected``
+    永远不出现，于是 OneBot 端口永不打开，客户端等满超时后报
+    "OneBot 端口没起来"。
+
+    用户那边看到的日志正是这样：
+
+        03:02:17 [Hook] login detected: PID=3172 UIN=...
+        03:08:19 [WebUI] listening http://127.0.0.1:5099
+                 （然后什么都没有）
+
+    扫描条件必须**同时**满足两条，否则会误杀用户自己的东西：
+    * 可执行文件是 node.exe
+    * 命令行里带**本包的** snowluma 路径
+
+    返回被收掉的 pid。
+    """
+    import json as _json
+    import subprocess as _sp
+
+    target = str(Path(snowluma).resolve()).replace("\\", "/").lower()
+    if not target:
+        return []
+
+    script = (
+        "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | "
+        "ForEach-Object { "
+        "Write-Output ($_.ProcessId.ToString() + '|' + $_.CommandLine) }"
+    )
+    try:
+        completed = _sp.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True, text=True, timeout=15,
+            creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
+    except Exception as exc:                       # noqa: BLE001
+        event("launcher", "stray_scan_failed", level=logging.WARNING, error=exc)
+        return []
+
+    # **别动正在服务别人的那一份。**
+    #
+    # 同一个包里可能同时跑着多个客户端实例（用户开两个窗口、或者调试时
+    # 另起一个）。它们的 SnowLuma 是同路径的，上面那个路径匹配分不出来，
+    # 于是实例 B 一启动就把实例 A 正在用的 SnowLuma 杀掉 —— A 立刻崩，
+    # 用户看到"关掉一个窗口，两个都没了"。
+    #
+    # 判据：本包 config 里记着的 OneBot 端口有人在听，就说明有一份是活的，
+    # 不能碰。只在"确实没人服务"时才清场。
+    if _active_onebot_ports(snowluma):
+        event("launcher", "stray_scan_skipped", reason="onebot port in use")
+        return []
+
+    killed: list[int] = []
+    for line in (completed.stdout or "").splitlines():
+        pid_text, _, command = line.partition("|")
+        try:
+            pid = int(pid_text.strip())
+        except ValueError:
+            continue
+        normalised = command.replace("\\", "/").lower()
+        if target not in normalised:
+            continue                           # 不是本包的 SnowLuma
+
+        event("launcher", "killing_stray_snowluma", pid=pid)
+        try:
+            _sp.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True, timeout=15,
+                    creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
+            killed.append(pid)
+        except Exception as exc:                   # noqa: BLE001
+            event("launcher", "stray_kill_failed", level=logging.WARNING,
+                  pid=pid, error=exc)
+    return killed
+
+
+def snowluma_is_shared(snowluma: Path, our_snowluma_pid: int | None) -> bool:
+    """这个 SnowLuma 是不是还有别的客户端在用。
+
+    判据：OneBot 端口在听，但**不是我们这一份**在服务。翻过来更难判断，
+    所以用保守规则 —— 只要端口在听，就不主动杀，交给用户。
+
+    实践中最常见的多实例场景是"用户开了两个窗口"，两边复用同一个
+    SnowLuma。关掉其中一个时把它杀掉，另一个立刻变成"后端消失"，
+    用户看到的是"关一个两个都关了"。
+    """
+    return bool(_active_onebot_ports(snowluma))
 
 
 def restart_snowluma(snowluma: Path, owned) -> None:

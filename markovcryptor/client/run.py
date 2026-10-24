@@ -217,6 +217,17 @@ def run(*, snowluma: Path | None = None, config_path: Path | None = None,
                 _log(f"发现已登录的 QQ {previous.uin}，启动 SnowLuma…")
             else:
                 _log("正在等待 QQ 登录…（SnowLuma 只能挂到已登录的 QQ 上）")
+            # 起新的之前，先收掉本包遗留的 node。
+            #
+            # 它们会**死死占着 QQ 的 hook 管道**：新实例的 WebUI 起得来、
+            # 端口也在听，但 `[Hook] login detected` 永远不出现，OneBot
+            # 端口于是永不打开 —— 表现为 "OneBot 端口没起来"。
+            # 实测日志：03:02 那次 hook 成功，之后 03:06、03:08 两次都只
+            # 到 "[WebUI] listening" 就再无动静。
+            strays = launcher.kill_stray_snowluma(root)
+            if strays:
+                _log(f"  收掉了 {len(strays)} 个上次遗留的 SnowLuma 进程")
+
             # 记下来：退出时要收掉。只收**我们自己起的**那一份 ——
             # 用户手动开的 SnowLuma 不能因为关这个客户端就被杀掉。
             process = launcher.start_snowluma(root)
