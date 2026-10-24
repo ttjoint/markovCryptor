@@ -251,3 +251,34 @@
     background: var(--panel); color: var(--text);
     font-size: 13px; box-shadow: 0 4px 18px rgba(0,0,0,.3);
   }
+
+  /* ---------- 密文窗顶部的密钥信息栏 ---------- */
+  .keybar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 10px; margin: 0 0 4px;
+    background: var(--panel2); border-radius: 6px;
+    font-size: 11px; color: var(--dim);
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+  }
+  .keyicon { font-size: 11px; }
+  .keyage { color: var(--text); }
+  /* 用得久了给个提示色，但不报警 —— 长会话不一定是问题。 */
+  .keyage.old { color: var(--warn); }
+  .keyfp {
+    font-family: ui-monospace, Consolas, monospace;
+    opacity: .8; cursor: help;
+  }
+  .keygrow { flex: 1 1 auto; }
+  .keybtn {
+    padding: 1px 8px; border-radius: 5px;
+    border: 1px solid var(--line); background: transparent;
+    color: var(--dim); font-size: 11px; cursor: pointer;
+  }
+  .keybtn:hover { color: var(--text); border-color: var(--dim); }
+  .keybtn:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* 等待态与超时提示。放在同一条里，因为它描述的是同一个状态机。 */
+  .keybar.waiting { background: rgba(90, 169, 230, .12); }
+  .keywait { color: var(--accent); }
+  .keywait.stale { color: var(--warn); font-weight: 600; }

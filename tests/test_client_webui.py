@@ -293,6 +293,45 @@ class ScriptTest(unittest.TestCase):
                     missing.append(f"{path.name}: {spec}")
         self.assertEqual(missing, [], f"import 指向不存在的文件: {missing}")
 
+    def test_scripts_parse_as_es_modules(self):
+        """每个 JS 文件必须能按 **ES module** 解析。
+
+        **为什么不能只靠 ``node --check foo.js``**：node 对 ``.js`` 后缀
+        按 CommonJS 解析，``import``/``export`` 会被当成语法错误 —— 或者
+        更糟，某些结构错误被放过。实锤：``app.js`` 有一处孤立的 ``}``，
+        ``node --check app.js`` 通过，浏览器却整个模块加载失败、页面空白。
+        复制成 ``.mjs``（强制 ESM）才报出来。
+
+        浏览器里模块加载失败是**静默**的：控制台只有一行 net::ERR，界面
+        看着就是"打开是空的"，极难定位。
+        """
+        import shutil
+        import subprocess
+        import tempfile
+
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("没有 node，无法检查 JS 语法")
+
+        failures = []
+        with tempfile.TemporaryDirectory() as tmp:
+            for path, text in self.sources.items():
+                if path.suffix != ".js":
+                    continue
+                name = path.relative_to(WEBUI).as_posix()
+                # 复制成 .mjs，强制 node 按 ES module 解析。
+                probe = Path(tmp) / (name.replace("/", "_") + ".mjs")
+                probe.write_text(text, encoding="utf-8")
+                result = subprocess.run(
+                    [node, "--check", str(probe)],
+                    capture_output=True, text=True, timeout=30)
+                if result.returncode != 0:
+                    lines = (result.stderr or "").strip().splitlines()
+                    first = lines[0] if lines else "?"
+                    failures.append(name + ": " + first)
+        self.assertEqual(failures, [],
+                         "JS 无法按 ES module 解析：" + " / ".join(failures))
+
     def test_exported_symbols_really_exist(self):
         """``X.y(...)`` 里的 y 必须真的由模块 X 导出。
 

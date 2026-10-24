@@ -23,6 +23,8 @@ means ``established`` is exactly "crypto is possible".
 
 from __future__ import annotations
 
+import time
+
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -62,6 +64,15 @@ class Session:
     #: replacing the keys under an open conversation.
     generation: int = 0
 
+    #: 当前这套密钥是什么时候建立的（``time.monotonic()``）。
+    #:
+    #: 界面要显示"会话已建立 12 分钟" —— 密钥年龄是真实的安全信号：会话
+    #: 越长，同一套密钥暴露的窗口越大，用户据此决定要不要换。自动定期换钥
+    #: 是反效果的（每次都要对方确认，对方不在线就卡住），所以只提示不决策。
+    key_since: float = 0.0
+    #: 发起握手请求的时刻，用于两段式超时提示。
+    requested_at: float = 0.0
+
     #: --- Rekey staging -------------------------------------------------
     #: The protocol is stateless: the peer may start a new handshake at any
     #: moment, with a brand-new key. If that immediately replaced the live keys,
@@ -78,6 +89,20 @@ class Session:
     @property
     def established(self) -> bool:
         return self.state is State.ESTABLISHED
+
+    @property
+    def key_age(self) -> float:
+        """这套密钥用了多少秒。未建立时为 0。"""
+        if not self.established or not self.key_since:
+            return 0.0
+        return max(0.0, time.monotonic() - self.key_since)
+
+    @property
+    def waiting_for(self) -> float:
+        """已经等了对方多少秒（仅 WAITING 状态有意义）。"""
+        if self.state is not State.WAITING or not self.requested_at:
+            return 0.0
+        return max(0.0, time.monotonic() - self.requested_at)
 
     def reset(self) -> None:
         """Forget everything, including the ephemeral private key."""
@@ -135,6 +160,7 @@ class Session:
         self.peer_public = b""
         self.send_key = self.recv_key = self.transcript = b""
         self.state = State.WAITING
+        self.requested_at = time.monotonic()
         return public, Mode.REQUEST
 
     def answer(self) -> tuple[bytes, Mode]:
@@ -237,6 +263,7 @@ class Session:
         )
         self.state = State.ESTABLISHED
         self.generation += 1
+        self.key_since = time.monotonic()
         return True
 
     # ----------------------------------------------------------------- crypto

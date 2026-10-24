@@ -34,13 +34,30 @@ def _handshake_state(account, conversation) -> dict:
     首次见面没有可比对的旧值，所以不需要用户核对；变了才有意义。
     """
     terminal = conversation.terminal
+    session = terminal.session
     pending_public = terminal.pending_request
     state = {
         "pending": pending_public is not None,
         "fingerprint": "",
         "previous_fingerprint": "",
         "fingerprint_status": "",
+        # 密钥年龄：界面顶部显示"会话已建立 12 分钟"。密钥年龄是真实的
+        # 安全信号（会话越长，同一套密钥暴露的窗口越大），所以只提示
+        # 不自动续期 —— 换钥要对方确认，自动换在对方离线时会把通道卡死。
+        "key_age": round(session.key_age, 1),
+        "generation": session.generation,
+        "established": conversation.established,
+        # 已建立会话收到 REQUEST = 换钥，不是首次握手。界面文案要区分：
+        # 换钥期间旧密钥继续可用，不能说"连接已断开"。
+        "rekey": (pending_public is not None and session.established),
+        # 两段式超时：30 秒提示"对方暂未回应"，10 分钟建议重发。
+        # 不自动放弃 —— 对方可能真的晚点回来，决定权在人。
+        "waiting_seconds": round(session.waiting_for, 1),
     }
+    # 本端的密钥指纹（已建立时）。用于让用户有机会和对方核对。
+    if session.my_public:
+        from ...core.identity import fingerprint as _fp2
+        state["my_fingerprint"] = _fp2(session.my_public)
     if pending_public is not None:
         from ...core.identity import fingerprint as _fp
         state["fingerprint"] = _fp(pending_public)

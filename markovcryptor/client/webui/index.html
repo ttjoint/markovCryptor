@@ -106,6 +106,23 @@
         <!-- 右：密文。同样是一个单元，未握手时整块被遮挡。 -->
         <section class="pane" id="paneCovert">
           <h2>密文（解出来的隐藏内容）</h2>
+
+          <!-- 密钥信息栏：年龄 + 指纹 + 换钥。
+               密钥年龄是真实的安全信号（会话越长，同一套密钥暴露的窗口
+               越大），所以显示出来让用户自己决定要不要换 —— 自动续期反而
+               会把通道卡死：换钥需要对方确认，对方离线就停在等待。 -->
+          <div class="keybar" id="keyBar" hidden>
+            <span class="keyicon" id="keyIcon">🔑</span>
+            <span class="keyage" id="keyAge">—</span>
+            <span class="keyfp" id="keyFp" title="本端密钥指纹"></span>
+            <span class="keygrow"></span>
+            <!-- 同一栏里还报告"正在等待对方回应"和"等太久了，建议重发"。
+                 分成两处显示会让用户以为它们是两件事，其实都是连接状态。 -->
+            <span class="keywait" id="keyWait" hidden></span>
+            <button class="keybtn" id="btnRekey"
+                    title="与对方重新交换密钥（需要对方确认）">换新密钥</button>
+          </div>
+
           <div class="thread covert-thread" id="covertThread"></div>
 
           <div class="composer" id="covertComposer">

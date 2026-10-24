@@ -15,6 +15,7 @@ import * as Covert from "./views/covert.js";
 import * as Settings from "./panels/settings.js";
 import * as SendQueue from "./views/sendqueue.js";
 import * as StatusBar from "./views/statusbar.js";
+import * as KeyBar from "./views/keybar.js";
 import * as Capacity from "./views/capacity.js";
 
 // ---------------------------------------------------------------- 状态刷新
@@ -106,6 +107,7 @@ export async function refreshConversation() {
     // 指纹只在会话详情里，所以拿到后补画一次遮挡层。
     const hs = detail.handshake || {};
     S.handshakeInfo = hs;
+    KeyBar.renderKeyBar(hs);
     if (hs.pending && COVERT.state === "pending") {
       Covert.setCovertState("pending", hs);
     }
@@ -541,8 +543,25 @@ export function initLifecycle() {
   scheduleProbe(0);
 }
 
-
+// 「忽略」：丢掉对方的连接请求，不建立会话，也不记录指纹。
+$("veilIgnore").onclick = async () => {
+  if (!S.current) return;
+  try {
+    await api(`/client/handshake/${S.current}/ignore`, { method: "POST" });
     toast("已忽略对方的连接请求");
+    await refreshState();
+  } catch (e) {
+    toast(e.message);
+  }
+};
+
+// 换新密钥：就是重新发起一次握手。对方收到 REQUEST，确认后生效。
+// 不做自动续期 —— 换钥要对方确认，对方离线时自动换会把通道卡死。
+$("btnRekey").onclick = async () => {
+  if (!S.current) return;
+  try {
+    await KeyBar.requestRekey(S.current);
+    toast("已请求换新密钥，等待对方确认");
     await refreshState();
   } catch (e) {
     toast(e.message);
