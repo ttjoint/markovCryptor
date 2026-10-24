@@ -124,6 +124,35 @@ def _build_wheels(target: Path) -> None:
                 print(f"    cp{version}-{platform} 完全下不了，跳过")
 
 
+#: SnowLuma 运行时写的东西，其中任何一样都不该跟着交付包发出去。
+#:
+#: **事故**：0.3.0 的测试包里带着 `config/onebot_<QQ>.json`，里面有真实
+#: 的 OneBot accessToken —— 拿到它就能完全控制构建机上那个 QQ 号：
+#: 收发任意消息、读全部好友和群。另外还带着聊天数据库和明文日志。
+#:
+#: 这不是"便利"问题，是静默泄漏：从包里看不出它是谁的，但它是真的能用。
+_PERSONAL_DIRS = ("config", "data", "logs", "cache", "tmp")
+
+
+def _scrub_personal_state(snowluma_root: Path) -> None:
+    """删除 SnowLuma 在构建机上运行后留下的个人信息。
+
+    保留 ``config/`` 空目录本身：SnowLuma 没有它就拒绝启动。
+    """
+    for name in _PERSONAL_DIRS:
+        folder = snowluma_root / name
+        if not folder.exists():
+            continue
+        if name == "config":
+            for item in folder.iterdir():
+                if item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+                else:
+                    item.unlink(missing_ok=True)
+            continue
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def _copy_snowluma(source: Path, target: Path) -> None:
     """拷出 SnowLuma 运行所需的文件。
 
@@ -144,6 +173,7 @@ def _copy_snowluma(source: Path, target: Path) -> None:
             shutil.copytree(item, target / name, dirs_exist_ok=True)
 
     (target / "config").mkdir(exist_ok=True)
+    _scrub_personal_state(target)
     missing = [n for n in ("index.mjs", "native", "config")
                if not (target / n).exists()]
     if missing:
