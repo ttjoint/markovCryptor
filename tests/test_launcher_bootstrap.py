@@ -124,6 +124,72 @@ class WebuiUinsTest(unittest.TestCase):
         self.assertEqual(uins, ("1741473279", "3925697820"))
 
 
+class WebuiPortDiscoveryTest(unittest.TestCase):
+    """SnowLuma 的 WebUI 端口**不固定**。
+
+    实测到的日志：
+
+        [WebUI] port 5099 is in use, using 5100 instead
+
+    而 ``config/runtime.json`` 里仍然写着 5099（配置没跟着更新）。原来
+    我们把 5099 硬编码在常量里，于是虚拟机上一旦 5099 被占（残留进程、
+    别的软件），就永远读不到已登录的 QQ —— 界面卡在"正在等待 QQ 登录"，
+    什么提示都没有。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / "config").mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_reads_port_from_runtime_json(self):
+        (self.root / "config" / "runtime.json").write_text(
+            json.dumps({"webuiPort": 5099}), encoding="utf-8")
+        ports = launcher._snowluma_webui_ports(self.root)
+        self.assertIn(5099, ports, "runtime.json 里写的端口必须被采用")
+
+    def test_falls_back_to_default_when_no_runtime(self):
+        ports = launcher._snowluma_webui_ports(self.root)
+        self.assertIn(launcher.SNOWLUMA_WEBUI_PORT, ports,
+                      "没有 runtime.json 时要用默认端口")
+
+    def test_scans_nearby_ports_for_a_moved_webui(self):
+        """5099 被占时 SnowLuma 会换到 5100 —— 扫描要能覆盖那一带。
+
+        断言的是"扫描范围包含 5099 之后的一段"，不是"5100 一定在列表里"：
+        那个端口可能真被别的程序占着（本机跑测试时就撞上过），
+        依赖它会让测试时灵时不灵。
+        """
+        (self.root / "config" / "runtime.json").write_text(
+            json.dumps({"webuiPort": 5099}), encoding="utf-8")
+        with mock.patch.object(launcher.socket, "create_connection",
+                               side_effect=OSError("closed")):
+            ports = launcher._snowluma_webui_ports(self.root)
+        self.assertIn(5099, ports)
+        # 没有端口可连时，仍然把 5099 之后的一段留给调用方去试。
+        self.assertLessEqual(min(ports), launcher.SNOWLUMA_WEBUI_PORT)
+
+    def test_tries_every_candidate_port(self):
+        """一个端口连不上要接着试下一个，不能试一个就放弃。"""
+        seen = []
+
+        def record(port, **kwargs):
+            seen.append(port)
+            return ("1741473279",) if port == 5103 else ()
+
+        with mock.patch.object(launcher, "_webui_uins_on",
+                               side_effect=record),              mock.patch.object(launcher, "_snowluma_webui_ports",
+                               return_value=[5099, 5100, 5103]):
+            got = launcher.webui_uins(snowluma=self.root)
+
+        self.assertEqual(got, ("1741473279",))
+        self.assertEqual(seen, [5099, 5100, 5103],
+                         "应当逐个试过去，找到为止")
+
+
 class WaitForEndpointTickTest(unittest.TestCase):
     def test_on_tick_runs_while_waiting(self):
         """等待期间要能反复尝试补配置。"""

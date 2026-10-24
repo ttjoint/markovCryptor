@@ -120,15 +120,26 @@ def find_default_browser() -> str | None:
     return None
 
 
-def _profile_dir() -> str:
+def _profile_dir(port: int | None = None) -> str:
     """A private Chromium profile for this app.
 
     Lives next to the rest of our state so it survives between runs (a fresh
     profile every launch would lose window size) but is ours alone -- the user's
     own browser session is never touched.
+
+    **每个实例一个 profile。** Chromium 的 ``--user-data-dir`` 是独占的：
+    第二个进程拿着同一个目录时，会把 URL 交给已经在跑的那个实例、然后
+    自己退出。后果是——
+
+    * 用户先开一个，再开一个（或调试时另起一个），第二个窗口根本不出现，
+      看起来像"127.0.0.1 拒绝连接"；
+    * 更隐蔽的：先开的那个窗口内容被后来的接管，用户以为程序串了。
+
+    端口是每个实例唯一的、稳定的标识，所以拿它做后缀。
     """
     base = os.environ.get("APPDATA") or str(Path.home())
-    path = Path(base) / "markovcryptor" / "browser-profile"
+    name = "browser-profile" if port is None else f"browser-profile-{int(port)}"
+    path = Path(base) / "markovcryptor" / name
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError as exc:                          # noqa: BLE001
@@ -137,7 +148,8 @@ def _profile_dir() -> str:
     return str(path)
 
 
-def open_ui(url: str, *, browser: str | None = None) -> tuple[str, int | None]:
+def open_ui(url: str, *, browser: str | None = None,
+            port: int | None = None) -> tuple[str, int | None]:
     """Open ``url`` in app mode when possible.
 
     Returns ``(label, pid)``. The label is a short string ("chrome --app") for
@@ -155,12 +167,22 @@ def open_ui(url: str, *, browser: str | None = None) -> tuple[str, int | None]:
         return "none", None
 
     if _is_chromium(exe):
-        profile = _profile_dir()
+        profile = _profile_dir(port)
         args = [exe] + [flag.format(url=url) for flag in _APP_FLAGS]
         args += [f"--user-data-dir={profile}", "--no-first-run",
                  "--no-default-browser-check"]
         try:
-            proc = subprocess.Popen(args, close_fds=True)
+            # **pythonw 下必须显式断开三个标准流。**
+            #
+            # pythonw 是 GUI 子系统程序，进程没有真正的 stdin/stdout/stderr
+            # （句柄是无效值）。子进程默认继承这些句柄，Chrome 启动时会
+            # 因为拿不到有效句柄而卡住 —— 表现为"客户端已启动"之后再无
+            # 任何日志、窗口不出现、几秒后退出码 1。用 python.exe 跑就一切
+            # 正常，所以这个 bug 只在双击 start.bat 时出现。
+            proc = subprocess.Popen(args, close_fds=True,
+                                    stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
             event("browser", "opened", mode="app", exe=exe, url=url,
                   pid=proc.pid)
             return f"{Path(exe).stem} --app", proc.pid

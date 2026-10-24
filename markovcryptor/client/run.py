@@ -14,8 +14,11 @@ without dragging in argparse, and so the "no flags" path stays readable.
 
 from __future__ import annotations
 
+import atexit
+import json
 import logging
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -132,7 +135,21 @@ def _bootstrap_onebot(root: Path, owned=None) -> None:
 
     重启一次它就正常了。这只发生在**全新安装的第一次**，之后配置一直在。
     """
-    uins = launcher.webui_uins()
+    uins = launcher.webui_uins(snowluma=root,
+                                debug=lambda msg: _log("  " + msg))
+    if not uins:
+        # 这一步失败必须让用户看见。原来静默返回空元组，用户只看到
+        # "没生成 json"，完全无从判断是 WebUI 没起来、口令不对，
+        # 还是那边 QQ 根本没登录。
+        # 头几秒读不到是**正常的** —— SnowLuma 还没起完 WebUI。只在
+        # 等了一会儿之后还说读不到，才值得告诉用户，否则第一秒就打一行
+        # 看着像报错的话，反而让人以为出问题了。
+        attempts = getattr(_bootstrap_onebot, "_attempts", 0) + 1
+        _bootstrap_onebot._attempts = attempts
+        if attempts == 20:                       # 约 20 秒
+            _log("  还没等到 QQ 登录；请确认 QQ 已打开并登录了账号")
+        return
+
     created_any = False
     for uin in uins:
         created = launcher.ensure_onebot_config(root, uin)
@@ -146,7 +163,11 @@ def _bootstrap_onebot(root: Path, owned=None) -> None:
     # 让 SnowLuma 重新读配置。只重启**我们自己起的**那一份。
     _log("重新启动 SnowLuma 以加载新配置…")
     try:
-        launcher.restart_snowluma(root, owned)
+        process = launcher.restart_snowluma(root, owned)
+        if process is not None:
+            # 换了新 pid，孤儿记录也要跟着换 —— 否则下次启动会去认一个
+            # 早就死掉的 pid。
+            _remember_child(process.pid, root=root)
     except Exception as exc:                       # noqa: BLE001
         event("launcher", "restart_after_bootstrap_failed",
               level=logging.WARNING, error=exc)
@@ -160,6 +181,14 @@ def run(*, snowluma: Path | None = None, config_path: Path | None = None,
     from .lifecycle import OwnedProcesses
 
     owned = owned if owned is not None else OwnedProcesses()
+
+    # 先收掉上次留下的孤儿：它占着 snowluma 的数据库，不收掉这次就
+    # "文件被占用"。放在最前面，早于任何读配置的动作。
+    _reap_previous_orphan()
+
+    # 崩溃 / 未捕获异常时也要收子进程。atexit 覆盖绝大多数解释器退出；
+    # 真正被强杀（任务管理器）时靠下次启动的 _reap_previous_orphan。
+    atexit.register(owned.terminate_all)
     cfg = ClientConfig.load(config_path)
 
     try:
@@ -190,7 +219,11 @@ def run(*, snowluma: Path | None = None, config_path: Path | None = None,
                 _log("正在等待 QQ 登录…（SnowLuma 只能挂到已登录的 QQ 上）")
             # 记下来：退出时要收掉。只收**我们自己起的**那一份 ——
             # 用户手动开的 SnowLuma 不能因为关这个客户端就被杀掉。
-            owned.add("SnowLuma", launcher.start_snowluma(root))
+            process = launcher.start_snowluma(root)
+            owned.add("SnowLuma", process)
+            if process is not None:
+                # 记下来，万一这次没退干净，下次启动能认出来并收掉。
+                _remember_child(process.pid, root=root)
             # 启动之后重新读配置：端口几乎肯定变了。
             #
             # **全新安装时那个配置根本不会出现**：`onebot_<uin>.json` 的
@@ -225,6 +258,107 @@ def run(*, snowluma: Path | None = None, config_path: Path | None = None,
     # 到这里 QQ 一定在线，可以建账号了。
     return _serve(endpoint, cfg, config_path=config_path, root=root,
                   open_browser=open_browser, owned=owned)
+
+
+# --------------------------------------------------------------------------
+# 子进程兜底回收
+#
+# **实锤**：反复启动调试下来，后台堆了十几个 node.exe，每个都占着
+# ``snowluma/data`` 里的数据库 —— 下次启动直接 "文件被占用"。
+#
+# ``shutdown()`` 只在"正常退出"这条路上跑。异常、Ctrl+C、用户直接关掉
+# 控制台窗口、pythonw 崩溃 —— 这些都不会经过它。而 SnowLuma 是独立进程，
+# 我们死了它不知道。
+#
+# 所以再挂两道：
+#   1. ``atexit`` —— 覆盖大多数解释器退出（包括未捕获异常）
+#   2. 子进程交给 Windows Job 对象 —— 父进程一死，系统连带杀掉
+#
+# Job 对象在纯 Python 里要 ctypes，容易出错；这里用更朴素但可靠的办法：
+# 把 pid 记到磁盘，下次启动先清理上次留下的孤儿。
+# --------------------------------------------------------------------------
+
+_ORPHAN_FILE = "snowluma-child.json"
+
+
+def _orphan_path() -> Path:
+    from .. import config as config_mod
+    return config_mod.default_config_path().parent / _ORPHAN_FILE
+
+
+def _remember_child(pid: int, *, root: Path) -> None:
+    """记下我们起的 SnowLuma，供下次启动时清理。"""
+    try:
+        path = _orphan_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"pid": int(pid), "snowluma": str(root)}),
+                        encoding="utf-8")
+    except Exception as exc:                        # noqa: BLE001 - 记账失败不致命
+        event("lifecycle", "orphan_record_failed", level=logging.DEBUG, error=exc)
+
+
+def _forget_child() -> None:
+    try:
+        _orphan_path().unlink(missing_ok=True)
+    except Exception:                               # noqa: BLE001
+        pass
+
+
+def _reap_previous_orphan() -> None:
+    """上次没退干净的 SnowLuma，这次启动时收掉。
+
+    只在它**确实是我们上次起的那个 pid**、而且命令行里带着同一个
+    snowluma 路径时才动手 —— 不能误杀用户自己开的实例。
+    """
+    try:
+        raw = _orphan_path().read_text(encoding="utf-8")
+        data = json.loads(raw)
+        pid = int(data.get("pid") or 0)
+        recorded = str(data.get("snowluma") or "")
+    except Exception:                               # noqa: BLE001 - 没有记录是常态
+        return
+
+    if pid <= 0:
+        _forget_child()
+        return
+
+    alive = _pid_is_snowluma(pid, recorded)
+    if alive:
+        event("lifecycle", "reaping_orphan", pid=pid)
+        _log(f"发现上次没退干净的 SnowLuma（pid {pid}），正在收掉")
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, timeout=10,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception as exc:                    # noqa: BLE001
+            event("lifecycle", "reap_failed", level=logging.WARNING, error=exc)
+    _forget_child()
+
+
+def _pid_is_snowluma(pid: int, recorded_root: str) -> bool:
+    """这个 pid 现在还是不是"我们上次起的那个 SnowLuma"。"""
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\")"
+             ".CommandLine"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        command = (completed.stdout or "").strip()
+    except Exception:                               # noqa: BLE001
+        return False
+    if not command:
+        return False                                # 进程已经没了
+    if "snowluma" not in command.lower() and "index.mjs" not in command.lower():
+        return False                                # pid 被别的程序复用了
+    # 路径比较要统一斜杠再比：记录里可能是 ``D:/x/snowluma``，
+    # 而命令行里是 ``D:\x\snowluma``。直接比字符串永远不相等。
+    def _norm(text: str) -> str:
+        return text.replace("//", "/").replace("\\", "/").lower()
+
+    if recorded_root and _norm(recorded_root) not in _norm(command):
+        return False                                # 不是同一个 SnowLuma
+    return True
 
 
 def _serve(endpoint, cfg, *, config_path: Path | None, root: Path,
@@ -300,26 +434,41 @@ def _serve(endpoint, cfg, *, config_path: Path | None, root: Path,
          f"图片队列上限 {queue.max_items}")
 
     should_open = cfg.open_browser if open_browser is None else open_browser
-    if should_open:
-        label, browser_pid = browser_mod.open_ui(url)
-        _log(f"  浏览器：{label}")
-        _log("  关闭窗口即退出；后端也会在前端消失后自行退出。")
-        if browser_pid:
-            # --app 模式仍带系统标题栏。几秒后窗口才存在，所以放后台线程，
-            # 不阻塞 uvicorn 起来 —— 用户在等的是这个窗口。
-            threading.Thread(
-                target=_adopt_window,
-                args=(browser_pid, app),
-                name="window-adopt", daemon=True).start()
 
     import uvicorn
 
     try:
         # 不用 uvicorn.run()：它装自己的信号处理并且不给我们"主动停"的把手。
         # 用 Server + 一个监视线程，就能在用户点退出时优雅收尾。
+        # **pythonw 下 uvicorn 会自己崩掉。**
+        #
+        # pythonw 是 GUI 子系统程序，``sys.stderr`` 是 ``None``。uvicorn 默认
+        # 调用 ``logging.config.dictConfig()`` 去配一个写 stderr 的
+        # StreamHandler，拿到 None 就抛：
+        #
+        #     ValueError: Unable to configure formatter 'default'
+        #
+        # 然后整个进程退出码 1 —— 日志停在"客户端已启动"，窗口不出现，
+        # 用户看到的就是"127.0.0.1 拒绝连接"。用 python.exe 跑完全正常，
+        # 所以这个 bug 只在双击 start.bat 时出现。
+        #
+        # 我们自己有日志（observability），不需要 uvicorn 那套。
         config = uvicorn.Config(app, host="127.0.0.1", port=port,
-                                log_level="warning")
+                                log_level="warning",
+                                log_config=None,
+                                access_log=False)
         server = uvicorn.Server(config)
+
+        # **浏览器必须等端口真的在听之后再开。**
+        #
+        # 原来是"先开浏览器、再 server.run()"，靠谁快谁慢赌 —— 快机器上
+        # 看不出问题，冷启动/虚拟机/杀毒扫描时浏览器抢在前面，用户看到
+        # 一个 ERR_CONNECTION_REFUSED 的窗口，然后关掉，整个程序以退出码
+        # 1 结束。看起来像"启动失败"，其实是打开得太早。
+        if should_open:
+            threading.Thread(target=_open_when_ready,
+                             args=(url, port, app), name="open-ui",
+                             daemon=True).start()
 
         def watch_quit():
             # 前端点了退出 / 看门狗超时 / 后端被要求关 —— 统一从这里停。
@@ -335,6 +484,42 @@ def _serve(endpoint, cfg, *, config_path: Path | None, root: Path,
         watchdog.stop()
         shutdown()
     return 0
+
+
+def _open_when_ready(url: str, port: int, app, *,
+                     timeout: float = 20.0) -> None:
+    """Wait until the port accepts connections, then open the browser.
+
+    端口还没起来就开窗口，用户会看到一个 ERR_CONNECTION_REFUSED 的页面。
+    20 秒足够慢机器起 uvicorn，也短到不至于让用户以为卡死。
+    """
+    from . import launcher as launcher_mod
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if launcher_mod._port_open("127.0.0.1", port):
+            break
+        time.sleep(0.1)
+    else:
+        event("browser", "open_skipped_port_never_opened",
+              level=logging.WARNING, port=port)
+        return
+
+    try:
+        label, browser_pid = browser_mod.open_ui(url, port=port)
+    except Exception as exc:                       # noqa: BLE001 - 开浏览器失败不该杀后端
+        # **必须说出来。** 这里原来只写结构化日志（默认看不到），表现为
+        # "客户端已启动"之后什么都没有、然后退出码 1 —— 用户以为启动失败，
+        # 其实后端好好的，只是窗口没打开。
+        _log(f"  打不开浏览器（{exc}）；请手动访问 {url}")
+        event("browser", "open_failed", level=logging.WARNING, error=exc)
+        return
+    _log(f"  浏览器：{label}")
+    _log("  关闭窗口即退出；后端也会在前端消失后自行退出。")
+    if browser_pid:
+        # --app 模式仍带系统标题栏；窗口要几秒后才存在，所以另开线程。
+        threading.Thread(target=_adopt_window, args=(browser_pid, app),
+                         name="window-adopt", daemon=True).start()
 
 
 def _adopt_window(pid: int, app) -> None:
@@ -379,6 +564,7 @@ def _make_shutdown(account, network, owned) -> "callable":
         # 再收掉自己起的子进程（SnowLuma 会连带它的 node 子进程）。
         if owned is not None:
             killed = owned.terminate_all()
+            _forget_child()
             if killed:
                 event("lifecycle", "shutdown_done", killed=",".join(killed))
         event("lifecycle", "shutdown_end")
@@ -387,7 +573,25 @@ def _make_shutdown(account, network, owned) -> "callable":
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point for the packaged launcher (no arguments expected)."""
+    """Entry point for the packaged launcher (no arguments expected).
+
+    **pythonw 没有 stdout/stderr**，退出码 1 之外什么都不给。所以这里把
+    所有未捕获异常先写进日志再说 —— 否则用户只看到"启动失败（退出码 1）"，
+    日志最后一行还是"客户端已启动"，完全没法查。
+    """
+    try:
+        return _main(argv)
+    except SystemExit:
+        raise
+    except BaseException as exc:                   # noqa: BLE001 - 最后一道网
+        import traceback
+        _log(f"未捕获的异常，程序退出：{type(exc).__name__}: {exc}")
+        for line in traceback.format_exc().splitlines()[-12:]:
+            _log("  " + line)
+        return 1
+
+
+def _main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     snowluma = None
     if "--snowluma" in args:

@@ -331,3 +331,78 @@ on_tick 抛异常不拖死等待。
 注入"不写配置"验证过 4 项会 FAIL。
 
 **828 passed。**
+
+---
+
+## 十、双击 start.bat 才失败：pythonw 下的三个坑（2026-10-25）
+
+用户反馈：「本机双击包，浏览器报 127.0.0.1 拒绝连接」，而 `python.exe`
+命令行跑一切正常。反复排查后确认：**只有 `pythonw.exe` 这条路会坏**。
+
+`start.ps1` 用 `pythonw.exe` 启动（GUI 子系统，不留黑框）。它在三处和
+`python.exe` 不同，每一处都能单独让程序以退出码 1 静默结束。
+
+### 坑 1：uvicorn 的日志配置（真正的元凶）
+
+```
+ValueError: Unable to configure formatter 'default'
+  File "uvicorn\config.py", line 398, in configure_logging
+    logging.config.dictConfig(self.log_config)
+```
+
+`pythonw` 的 `sys.stderr` 是 `None`。uvicorn 默认 `dictConfig()` 去配一个
+写 stderr 的 StreamHandler，拿到 None 就抛。**整个进程在
+"客户端已启动"之后立刻退出** —— 用户看到的正是"拒绝连接"。
+
+修复：`uvicorn.Config(..., log_config=None, access_log=False)`。我们有自己的
+observability，不需要 uvicorn 那套。
+
+### 坑 2：Chrome 继承无效标准句柄
+
+`subprocess.Popen(args, close_fds=True)` 没有重定向三个标准流。`pythonw`
+下这些句柄是无效值，Chrome 可能卡在启动上。
+
+修复：显式 `stdin/stdout/stderr=subprocess.DEVNULL`。
+
+### 坑 3：异常全被吞掉
+
+`pythonw` 没有 stdout/stderr，未捕获异常只留下一个退出码 1，日志最后一行
+还是"客户端已启动"。**这个坑让前两个坑隐藏了很久。**
+
+修复：`main()` 外面套一层，把 `traceback` 的最后 12 行写进日志。坑 1 的
+完整堆栈就是这么抓到的。
+
+### 顺带修掉的
+
+- **浏览器打开失败现在会说**：原来只写结构化 event（默认看不到），
+  表现是"启动了但没窗口"。现在 `_log("打不开浏览器（…）；请手动访问 …")`。
+- **每个实例一个 Chromium profile**：`--user-data-dir` 是独占的，第二个
+  进程拿同一个目录会把 URL 交给已在跑的那个再退出。用户开第二个窗口时
+  窗口不出现，看起来也像"拒绝连接"。现在按端口分目录
+  （`browser-profile-8741`）。
+- **SnowLuma WebUI 端口不固定**：实测
+  `[WebUI] port 5099 is in use, using 5100 instead`，而 `config/runtime.json`
+  里仍写着 5099。现在 `_snowluma_webui_ports()` 同时读配置和扫实际监听。
+- **孤儿 SnowLuma 回收**：`atexit` + 磁盘记 pid + 下次启动清理（只杀
+  pid 和路径都对得上的那个）。反复调试时后台堆过十几个 node，每个都占着
+  `snowluma/data` 的数据库。
+- **restart 顺序**：原来是"先杀旧的、再起新的"，起新的失败就什么都不剩。
+  改成"先起新的、再登记"。
+
+### 验证
+
+用 `start.ps1`（与双击完全一致）跑 0.3.5：
+
+```
+正在启动…（第一次会等 QQ 登录）      ← 不再报"启动失败"
+curl http://127.0.0.1:8741/  -> 200
+chrome 进程（browser-profile-8741）: 8 个
+```
+
+**847 passed。**
+
+### 教训
+
+命令行跑通不代表双击能跑。两者差一个 `pythonw`，而 `pythonw` 会同时
+改变标准流、异常可见性、以及所有依赖 stderr 的第三方库行为。
+**发布前必须用 start.bat 实际双击验证一次。**

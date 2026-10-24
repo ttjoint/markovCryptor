@@ -103,13 +103,56 @@ def discover_endpoint(snowluma: Path) -> Endpoint | None:
 #: SnowLuma 的 WebUI 端口。它写死在 SnowLuma 里，不是我们决定的。
 SNOWLUMA_WEBUI_PORT = 5099
 
-#: 启动 SnowLuma 时喂给它的 WebUI 口令（见 ``start_snowluma``）。
+#: dev 模式下 SnowLuma 的固定 WebUI 口令（写死在它源码里）。
+DEV_PASSWORD = "snowluma-dev"
+
+#: 非 dev 模式时的 bootstrap 口令（见 ``start_snowluma``）。
 SNOWLUMA_BOOTSTRAP_PASSWORD = "mkx-webui-1"
 
 
-def webui_uins(port: int = SNOWLUMA_WEBUI_PORT, *,
-               password: str = SNOWLUMA_BOOTSTRAP_PASSWORD,
-               timeout: float = 2.0) -> tuple[str, ...]:
+def _snowluma_webui_ports(snowluma: Path) -> list[int]:
+    """SnowLuma WebUI 可能监听的端口，按可能性排序。
+
+    **它并不固定在 5099。** 日志里实测到过：
+
+        [WebUI] port 5099 is in use, using 5100 instead
+
+    而 ``config/runtime.json`` 里写的仍然是 5099（配置没跟着更新）。
+    所以我们既读配置、也扫实际监听，两个来源合起来才不会漏。
+    """
+    ports: list[int] = []
+
+    # 1) 配置里写的
+    try:
+        data = json.loads((Path(snowluma) / "config" / "runtime.json")
+                          .read_text(encoding="utf-8"))
+        port = data.get("webuiPort")
+        if isinstance(port, int) and port > 0:
+            ports.append(port)
+    except Exception:                              # noqa: BLE001 - 没有就是没有
+        pass
+
+    # 2) 实际在听的（SnowLuma 可能已经换过端口）
+    for candidate in range(SNOWLUMA_WEBUI_PORT, SNOWLUMA_WEBUI_PORT + 12):
+        if candidate in ports:
+            continue
+        try:
+            with socket.create_connection(("127.0.0.1", candidate),
+                                          timeout=0.15):
+                ports.append(candidate)
+        except OSError:
+            continue
+
+    # 3) 兜底：默认端口
+    if SNOWLUMA_WEBUI_PORT not in ports:
+        ports.append(SNOWLUMA_WEBUI_PORT)
+    return ports
+
+
+def webui_uins(port: int | None = None, *, snowluma: Path | None = None,
+               password: str | None = None,
+               timeout: float = 2.0,
+               debug=None) -> tuple[str, ...]:
     """已登录的 QQ 号，从 SnowLuma 自己的 WebUI 读。
 
     **为什么需要这个**：``onebot_<uin>.json`` 的文件名就是账号，可交付包
@@ -125,6 +168,24 @@ def webui_uins(port: int = SNOWLUMA_WEBUI_PORT, *,
     返回空元组表示"读不到"（还没登录 / 端口没开 / 口令不对），不抛异常 ——
     调用方会继续正常等待流程。
     """
+    if port is None:
+        candidates_ports = (_snowluma_webui_ports(snowluma)
+                            if snowluma is not None
+                            else [SNOWLUMA_WEBUI_PORT])
+    else:
+        candidates_ports = [int(port)]
+
+    for candidate_port in candidates_ports:
+        found = _webui_uins_on(candidate_port, password=password,
+                               timeout=timeout, debug=debug)
+        if found:
+            return found
+    return ()
+
+
+def _webui_uins_on(port: int, *, password: str | None,
+                   timeout: float, debug=None) -> tuple[str, ...]:
+    """在**一个**端口上试着读已登录的 QQ。读不到就返回空元组。"""
     import urllib.error
     import urllib.request
 
@@ -150,17 +211,56 @@ def webui_uins(port: int = SNOWLUMA_WEBUI_PORT, *,
         except (OSError, ValueError, urllib.error.URLError):
             return None
 
-    login = _post("/api/login", {"password": password})
-    token = (login or {}).get("token")
+    # 依次尝试：dev 口令 → bootstrap 口令 → 用户可能设过的口令。
+    #
+    # 只试一个是不够的：``webui.json`` 一旦存在，SnowLuma 就无视 bootstrap
+    # 环境变量，那个实例只认文件里存的密码。
+    candidates = [password] if password else [DEV_PASSWORD,
+                                             SNOWLUMA_BOOTSTRAP_PASSWORD]
+    login = None
+    token = None
+    for candidate in candidates:
+        login = _post("/api/login", {"password": candidate})
+        token = (login or {}).get("token")
+        # **先赋值再判断。** 这里写成"先看上一轮的 token"会打出
+        # "登录失败"但后面明明拿到了 token —— 日志自相矛盾比没有日志更糟。
+        if debug is not None and not token:
+            debug(f"WebUI 登录失败（口令 {candidate!r}）：{str(login)[:100]}")
+        event("launcher", "webui_login_try", level=logging.DEBUG,
+              port=int(port), ok=bool(token),
+              reply=str(login)[:120] if login else "no response")
+        if token:
+            break
     if not token:
+        # **必须留下原因。** 之前这里静默返回空元组，用户只看到"没生成
+        # json"，完全无从判断是 WebUI 没起来、口令不对，还是压根没登录。
+        #
+        # 真实坑：SnowLuma 只在 ``webui.json`` **不存在**时才采纳
+        # ``SNOWLUMA_WEBUI_BOOTSTRAP_PASSWORD``。一旦那个文件存在（用户
+        # 之前跑过一次、或在 WebUI 里改过密码），我们喂的口令就被完全
+        # 忽略，登录 401，然后静默失败。
+        if debug is not None:
+            debug(f"WebUI 登录全部失败：{str(login)[:160]}")
+        event("launcher", "webui_login_failed", level=logging.WARNING,
+              port=int(port), reason=str(login)[:200] if login else "no response")
         return ()
 
-    listed = _get("/api/qq-list", str(token)) or {}
+    listed = _get("/api/qq-list", str(token))
+    if listed is None:
+        event("launcher", "webui_qq_list_failed", level=logging.WARNING,
+              port=int(port))
+        return ()
+
     uins = []
     for item in listed.get("list") or ():
         uin = str((item or {}).get("uin") or "").strip()
         if uin.isdigit():
             uins.append(uin)
+    if not uins:
+        # 只在 DEBUG 级别记 —— 启动头几秒 SnowLuma 还没 hook 上 QQ，
+        # "没有已登录的 QQ"是常态。打到用户看得见的日志里只会让人以为出错了。
+        event("launcher", "webui_no_logged_in_qq", level=logging.DEBUG,
+              port=int(port), reply=str(listed)[:160])
     return tuple(uins)
 
 
@@ -297,7 +397,18 @@ def start_snowluma(snowluma: Path, *, log_dir: Path | None = None) -> subprocess
     # to click through a page, which a double-click launch cannot do.
     env.setdefault("SNOWLUMA_ACCEPT_EULA", "1")
     env.setdefault("SNOWLUMA_ACCEPT_PRIVACY", "1")
-    env.setdefault("SNOWLUMA_WEBUI_BOOTSTRAP_PASSWORD", "mkx-webui-1")
+    # **WebUI 口令不可靠，所以用 dev 模式。**
+    #
+    # 踩过：SnowLuma 只在 ``config/webui.json`` **不存在**时才采纳
+    # ``SNOWLUMA_WEBUI_BOOTSTRAP_PASSWORD``。只要那个文件存在（用户跑过
+    # 一次、或在 WebUI 里改过密码），喂进去的口令就被**完全忽略**，
+    # 登录 401 —— 于是读不到已登录的 QQ，也就生成不了 onebot 配置，
+    # 界面停在"正在启动…"，而且什么日志都没有。
+    #
+    # ``SNOWLUMA_DEV_MODE=1`` 走固定口令，不看 webui.json，稳定得多。
+    # 这是本机回环端口（127.0.0.1），不对外暴露。
+    env.setdefault("SNOWLUMA_DEV_MODE", "1")
+    env.setdefault("SNOWLUMA_DEV_PASSWORD", DEV_PASSWORD)
 
     creationflags = 0
     if hasattr(subprocess, "CREATE_NO_WINDOW"):
@@ -358,8 +469,26 @@ def restart_snowluma(snowluma: Path, owned) -> None:
             break
         time.sleep(0.3)
 
-    owned.add("SnowLuma", start_snowluma(snowluma))
+    # **先起新的再 register。** 顺序反过来的话，start_snowluma 抛异常
+    # 就等于"旧的杀了、新的没起、也没人管" —— 那次调试下来后台堆了十几个
+    # node，每个都占着数据库，下次启动直接报文件被占用。
+    process = start_snowluma(snowluma)
+    owned.add("SnowLuma", process)
     event("launcher", "snowluma_restarted")
+
+    # **等它把 WebUI 端口听起来再返回。** 不等的话，调用方紧接着就去
+    # discover_endpoint，读到的是还没写完的配置 / 还没起的服务，表现为
+    # "OneBot 端口没起来"然后整个启动失败。
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        if _port_open("127.0.0.1", SNOWLUMA_WEBUI_PORT):
+            break
+        if process is not None and process.poll() is not None:
+            event("launcher", "restart_child_exited",
+                  code=process.returncode)
+            break
+        time.sleep(0.25)
+    return process
 
 
 def _find_node(snowluma: Path) -> str | None:
