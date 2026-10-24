@@ -611,6 +611,17 @@ def build(*, out: Path, snowluma: Path, wheels: Path,
     (target / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    # 收尾再清一次。
+    #
+    # **实锤**：打完包之后我启动了一次客户端验证界面，SnowLuma 当场在
+    # ``snowluma/config/onebot_<QQ>.json`` 写下真实的 accessToken，还建了
+    # ``logs/``。也就是说"打包时清过"不代表"交付时干净" —— 中间任何一次
+    # 冒烟测试都会把脏东西写回去。
+    #
+    # 所以这里先清再验：清理是幂等的，验证是兜底。
+    _log("[收尾] 再清一次账号残留")
+    _scrub_personal_state(target / "snowluma")
+
     _log("[检查] 确认没有账号相关的残留")
     _verify_no_personal_state(target)
 

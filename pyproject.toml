@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "markovcryptor"
-version = "0.3.0"
+version = "0.3.1"
 description = "多信道隐写加解密平台：中文文本、静态图、动图"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -52,7 +52,22 @@ include = ["markovcryptor*"]
 # chat client. Missing the second one ships a package whose window is blank,
 # which looks like a JavaScript bug and is actually a packaging one.
 [tool.setuptools.package-data]
-markovcryptor = ["webui/*.html", "client/webui/*.html", "covers/*.jpg"]
+# **子目录必须显式列出**：setuptools 的 ``dir/*.ext`` 不递归。
+#
+# 踩过：拆分前端之后 ``client/webui`` 变成 index.html + js/ + css/ 共 23 个
+# 文件，但这里还只写着 ``client/webui/*.html`` —— 打出来的包只有 HTML，
+# 装上去整页空白。浏览器里表现为 JavaScript 报错，其实是打包漏了文件，
+# 极难从现象反推。
+markovcryptor = [
+    "webui/*.html",
+    "client/webui/*.html",
+    "client/webui/js/*.js",
+    "client/webui/js/core/*.js",
+    "client/webui/js/views/*.js",
+    "client/webui/js/panels/*.js",
+    "client/webui/css/*.css",
+    "covers/*.jpg",
+]
 
 # The suite is stdlib unittest, so configure nothing for pytest beyond the path:
 # it is optional (see [project.optional-dependencies].dev) for anyone who wants it.

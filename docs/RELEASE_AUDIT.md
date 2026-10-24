@@ -193,3 +193,67 @@ re: PRIVATE KEY / AKIA / gh[pousr]_ / QQ号 / 用户路径 / IP / 邮箱
 ```
 
 脚本：`tools/audit_package.py`（本次新增，见提交）
+
+---
+
+## 八、0.3.1 打包记录（2026-10-24）
+
+### 打包时又抓到两个 bug
+
+#### bug 1：`package-data` 漏掉子目录 → 装上去整页空白
+
+```toml
+# 原来
+markovcryptor = ["client/webui/*.html", ...]
+```
+
+`client/webui/` 拆分后是 `index.html` + `js/`（17 个）+ `css/`（5 个）共 23
+个文件，而 **setuptools 的 `dir/*.ext` 不递归**。打出来的包只有 HTML。
+
+症状是「浏览器里 JavaScript 报错」，实际是打包漏文件——从现象几乎不可能
+反推到 `pyproject.toml`。
+
+已修复，并加 `tests/test_package_assets.py`（4 项）：
+- `package-data` 规则必须覆盖磁盘上每一个前端文件
+- `js/`、`css/` 必须逐个被匹配
+- 实体 wheel 里文件齐全
+- **真实 pip 安装到临时目录，确认 `keybar.js` 等文件真的在**
+
+#### bug 2：打完包后跑一次客户端，凭证又被写回去
+
+打完 0.3.1 我启动客户端冒烟测试，SnowLuma 当场在
+`snowluma/config/onebot_<QQ>.json` 写下**新的真实 accessToken**，还建了
+`logs/`。
+
+也就是说：**「打包时清干净」不等于「交付时干净」**。中间任何一次冒烟测试
+都会把脏东西写回去。
+
+修复：`make_client_bundle.py` 收尾时**再清一次**（幂等），然后再验证。
+加两条测试：清理可重复执行、模拟「跑过之后再清」仍有效。
+
+### 一条流程教训
+
+**验证包时不要直接在待交付目录里跑客户端。** 更好的做法是先复制到临时
+目录验证，或者验证后必须重新跑一次清理。本次用的办法：
+
+```
+打包 → 复制到 /d/_Temp/relbuild 验证 → 清理 → 复制回 dist/
+```
+
+### 最终包
+
+```
+dist/qqclient-0.3.1-20261024-2350/   216 MB
+  python/    embeddable CPython 3.12.6 + 依赖
+  snowluma/  config/ 为空（无账号残留）
+  node/      node.exe
+  start.bat / start.ps1 / manifest.json
+```
+
+实测：
+- 无 JS 错误、无 4xx/5xx 资源
+- 深色主题正常，默认口令提示条显示
+- `core/identity.py`、`client/api/`、`keybar.js`、`tokens.css` 全在
+- 全包搜旧 token / 真实 QQ 号：0 命中
+
+**817 passed。**

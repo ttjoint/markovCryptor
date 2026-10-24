@@ -74,6 +74,55 @@ class ScrubTest(unittest.TestCase):
         self._check(make_bundle._scrub_personal_state)
 
 
+class RescrubTest(unittest.TestCase):
+    """**打包之后**又把客户端跑了一次，清理仍然要有效。
+
+    实锤：打完 0.3.1 包后我启动客户端冒烟测试，SnowLuma 当场在
+    ``snowluma/config/onebot_<QQ>.json`` 写下真实 accessToken 并建了
+    ``logs/``。所以打包脚本在收尾时必须**再清一次**，否则「打包时干净」
+    不等于「交付时干净」。
+    """
+
+    def test_scrub_can_run_twice(self):
+        """清理是幂等的：跑一次和跑两次结果一样。"""
+        from make_client_bundle import _scrub_personal_state
+
+        root = Path(tempfile.mkdtemp())
+        try:
+            _dirty_tree(root)
+            _scrub_personal_state(root)
+            first = sorted(p.relative_to(root).as_posix() for p in root.rglob("*"))
+            _scrub_personal_state(root)
+            second = sorted(p.relative_to(root).as_posix() for p in root.rglob("*"))
+            self.assertEqual(first, second, "第二次清理不该改变结果")
+            self.assertIn("config", second, "config 目录必须保留")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_scrub_after_a_run_removes_new_credentials(self):
+        """模拟「打包后又跑了一次」：新写出来的凭证也要被清掉。"""
+        from make_client_bundle import _scrub_personal_state
+
+        root = Path(tempfile.mkdtemp())
+        try:
+            _dirty_tree(root)
+            _scrub_personal_state(root)
+
+            # 跑一次客户端：SnowLuma 重新写配置和日志
+            (root / "config" / "onebot_999999999.json").write_text(
+                '{"accessToken": "BRAND_NEW_TOKEN"}', encoding="utf-8")
+            (root / "logs").mkdir()
+            (root / "logs" / "snowluma-2026-10-24.log").write_text("原文")
+
+            _scrub_personal_state(root)
+
+            left = sorted(p.relative_to(root).as_posix() for p in root.rglob("*"))
+            self.assertFalse([x for x in left if "onebot" in x or ".log" in x],
+                             f"运行后新写的凭证没清掉：{left}")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 class ShippedTreeTest(unittest.TestCase):
     """已经打好的包（如果有）必须已经是干净的。
 

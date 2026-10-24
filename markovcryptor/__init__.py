@@ -38,4 +38,4 @@ __all__ = [
     "read_text_file",
     "unique_model_path",
 ]
-__version__ = "0.3.0"
+__version__ = "0.3.1"
