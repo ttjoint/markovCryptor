@@ -406,3 +406,102 @@ chrome 进程（browser-profile-8741）: 8 个
 命令行跑通不代表双击能跑。两者差一个 `pythonw`，而 `pythonw` 会同时
 改变标准流、异常可见性、以及所有依赖 stderr 的第三方库行为。
 **发布前必须用 start.bat 实际双击验证一次。**
+
+## 十二、闪退的真正原因：三层叠加（2026-10-25）
+
+用户报告的症状一路变化，最后定位到三个独立问题叠在一起：
+
+```
+点「选择文件夹」/「上传图片」 → 界面报"请求超时（后端无响应）"
+                             → 几秒后窗口消失、后端黑框还在
+```
+
+也解释了"虚拟机速度慢时加载历史也会闪退"。
+
+### 层 1：前端 1.2 秒超时用在要人动手的请求上
+
+`core/api.js` 对**所有**请求设 `REQUEST_TIMEOUT = 1200`。这个值对普通请求
+是合理的（本机回环实测 100ms 内），但**选文件夹是人工操作** —— 用户不可能
+在 1.2 秒内挑完目录。于是必定 abort，弹出「请求超时（后端无响应）」，
+而后端其实好好的、对话框就摆在那儿。
+
+修法：新增 `INTERACTIVE_TIMEOUT`（10 分钟），`api()` 支持 `options.timeout`，
+`pickFolder` 用它。
+
+### 层 2：`backendGone()` 把"超时"当成"后端死了"
+
+```js
+return /failed to fetch|networkerror|load failed|connection|ECONNREFUSED|超时/i
+  .test(text);
+```
+
+而 `refreshState()` 里：
+
+```js
+if (backendGone(e)) { shutdownWindow("后端已退出"); return; }
+```
+
+**一次 1.2 秒超时就直接关窗口。** 这是"窗口消失"的直接执行者。
+
+修法：超时和"连不上"分开判断，且要**连续 3 次**才升级成"后端没了"；
+任何一次成功都清零（`applyState` 里 `goneStrikes = 0`）。
+
+### 层 3：看门狗 150 秒无心跳就杀进程
+
+`LivenessWatchdog` 会在心跳停 150 秒时调 `shutdown()`。它想判断的其实是
+"Chrome 窗口还在不在"，而那扇窗归 Chrome 管，服务端无从可靠得知。
+
+代价远大于收益：
+
+* 虚拟机上加载一次聊天历史就可能超过窗口期，**用户什么都没做，程序自己退了**
+* 对话框一开，那条请求等着，心跳随之停摆，150 秒后同样被杀
+
+**按用户建议，彻底移除自动退出。** 现在退出只有一条路：前端
+`pagehide` 时发 `/client/quit`（这条早就有了，可靠且不依赖计时）。
+看门狗退化成纯观测（`idle_for` / `fired`）。
+
+### 孤儿后端怎么办：换成单实例锁
+
+移除自动退出的代价是"强杀 Chrome 时后端残留"。用不猜测的办法解决：
+
+* `client-instance.json` 记 `{pid, port}`
+* 新实例启动时先看：pid 还活着（且命令行确实是 `markovcryptor.client.run`，
+  防止 pid 复用误判）、端口也在听 → 调 `POST /client/focus` 把旧窗口叫到
+  前面，自己退出
+* 不再是"两份 SnowLuma 互相踩"
+
+实测：
+
+```
+实例1: 200
+再起一个: 已经有客户端在运行（pid 779340），正在打开它的窗口…
+```
+
+### 顺带挖出的老 bug
+
+```python
+from .. import config as config_mod    # ImportError
+```
+
+`config` 在 `markovcryptor.client.config`，`..` 指到 `markovcryptor`，
+**根本不存在**。两处（`_instance_path` / `_orphan_path`）都是这样。
+
+所以**孤儿清理从加上那天起就没生效过** —— 异常被 `except Exception` 吞掉，
+静默返回。这类"try/except 包住整个函数"的写法会把这种错误藏得很深。
+
+### 测试
+
+- `test_client_lifecycle.py` 里两条改成新语义：心跳停了**不杀进程**，
+  但要留下 `fired` 标记
+- 全量 852 passed
+
+### 方法论教训
+
+症状一直在变（超时 → 闪退 → 前端没了后端还在），我前几轮一直在**猜**
+（阻塞、模态对话框、消息泵、COM 线程），方向全错。真正定位靠的是：
+
+1. 用户提供"黑框还在"这个事实 → 排除进程崩溃
+2. 直接测心跳 → 证明后端没阻塞
+3. 回头读前端 `backendGone()` → 一行代码解释全部现象
+
+**先测，再改。** 前面那几轮 C++/COM 层的"修"都是白工。

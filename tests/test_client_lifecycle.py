@@ -31,19 +31,30 @@ class WatchdogTest(unittest.TestCase):
         self.assertTrue(dog.armed)
         self.assertLess(dog.idle_for(), 1.0)
 
-    def test_expires_after_timeout_without_beats(self):
+    def test_does_not_kill_the_process_when_beats_stop(self):
+        """心跳停了**不再**自动退出。
+
+        它曾经会在 150 秒没心跳时杀掉整个进程，理由是不留孤儿后端。
+        实际代价远大于收益：
+
+        * 虚拟机上加载一次聊天历史就可能超过窗口期，用户什么都没做，
+          程序自己退了；
+        * 原生选文件夹对话框一开，前端那条请求就等着，心跳随之停摆，
+          150 秒后同样被杀 —— 用户报的"点一下闪退"就是这么来的；
+        * 它想判断的其实是"Chrome 窗口还在不在"，而那扇窗归 Chrome 管。
+
+        现在退出只有一条路：前端 ``pagehide`` 时发 ``/client/quit``。
+        """
         fired = []
-        dog = LivenessWatchdog(timeout=0.3, on_expire=lambda: fired.append(1))
+        dog = LivenessWatchdog(timeout=0.2, on_expire=lambda: fired.append(1))
         dog.start()
         try:
             dog.beat()
-            deadline = time.monotonic() + 5.0
-            while not fired and time.monotonic() < deadline:
-                time.sleep(0.05)
+            time.sleep(1.2)                # 远超 timeout
         finally:
             dog.stop()
-        self.assertTrue(fired, "心跳停了就该退出 —— 否则关掉窗口后进程永远留着")
-        self.assertTrue(dog.fired)
+        self.assertEqual(fired, [], "心跳停了也不该杀进程")
+        self.assertTrue(dog.fired, "但要记一笔，方便排查")
 
     def test_keeps_beating_prevents_expiry(self):
         fired = []
@@ -57,16 +68,20 @@ class WatchdogTest(unittest.TestCase):
             dog.stop()
         self.assertEqual(fired, [], "有心跳时不能退出")
 
-    def test_fires_only_once(self):
+    def test_marks_once_and_then_stays_quiet(self):
+        """只记一次，之后不再刷。"""
         fired = []
         dog = LivenessWatchdog(timeout=0.2, on_expire=lambda: fired.append(1))
         dog.start()
         try:
             dog.beat()
             time.sleep(1.5)
+            self.assertTrue(dog.fired)
+            time.sleep(0.6)
         finally:
             dog.stop()
-        self.assertEqual(len(fired), 1, "收尾只能跑一次")
+        self.assertEqual(fired, [], "不该调用回收回调")
+        self.assertTrue(dog.fired, "标记要保留，供诊断")
 
     def test_disarm_prevents_expiry(self):
         fired = []

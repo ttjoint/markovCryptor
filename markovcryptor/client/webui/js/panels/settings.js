@@ -7,7 +7,7 @@
 // 不会在磁盘上留下半张没用的模型。
 
 import { $, toast } from "../core/dom.js";
-import { api } from "../core/api.js";
+import { api, INTERACTIVE_TIMEOUT } from "../core/api.js";
 import { refreshState } from "../app.js";
 
 export const SET = { data: null, models: [] };
@@ -152,10 +152,12 @@ export async function saveSettings(patch) {
 
 export async function pickFolder(title, targetInput) {
   try {
+    // 这是个**要用户动手**的请求：对话框一天不关，请求就不该超时。
     const d = await api("/client/settings/pick-folder", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title }),
+      timeout: INTERACTIVE_TIMEOUT,
     });
     if (d.ok && d.path) {
       if (targetInput) targetInput.value = d.path;

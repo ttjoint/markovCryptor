@@ -28,6 +28,7 @@ let lastStateError = null;
 // 这样存活探测和内容刷新能复用同一段渲染逻辑，又不会重复请求。
 export function applyState(data) {
   if (lastStateError) lastStateError = null;
+  goneStrikes = 0;            // 通了就清零，偶发超时不会累积到误判
   // 设置页的「运行信息」要读它（图库张数、发送统计等）。只读引用。
   window.__kcState = data;
   S.uin = data.uin;
@@ -437,11 +438,33 @@ let shuttingDown = false;
 
 // 判定"后端真的没了"而不是"这一次请求碰巧失败"。
 // 只有拿不到任何 HTTP 响应才算（网络层错误）；HTTP 4xx/5xx 说明服务还活着。
+//: 连续多少次"连不上"才认定后端真的没了。
+//:
+//: **一次失败就关窗是错的。** 原来 backendGone 里连"超时"都算后端没了，
+//: 而前端光是一条请求就有 1.2 秒的 abort 超时 —— 慢机器上（虚拟机、
+//: 机械盘、第一次加载历史）这个超时**很容易**触发，于是一次偶发超时就把
+//: 窗口关了。用户看到的是"点一下界面就没了"。
+//:
+//: 超时只说明"这一次慢了"，不说明后端走了。连续几次都连不上才动手。
+const GONE_AFTER = 3;
+let goneStrikes = 0;
+
 function backendGone(error) {
   const text = String((error && error.message) || error || "");
-  // fetch 在连不上时抛 TypeError: Failed to fetch / NetworkError
-  return /failed to fetch|networkerror|load failed|connection|ECONNREFUSED|超时/i
+  // 明确是"连不上"才算数（fetch 在端口没人听时抛 TypeError: Failed to fetch）。
+  const refused = /failed to fetch|networkerror|load failed|ECONNREFUSED|connect/i
     .test(text);
+  // 超时单独判断：要连续几次才升级成"后端没了"。
+  const timeout = /超时|timeout|abort/i.test(text);
+
+  if (!refused && !timeout) {
+    goneStrikes = 0;
+    return false;
+  }
+  goneStrikes += 1;
+  if (goneStrikes < GONE_AFTER) return false;
+  goneStrikes = 0;
+  return true;
 }
 
 // 关掉这个窗口。浏览器 --app 模式下 window.close() 生效；

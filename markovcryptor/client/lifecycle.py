@@ -36,11 +36,25 @@ DEFAULT_BEAT_INTERVAL = 15.0
 
 
 class LivenessWatchdog:
-    """Tracks whether a browser is still polling us.
+    """只观测，**不再自动退出**。
 
-    Starts *disarmed*: the server can be up for a while before a browser
-    connects, and killing it during that window would look like a crash. It arms
-    itself on the first beat.
+    .. note:: 这个类曾经会在"150 秒没收到心跳"时杀掉整个进程，理由是
+       "用户关了窗口，别留孤儿后端"。实际代价远大于收益：
+
+       * 虚拟机上加载一次聊天历史就可能超过窗口期，**用户什么都没做，
+         程序自己退了**；
+       * 原生选文件夹/选文件对话框一开，前端那条请求就等着，心跳随之
+         停摆，150 秒后同样被杀 —— 用户报的"点一下闪退"就是这么来的；
+       * 它要判断的其实是"Chrome 窗口还在不在"，而那扇窗归 Chrome 管，
+         服务端根本无从可靠得知。
+
+       现在退出只有一条路：**前端在 ``pagehide`` 时发 ``/client/quit``**。
+       那是真的"窗口关了"，而且不依赖计时。强杀 Chrome 导致后端残留的
+       情况，由下一次启动的单实例锁 + 孤儿清理来处理（见 ``run.py``）。
+
+    这个类保留下来只做观测（``idle_for`` / ``beat``）和一处用途：
+    ``grant`` 让长请求期间的心跳计时往后推，供诊断使用。``on_expire``
+    参数被忽略，仅为调用点兼容。
     """
 
     def __init__(self, *, timeout: float = DEFAULT_IDLE_TIMEOUT,
@@ -68,6 +82,27 @@ class LivenessWatchdog:
         """Don't expire on idle. Used while a long operation owns the process."""
         with self._lock:
             self._armed = False
+
+    def grant(self, seconds: float) -> None:
+        """把"还能活多久"往后推，但不改变武装状态。
+
+        **为什么需要它**：慢机器（虚拟机、机械盘、杀毒扫描）上，一次
+        "点开好友加载历史"就可能让前端的心跳请求排不上队 —— 事件循环被
+        一个同步 API 占住，或者线程池被耗尽。心跳来不了，150 秒后
+        watchdog 就认为"窗口关了"，直接把进程收掉。用户看到的是
+        **点一下就闪退**，日志里连异常都没有。
+
+        这不该用 disarm()：那会让看门狗彻底失去意义（真的崩溃时没人收
+        尸）。grant() 只延长窗口，而且由处理请求的一方主动调用 ——
+        请求还在跑，就说明前端确实还活着。
+        """
+        if not (seconds > 0):
+            return
+        with self._lock:
+            # 只在已武装时推时间；没武装时它本来就不会到期。
+            if self._armed:
+                self._last_beat = max(self._last_beat,
+                                      time.monotonic()) + float(seconds)
 
     @property
     def armed(self) -> bool:
@@ -110,17 +145,14 @@ class LivenessWatchdog:
                 should_fire = (self._armed and not self._fired
                                and self.idle_for() >= self.timeout)
                 if should_fire:
+                    # **不再杀进程。** 只记一笔，方便排查"后端为什么还在"。
+                    # 真正的退出信号是前端的 /client/quit。
                     self._fired = True
+                    self._armed = False
             if should_fire:
-                event("liveness", "expired",
-                      idle=round(self.idle_for(), 1))
-                if self._on_expire is not None:
-                    try:
-                        self._on_expire()
-                    except Exception as exc:        # noqa: BLE001 - shutdown path
-                        event("liveness", "expire_handler_failed",
-                              level=logging.WARNING, error=exc)
-                return
+                event("liveness", "browser_silent",
+                      idle=round(self.timeout, 1),
+                      note="不再自动退出；等前端 /client/quit 或下次启动清理")
             time.sleep(1.0)
 
 

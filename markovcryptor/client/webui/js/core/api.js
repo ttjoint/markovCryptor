@@ -12,13 +12,23 @@ import { toast } from "./dom.js";
 // 也在 100ms 内），所以 1.2 秒足够宽松；只会在"服务真的没了"时触发。
 const REQUEST_TIMEOUT = 1200;
 
+//: 需要**用户动手**的请求（原生选文件/选文件夹对话框）用这个。
+//:
+//: 1.2 秒对普通请求够，但对着一个要人点选的对话框就必然超时 ——
+//: 用户在对话框里挑目录要几秒到几十秒，前端 1.2 秒就 abort 了，
+//: 弹出的是"请求超时（后端无响应）"，而后端其实好好的、对话框就在那儿。
+//: 实测就是这样：后端心跳全程 200，界面却报超时。
+export const INTERACTIVE_TIMEOUT = 10 * 60 * 1000;
+
 export async function api(path, opts) {
   const options = Object.assign({}, opts || {});
+  const timeout = Number(options.timeout) || REQUEST_TIMEOUT;
+  delete options.timeout;
   let timer = null;
   if (typeof AbortController !== "undefined") {
     const ctrl = new AbortController();
     options.signal = ctrl.signal;
-    timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
+    timer = setTimeout(() => ctrl.abort(), timeout);
   }
   let res;
   try {

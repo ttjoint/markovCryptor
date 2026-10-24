@@ -84,6 +84,30 @@ def window_minimize(request: Request, account: Account = Depends(get_account)) -
     return JSONResponse({"ok": window_mod.minimize(hwnd)})
 
 
+@router.post("/client/focus")
+async def focus_client(request: Request) -> JSONResponse:
+    """把已经在跑的那个窗口叫到前面。
+
+    用户第二次双击 start.bat 时不该再起一份 —— SnowLuma 一台机器只有一份，
+    两份会互相踩。新进程发现旧实例还活着，就调这个接口把它的窗口提上来，
+    然后自己退出。
+    """
+    hwnd = getattr(request.app.state, "window_handle", None)
+    if not hwnd:
+        return JSONResponse({"ok": False, "reason": "no-window"})
+    try:
+        import ctypes
+        # SW_RESTORE=9：最小化过也能恢复。SetForegroundWindow 需要
+        # 前台权限，失败不算错（用户自己点一下就出来了）。
+        ctypes.windll.user32.ShowWindow(int(hwnd), 9)
+        ctypes.windll.user32.SetForegroundWindow(int(hwnd))
+    except Exception as exc:                       # noqa: BLE001 - 尽力而为
+        event("client", "focus_failed", level=logging.DEBUG, error=exc)
+        return JSONResponse({"ok": False, "reason": "focus-failed"})
+    event("client", "focused")
+    return JSONResponse({"ok": True})
+
+
 @router.post("/client/quit")
 async def quit_client(request: Request, account: Account = Depends(get_account)) -> JSONResponse:
     """用户点了退出。

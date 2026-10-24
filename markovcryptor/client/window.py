@@ -155,6 +155,38 @@ def find_window_for_pid(pid: int, *, timeout: float = 12.0) -> int | None:
     return None
 
 
+def _work_area(hwnd: int) -> tuple[int, int, int, int] | None:
+    """Window's monitor work area (excluding taskbar), in screen coords.
+
+    不直接用 GetSystemMetrics：多显示器和任务栏会让它算错。
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        ctypes, u = _user32()
+        import ctypes.wintypes as wt
+
+        MONITOR_DEFAULTTONEAREST = 2
+        monitor = u.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+        if not monitor:
+            return None
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wt.DWORD),
+                        ("rcMonitor", wt.RECT),
+                        ("rcWork", wt.RECT),
+                        ("dwFlags", wt.DWORD)]
+
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if not u.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return None
+        work = info.rcWork
+        return (work.left, work.top, work.right, work.bottom)
+    except Exception:                               # noqa: BLE001
+        return None
+
+
 def strip_frame(hwnd: int) -> bool:
     """Remove the caption and border so the app owns the whole rectangle."""
     if sys.platform != "win32" or not hwnd:
@@ -195,8 +227,38 @@ def strip_frame(hwnd: int) -> bool:
     # 曾用"窗口上移 28px 让那条落在屏幕外"绕过，结果挡到了用户的菜单栏，
     # 桌面其他程序看不全 —— 这个代价不能接受，已放弃。
     # 保留这条 Chromium 标题条是当前技术路线（系统浏览器 + --app）的固有代价。
-    u.ShowWindow(hwnd, _SW_MAXIMIZE)
-    event("window", "maximized", hwnd=hwnd)
+    # **不要 SW_MAXIMIZE。**
+    #
+    # 上面刚把窗口改成 WS_POPUP（不属于任务栏、不受窗口管理器排版）。
+    # 紧接着 MAXIMIZE 会让系统按"最大化"重算矩形，而 POPUP 窗口没有
+    # 归属显示器，算出来的位置在某些环境（虚拟机、非 100% DPI、没有完整
+    # DWM 合成）会落到屏幕外或者变成 0 尺寸 —— 用户看到的是**窗口消失了**，
+    # 但进程好好活着、后端还在端口上。这正是"前端没了、黑框还在"。
+    #
+    # 改成 RESTORE + 明确的一次 SetWindowPos 到当前显示器工作区，
+    # 位置是我们自己算的，不依赖系统对 POPUP 窗口的猜测。
+    u.ShowWindow(hwnd, _SW_RESTORE)
+
+    rect = _work_area(hwnd)
+    if rect is not None:
+        left, top, right, bottom = rect
+        u.SetWindowPos(hwnd, 0, left, top, right - left, bottom - top,
+                       _SWP_NOZORDER | _SWP_NOACTIVATE | _SWP_FRAMECHANGED)
+        event("window", "placed", hwnd=hwnd,
+              size=(right - left, bottom - top))
+
+    # 兜底：确认它真的可见，不可见就退回有边框的普通窗口。
+    # 装饰性的事情不能把窗口弄丢。
+    if not u.IsWindowVisible(hwnd):
+        event("window", "not_visible_after_strip", level=logging.WARNING,
+              hwnd=hwnd)
+        u.SetWindowLongW(hwnd, _GWL_STYLE, style)
+        u.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                       _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOZORDER
+                       | _SWP_NOACTIVATE | _SWP_FRAMECHANGED)
+        u.ShowWindow(hwnd, _SW_RESTORE)
+        return False
+
     return True
 
 

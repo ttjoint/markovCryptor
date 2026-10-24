@@ -10,6 +10,8 @@ import threading
 
 from pathlib import Path
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -141,8 +143,46 @@ async def settings_set(payload: dict, account: Account = Depends(get_account)) -
                          "queue": account.queue.stats()})
 
 
+def _watchdog(request: Request):
+    """拿看门狗，没有就返回 None（测试/无窗口环境下可能没有）。"""
+    return getattr(request.app.state, "watchdog", None)
+
+
+async def _run_picker_without_starving_the_loop(watchdog, opener):
+    """跑原生对话框，同时**别把事件循环的心跳饿死**。
+
+    **实锤闪退**：点「选择文件夹」或「上传图片」→ 对话框弹出 → 用户在里面
+    停留一会儿 → 整个程序直接消失，日志停在最后一行没有任何异常。
+
+    原因是两个问题叠在一起：
+
+    1. ``async def`` 里直接调 ``SHBrowseForFolderW``。那是**阻塞**调用，
+       事件循环被它占住，期间所有 HTTP 请求（包括前端心跳）都排不上队。
+    2. 前端心跳停了，``LivenessWatchdog`` 到 150 秒就认为"窗口关了"，
+       调 ``shutdown()`` 收掉进程 —— 用户看到的就是闪退。
+
+    所以两件事都要做：
+    * 对话框放到线程里跑（事件循环继续转，心跳照常回）
+    * 期间**解除** watchdog 武装（万一线程池也不够快，不能让它误杀）
+
+    注意 ``watchdog.disarm()`` 之后必须 ``beat()`` 重新武装：``disarm``
+    把 armed 置为 False，``beat`` 会重新设 True 并刷新时间戳。
+    """
+    if watchdog is not None:
+        watchdog.disarm()
+
+    try:
+        # ``asyncio.to_thread`` 用默认线程池，不阻塞事件循环。
+        return await asyncio.to_thread(opener)
+    finally:
+        if watchdog is not None:
+            watchdog.beat()
+
+
 @router.post("/client/settings/pick-folder")
-async def pick_folder(payload: dict, account: Account = Depends(get_account)) -> JSONResponse:
+async def pick_folder(payload: dict,
+                      account: Account = Depends(get_account),
+                      watchdog: object = Depends(_watchdog)) -> JSONResponse:
     """Open a native folder chooser on the machine running the server.
 
     Typing an absolute path into a text box is the most error-prone step for
@@ -150,14 +190,17 @@ async def pick_folder(payload: dict, account: Account = Depends(get_account)) ->
     a real dialog is both possible and much better.
     """
     title = str(payload.get("title") or "选择文件夹")
-    chosen = picker_service.pick_folder(title)
+    chosen = await _run_picker_without_starving_the_loop(
+        watchdog, lambda: picker_service.pick_folder(title))
     if chosen is None:
         return JSONResponse({"ok": False, "cancelled": True, "path": ""})
     return JSONResponse({"ok": True, "path": chosen})
 
 
 @router.post("/client/settings/pick-file")
-async def pick_file(payload: dict, account: Account = Depends(get_account)) -> JSONResponse:
+async def pick_file(payload: dict,
+                    account: Account = Depends(get_account),
+                    watchdog: object = Depends(_watchdog)) -> JSONResponse:
     """Native file chooser -- used for corpus and model files.
 
     Typing a full path by hand was the only way before, which is exactly the
@@ -165,7 +208,8 @@ async def pick_file(payload: dict, account: Account = Depends(get_account)) -> J
     """
     title = str(payload.get("title") or "选择文件")
     spec = str(payload.get("filter") or "")
-    chosen = picker_service.pick_file(title, spec)
+    chosen = await _run_picker_without_starving_the_loop(
+        watchdog, lambda: picker_service.pick_file(title, spec))
     if chosen is None:
         return JSONResponse({"ok": False, "cancelled": True, "path": ""})
     return JSONResponse({"ok": True, "path": chosen})

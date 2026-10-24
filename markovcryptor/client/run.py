@@ -18,6 +18,7 @@ import atexit
 import json
 import logging
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -182,6 +183,18 @@ def run(*, snowluma: Path | None = None, config_path: Path | None = None,
 
     owned = owned if owned is not None else OwnedProcesses()
 
+    # 已经有客户端在跑？把它的窗口叫到前面，自己退出。
+    #
+    # SnowLuma 是"一台机器一份"的资源：它 hook 住 QQ、在固定端口上提供
+    # OneBot。两个客户端各起一份的话，第二个会把第一个的杀掉，用户看到
+    # 的是"关掉一个窗口，两个都没了"。
+    existing = _running_instance()
+    if existing is not None:
+        pid, port = existing
+        _log(f"已经有客户端在运行（pid {pid}），正在打开它的窗口…")
+        _focus_existing_window(port)
+        return 0
+
     # 先收掉上次留下的孤儿：它占着 snowluma 的数据库，不收掉这次就
     # "文件被占用"。放在最前面，早于任何读配置的动作。
     _reap_previous_orphan()
@@ -292,8 +305,100 @@ def run(*, snowluma: Path | None = None, config_path: Path | None = None,
 _ORPHAN_FILE = "snowluma-child.json"
 
 
+#: 单实例锁文件。记下"当前这个客户端占着哪个端口"。
+_INSTANCE_FILE = "client-instance.json"
+
+
+def _instance_path() -> Path:
+    from . import config as config_mod
+    return config_mod.default_config_path().parent / _INSTANCE_FILE
+
+
+def _running_instance() -> tuple[int, int] | None:
+    """上一个还活着的客户端实例是谁：(pid, port)。
+
+    **为什么需要它**：SnowLuma 是"一台机器一份"的资源 —— 它 hook 住 QQ，
+    在固定端口上提供 OneBot。两个客户端实例各起一份 SnowLuma 的话，
+    第二个把第一个的杀掉，用户看到的是"关掉一个窗口，两个都没了"。
+
+    所以新实例启动时先看看有没有活着的旧实例：有就把它的窗口叫到前面，
+    自己退出。这比让两份互相踩要可靠得多。
+    """
+    try:
+        raw = _instance_path().read_text(encoding="utf-8")
+        data = json.loads(raw)
+        pid = int(data.get("pid") or 0)
+        port = int(data.get("port") or 0)
+    except Exception:                              # noqa: BLE001 - 没有就是没有
+        return None
+    if pid <= 0 or port <= 0:
+        return None
+
+    # pid 还活着、而且**确实是我们这个客户端**（pid 会被复用，必须核对）。
+    if not _pid_is_our_client(pid):
+        _clear_instance()
+        return None
+
+    # 端口也在听，才算是可用的实例。只剩尸体的话清掉记录。
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return pid, port
+    except OSError:
+        _clear_instance()
+        return None
+
+
+def _pid_is_our_client(pid: int) -> bool:
+    """这个 pid 还是不是跑着 markovcryptor.client 的 python 进程。"""
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\")"
+             ".CommandLine"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:                              # noqa: BLE001
+        return False
+    command = (completed.stdout or "").strip()
+    if not command:
+        return False
+    # 只比对 "-m markovcryptor.client.run" 这种形式：Windows 上
+    # 命令行里一定有它，路径分隔符是斜杠还是反斜杠都不影响。
+    return "markovcryptor.client.run" in command
+
+
+def _claim_instance(port: int) -> None:
+    try:
+        path = _instance_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"pid": os.getpid(), "port": int(port)}),
+                        encoding="utf-8")
+    except Exception as exc:                       # noqa: BLE001
+        event("lifecycle", "instance_claim_failed", level=logging.DEBUG,
+              error=exc)
+
+
+def _clear_instance() -> None:
+    try:
+        _instance_path().unlink(missing_ok=True)
+    except Exception:                              # noqa: BLE001
+        pass
+
+
+def _focus_existing_window(port: int) -> None:
+    """把已经在跑的那个窗口叫到前面。"""
+    try:
+        import urllib.request
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/client/focus", data=b"{}", method="POST")
+        urllib.request.urlopen(request, timeout=3)
+    except Exception as exc:                       # noqa: BLE001 - 尽力而为
+        event("lifecycle", "focus_existing_failed", level=logging.DEBUG,
+              error=exc)
+
+
 def _orphan_path() -> Path:
-    from .. import config as config_mod
+    from . import config as config_mod
     return config_mod.default_config_path().parent / _ORPHAN_FILE
 
 
@@ -423,6 +528,10 @@ def _serve(endpoint, cfg, *, config_path: Path | None, root: Path,
         raise launcher.LauncherError(
             f"找不到可用的界面端口：{exc}",
             hint="在配置里把 port 改成一个别的值，或关掉占用端口的程序。")
+
+    # 记下"这个客户端正在这个端口上"，供下一个实例发现并接管。
+    _claim_instance(port)
+    atexit.register(_clear_instance)
 
     if port != preferred:
         owner = lifecycle.port_owner_hint(preferred)
@@ -583,6 +692,29 @@ def _make_shutdown(account, network, owned) -> "callable":
     return shutdown
 
 
+def _install_crash_trace() -> None:
+    """把**硬崩溃**也记下来。
+
+    ``pythonw`` 下，Python 异常还能被 main() 兜住；但 C 层崩溃
+    （access violation、PIL/numpy 里的段错误）会让进程直接消失，日志
+    停在最后一行、什么都不留 —— 用户看到的就是"点一下闪退"。
+
+    ``faulthandler`` 能捕获这类信号并打印 Python 栈，即使在 pythonw 下
+    也能写进我们指定的文件。
+    """
+    try:
+        import faulthandler
+        path = _log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # ``keep_open=True`` 让它在整个进程生命期内保持打开。
+        handle = open(path, "a", encoding="utf-8", buffering=1)
+        faulthandler.enable(file=handle, all_threads=True)
+        # 保存引用，避免被 GC 关掉。
+        _install_crash_trace._handle = handle      # type: ignore[attr-defined]
+    except Exception:                              # noqa: BLE001 - 尽力而为
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the packaged launcher (no arguments expected).
 
@@ -590,6 +722,7 @@ def main(argv: list[str] | None = None) -> int:
     所有未捕获异常先写进日志再说 —— 否则用户只看到"启动失败（退出码 1）"，
     日志最后一行还是"客户端已启动"，完全没法查。
     """
+    _install_crash_trace()
     try:
         return _main(argv)
     except SystemExit:

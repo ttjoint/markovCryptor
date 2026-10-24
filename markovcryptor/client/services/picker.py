@@ -16,7 +16,7 @@ from pathlib import Path
 
 from ...observability import event
 
-def pick_folder(title: str) -> str | None:
+def pick_folder(title: str, owner: int | None = None) -> str | None:
     """Native folder picker, via the Win32 shell API.
 
     **Not tkinter.** tkinter must own the thread that created its root window,
@@ -28,14 +28,16 @@ def pick_folder(title: str) -> str | None:
     cancels or the platform is not Windows (the UI then lets them type a path).
     """
     try:
-        return pick_folder_win32(title)
+        return _run_with_message_pump(
+            lambda: pick_folder_win32(title, owner))
     except Exception as exc:                        # noqa: BLE001 - optional
         event("client", "folder_picker_unavailable", level=logging.WARNING,
               error=exc)
         return None
 
 
-def pick_file_win32(title: str, filter: str = "") -> str | None:
+def pick_file_win32(title: str, filter: str = "",
+                   owner: int | None = None) -> str | None:
     """``GetOpenFileNameW`` -- same pointer caveat as the folder picker."""
     import ctypes
     from ctypes import wintypes
@@ -76,7 +78,8 @@ def pick_file_win32(title: str, filter: str = "") -> str | None:
         spec = filter or "所有文件 (*.*)\0*.*\0\0"
         info = OPENFILENAMEW()
         info.lStructSize = ctypes.sizeof(OPENFILENAMEW)
-        info.hwndOwner = None
+        # 有主窗口就挂在它下面；没有（无 --app 窗口的运行方式）才留空。
+        info.hwndOwner = int(owner) if owner else None
         info.lpstrFilter = spec
         info.nFilterIndex = 1
         info.lpstrFile = ctypes.cast(buffer, wintypes.LPWSTR)
@@ -91,10 +94,11 @@ def pick_file_win32(title: str, filter: str = "") -> str | None:
         ole32.CoUninitialize()
 
 
-def pick_file(title: str, filter: str = "") -> str | None:
+def pick_file(title: str, filter: str = "", owner: int | None = None) -> str | None:
     """Native file picker. Returns None when cancelled or unavailable."""
     try:
-        return pick_file_win32(title, filter)
+        return _run_with_message_pump(
+            lambda: pick_file_win32(title, filter, owner))
     except Exception as exc:                        # noqa: BLE001 - optional
         event("client", "file_picker_unavailable", level=logging.WARNING,
               error=exc)
@@ -143,8 +147,73 @@ def _browse_info_structure():
     return _browse_info_structure._cls
 
 
-def pick_folder_win32(title: str) -> str | None:
-    """``SHBrowseForFolderW`` with a caller-supplied title."""
+def _run_with_message_pump(func, timeout: float = 600.0):
+    """在一个**自带消息泵**的 STA 线程里跑一个模态 Win32 对话框。
+
+    **这是"点了没反应、后端无响应"的真正原因。**
+
+    ``SHBrowseForFolderW`` 是模态对话框：它内部创建窗口、然后自己跑一个
+    message loop 等用户操作。但那个 loop 只处理**创建对话框的那个线程**
+    的消息。原来我们把调用放在 ``asyncio.to_thread`` 的线程池线程里 ——
+    那个线程没有消息泵，而 Windows 会把对话框的输入消息投递到**进程的
+    主线程**（uvicorn 的事件循环）。事件循环不会去 pump 它们，于是：
+
+    * 对话框画出来了（所以用户看得见）；
+    * 但点按钮没有响应（消息没人处理）；
+    * 后端也完全卡住（事件循环被挂住了）。
+
+    修法：专门起一个线程，在这个线程里
+      1. ``CoInitializeEx(COINIT_APARTMENTTHREADED)`` —— 对话框必须 STA；
+      2. 跑对话框；
+      3. 结束后 ``CoUninitialize``。
+    线程自己就是对话框的宿主，消息走它自己的队列，跟事件循环无关。
+    """
+    import queue
+    import threading
+
+    box: queue.Queue = queue.Queue(maxsize=1)
+
+    def worker() -> None:
+        import ctypes
+
+        ole32 = ctypes.windll.ole32
+        COINIT_APARTMENTTHREADED = 0x2
+        try:
+            # 明确要求 STA —— 模态 shell 对话框在 MTA 线程里行为未定义。
+            hr = ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            try:
+                box.put((True, func()))
+            finally:
+                if hr >= 0:
+                    ole32.CoUninitialize()
+        except BaseException as exc:               # noqa: BLE001
+            box.put((False, exc))
+
+    thread = threading.Thread(target=worker, name="native-dialog", daemon=True)
+    thread.start()
+    try:
+        ok, value = box.get(timeout=timeout)
+    except queue.Empty:
+        event("client", "dialog_timeout", level=logging.WARNING)
+        return None
+    if not ok:
+        raise value
+    return value
+
+
+def pick_folder_win32(title: str, owner: int | None = None) -> str | None:
+    """``SHBrowseForFolderW`` with a caller-supplied title and owner window.
+
+    **owner 很关键。** 原来这里传 ``None``，也就是对话框没有父窗口：
+
+    * 它不隶属于任何窗口，可能出现在主窗口后面、或者干脆跑出屏幕；
+    * 更糟的是它仍**阻塞**着调用它的线程，用户以为"点了没反应"，
+      过了一会儿前端超时、看门狗判定窗口已死，进程被收掉 ——
+      表现就是"点一下闪退"。
+
+    传一个有效的 hwndOwner 之后，对话框是主窗口的模态子窗口：总在前面、
+    居中、关掉主窗口时一起消失。
+    """
     import ctypes
     from ctypes import wintypes
 
@@ -169,7 +238,7 @@ def pick_folder_win32(title: str) -> str | None:
     try:
         display = ctypes.create_unicode_buffer(260)
         info = BROWSEINFOW()
-        info.hwndOwner = None
+        info.hwndOwner = int(owner) if owner else None
         info.pidlRoot = None
         info.pszDisplayName = display
         info.lpszTitle = title
